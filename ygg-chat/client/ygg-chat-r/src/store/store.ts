@@ -1,11 +1,11 @@
 // store.ts
-import { configureStore } from '@reduxjs/toolkit'
-import { chatReducer, fetchCustomTools, fetchMcpTools, fetchTools } from '../features/chats'
+import { configureStore, createListenerMiddleware } from '@reduxjs/toolkit'
+import { chatReducer, chatSliceActions, fetchCustomTools, fetchMcpTools, fetchTools } from '../features/chats'
 import { conversationsReducer } from '../features/conversations'
 import { ideContextReducer } from '../features/ideContext'
 import { default as projectsReducer } from '../features/projects/projectSlice'
 import { default as searchReducer } from '../features/search/searchSlice'
-import { uiReducer } from '../features/ui'
+import { uiActions, uiReducer } from '../features/ui'
 import { usersReducer } from '../features/users'
 import { thunkExtraArg } from './thunkExtra'
 
@@ -20,6 +20,50 @@ const rootReducer = {
   ui: uiReducer,
 }
 
+type ListenerState = {
+  chat: ReturnType<typeof chatReducer>
+  conversations: ReturnType<typeof conversationsReducer>
+}
+
+const listenerMiddleware = createListenerMiddleware()
+
+listenerMiddleware.startListening({
+  actionCreator: chatSliceActions.streamCompleted,
+  effect: (action, api) => {
+    const payload = action.payload as { streamId?: string; messageId?: string }
+    const streamId = payload?.streamId
+    const messageId = payload?.messageId
+
+    // Ignore legacy streamCompleted payloads that do not include streamId.
+    if (!streamId || messageId == null) return
+
+    const state = api.getState() as ListenerState
+    const stream = state.chat.streaming.byId[streamId]
+    if (!stream) return
+
+    // Notification requirement: when a branch stream completes.
+    if (stream.streamType !== 'branch') return
+
+    const conversationId = stream.conversationId
+    if (conversationId == null) return
+
+    const conversation = state.conversations.items.find(c => String(c.id) === String(conversationId))
+
+    api.dispatch(
+      uiActions.notificationAdded({
+        id: `branch-complete:${streamId}:${String(messageId)}`,
+        kind: 'branch_stream_completed',
+        title: conversation?.title?.trim() || 'Branch reply finished',
+        description: 'A background branch completed. Click to open it.',
+        conversationId,
+        projectId: conversation?.project_id ?? null,
+        messageId,
+        createdAt: new Date().toISOString(),
+      })
+    )
+  },
+})
+
 // Main store for the app
 export const store = configureStore({
   reducer: rootReducer,
@@ -31,7 +75,7 @@ export const store = configureStore({
       serializableCheck: {
         ignoredActions: ['persist/PERSIST', 'persist/REHYDRATE'],
       },
-    }),
+    }).prepend(listenerMiddleware.middleware),
   devTools: process.env.NODE_ENV !== 'production',
 })
 

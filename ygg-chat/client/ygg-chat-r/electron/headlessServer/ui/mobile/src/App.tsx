@@ -295,7 +295,7 @@ export const App: React.FC = () => {
     normalizeProviderName(readStorageValue(MOBILE_LAST_PROVIDER_STORAGE_KEY))
   )
   const [providerModels, setProviderModels] = useState<MobileProviderModelInfo[]>([])
-  const [modelName, setModelName] = useState('gpt-5.3-codex')
+  const [modelName, setModelName] = useState('gpt-5.4')
   const [statusText, setStatusText] = useState('Loading…')
 
   const [users, setUsers] = useState<LocalUserProfile[]>([])

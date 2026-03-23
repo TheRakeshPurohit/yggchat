@@ -5,7 +5,7 @@ from urllib import request, error
 MODEL = 'gpt-5.1-codex-mini'
 PROVIDER = 'openai'
 
-SYSTEM_PROMPT = '''You maintain a concise running root-note for a conversation.
+SYSTEM_PROMPT = '''You maintain a concise running branch note for a conversation path.
 
 Update the note only if the latest turn materially changes it.
 Keep it brief.
@@ -61,6 +61,22 @@ def _parse_model_json(text):
     return None
 
 
+def _truncate_inline(text, limit=180):
+    collapsed = ' '.join(_safe_text(text).split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: max(limit - 3, 0)] + '...'
+
+
+def _fallback_note(latest_user_text, latest_assistant_text):
+    seed = _truncate_inline(latest_user_text) or _truncate_inline(latest_assistant_text) or 'Branch updated.'
+    return '[branch note - latest turn]\n- ' + seed
+
+
+def _emit_debug(message):
+    print(json.dumps({'additionalContext': f'[root_note_stop] {message}'}))
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -80,7 +96,7 @@ def main():
         turn = payload.get('turn') or {}
 
         if not local_api_base or not conversation_id:
-            print('{}')
+            _emit_debug('skipped: missing local_api_base or conversation_id')
             return
 
         root_message_id = _safe_text(lineage.get('root_message_id'))
@@ -90,7 +106,7 @@ def main():
 
         messages = _json_request(f'{local_api_base}/app/conversations/{conversation_id}/messages')
         if not isinstance(messages, list) or not messages:
-            print('{}')
+            _emit_debug('skipped: conversation messages unavailable')
             return
 
         message_by_id = {str(m.get('id')): m for m in messages if isinstance(m, dict) and m.get('id') is not None}
@@ -101,12 +117,19 @@ def main():
             root_message = root_candidates[0] if root_candidates else None
 
         if not root_message:
-            print('{}')
+            _emit_debug('skipped: root message not found')
             return
 
         root_message_id = str(root_message.get('id'))
-        root_message_content = _safe_text(root_message.get('content'))
-        existing_note = _safe_text(root_message.get('note'))
+
+        preferred_anchor_id = last_user_message_id
+        note_anchor_message = message_by_id.get(preferred_anchor_id) if preferred_anchor_id else None
+        if note_anchor_message is None:
+            note_anchor_message = root_message
+
+        note_anchor_message_id = str(note_anchor_message.get('id'))
+        anchor_message_content = _safe_text(note_anchor_message.get('content'))
+        existing_note = _safe_text(note_anchor_message.get('note'))
 
         last_user_message = message_by_id.get(last_user_message_id) if last_user_message_id else None
         last_assistant_message = message_by_id.get(last_assistant_message_id) if last_assistant_message_id else None
@@ -115,19 +138,21 @@ def main():
         latest_assistant_text = _safe_text((last_assistant_message or {}).get('content')) or last_assistant_text
 
         if not latest_user_text and not latest_assistant_text:
-            print('{}')
+            _emit_debug(
+                f'skipped: empty latest text anchor={note_anchor_message_id} last_user={last_user_message_id or "<none>"} last_assistant={last_assistant_message_id or "<none>"}'
+            )
             return
 
         model_input = (
-            'Existing root note:\n'
+            'Existing branch note:\n'
             f'{existing_note or "<empty>"}\n\n'
-            'Root message:\n'
-            f'{root_message_content or "<empty>"}\n\n'
+            'Branch anchor message:\n'
+            f'{anchor_message_content or "<empty>"}\n\n'
             'Latest user message:\n'
             f'{latest_user_text or "<empty>"}\n\n'
             'Latest assistant message:\n'
             f'{latest_assistant_text or "<empty>"}\n\n'
-            'Update the root note only if needed. Keep it brief.'
+            'Update the branch note only if needed. Keep it brief.'
         )
 
         generation = _json_request(
@@ -145,28 +170,39 @@ def main():
         model_text = _safe_text(generation.get('text'))
         model_json = _parse_model_json(model_text)
         if not isinstance(model_json, dict):
-            print('{}')
-            return
+            raise RuntimeError('root_note_stop: model did not return valid JSON')
 
         updated = bool(model_json.get('updated'))
         next_note = _safe_text(model_json.get('note')).strip()
 
-        if not updated or not next_note or next_note == existing_note:
-            print('{}')
+        # Prefer model output whenever present.
+        # If model asks for no update but there is no note yet, create a small fallback note
+        # so new branch roots reliably get a visible pill.
+        if not next_note and not existing_note:
+            next_note = _fallback_note(latest_user_text, latest_assistant_text)
+
+        if not next_note or next_note == existing_note:
+            _emit_debug(
+                f'skipped: anchor={note_anchor_message_id} updated={updated} has_note={bool(next_note)} unchanged={next_note == existing_note}'
+            )
             return
 
         _json_request(
-            f'{local_api_base}/app/messages/{root_message_id}',
+            f'{local_api_base}/app/messages/{note_anchor_message_id}',
             method='PUT',
             payload={'note': next_note},
             timeout=20,
         )
 
-        print('{}')
-    except error.HTTPError:
-        print('{}')
-    except Exception:
-        print('{}')
+        _emit_debug(
+            f'updated: anchor={note_anchor_message_id} used_fallback={not bool(_safe_text(model_json.get("note")).strip()) and not bool(existing_note)} len={len(next_note)}'
+        )
+    except error.HTTPError as http_error:
+        raise RuntimeError(
+            f'root_note_stop HTTPError: status={getattr(http_error, "code", "?")} reason={getattr(http_error, "reason", "?")}'
+        ) from http_error
+    except Exception as exc:
+        raise RuntimeError(f'root_note_stop failed: {exc}') from exc
 
 
 if __name__ == '__main__':

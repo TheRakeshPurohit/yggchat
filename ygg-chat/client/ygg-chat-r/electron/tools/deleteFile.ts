@@ -1,6 +1,13 @@
 import fs from 'fs/promises'
 import path from 'path'
+import { isManagedToolPath } from '../utils/managedToolPaths.js'
 import { isWSLPath, resolveToWindowsPath } from '../utils/wslBridge.js'
+
+function isManagedPathException(workspacePath: string, targetPath: string, usePosix: boolean): boolean {
+  const workspaceIsManagedPath = isManagedToolPath(workspacePath, usePosix)
+  const targetIsManagedPath = isManagedToolPath(targetPath, usePosix)
+  return !workspaceIsManagedPath && targetIsManagedPath
+}
 
 /**
  * Deletes a file at the specified path
@@ -40,7 +47,8 @@ export async function deleteFile(filePath: string, operationMode?: 'plan' | 'exe
         // Both are Linux paths - compare directly using POSIX rules
         const normalizedCwd = cwd.replace(/\/$/, '')
         const normalizedPath = resolvedPath.replace(/\/$/, '')
-        if (!normalizedPath.startsWith(normalizedCwd + '/') && normalizedPath !== normalizedCwd) {
+        const outsideWorkspace = !normalizedPath.startsWith(normalizedCwd + '/') && normalizedPath !== normalizedCwd
+        if (outsideWorkspace && !isManagedPathException(normalizedCwd, normalizedPath, true)) {
           throw new Error(
             `Access denied: Path '${filePath}' is outside the workspace '${cwd}'. File operations are restricted to the workspace directory.`
           )
@@ -49,7 +57,8 @@ export async function deleteFile(filePath: string, operationMode?: 'plan' | 'exe
         // Windows or native paths - use Node's path module
         const normalizedCwd = path.resolve(cwd)
         const normalizedPath = path.resolve(resolvedPath)
-        if (!normalizedPath.startsWith(normalizedCwd + path.sep) && normalizedPath !== normalizedCwd) {
+        const outsideWorkspace = !normalizedPath.startsWith(normalizedCwd + path.sep) && normalizedPath !== normalizedCwd
+        if (outsideWorkspace && !isManagedPathException(normalizedCwd, normalizedPath, false)) {
           throw new Error(
             `Access denied: Path '${filePath}' is outside the workspace '${cwd}'. File operations are restricted to the workspace directory.`
           )
@@ -121,7 +130,8 @@ export async function safeDeleteFile(
       // Both are Linux paths - compare directly using POSIX rules
       const normalizedCwd = cwd.replace(/\/$/, '')
       const normalizedPath = resolvedPath.replace(/\/$/, '')
-      if (!normalizedPath.startsWith(normalizedCwd + '/') && normalizedPath !== normalizedCwd) {
+      const outsideWorkspace = !normalizedPath.startsWith(normalizedCwd + '/') && normalizedPath !== normalizedCwd
+      if (outsideWorkspace && !isManagedPathException(normalizedCwd, normalizedPath, true)) {
         throw new Error(
           `Access denied: Path '${filePath}' is outside the workspace '${cwd}'. File operations are restricted to the workspace directory.`
         )
@@ -130,7 +140,8 @@ export async function safeDeleteFile(
       // Windows or native paths - use Node's path module
       const normalizedCwd = path.resolve(cwd)
       const normalizedPath = path.resolve(resolvedPath)
-      if (!normalizedPath.startsWith(normalizedCwd + path.sep) && normalizedPath !== normalizedCwd) {
+      const outsideWorkspace = !normalizedPath.startsWith(normalizedCwd + path.sep) && normalizedPath !== normalizedCwd
+      if (outsideWorkspace && !isManagedPathException(normalizedCwd, normalizedPath, false)) {
         throw new Error(
           `Access denied: Path '${filePath}' is outside the workspace '${cwd}'. File operations are restricted to the workspace directory.`
         )

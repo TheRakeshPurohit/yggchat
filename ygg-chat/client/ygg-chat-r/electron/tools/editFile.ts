@@ -1,6 +1,7 @@
 import * as crypto from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
+import { isManagedToolPath } from '../utils/managedToolPaths.js'
 import { isWSLPath, resolveToWindowsPath } from '../utils/wslBridge.js'
 import { FileMetadata, readTextFile } from './readFile.js'
 
@@ -94,6 +95,12 @@ function resolveEscapeHandling(options: EditFileOptions) {
   }
 }
 
+function isManagedPathException(workspacePath: string, targetPath: string, usePosix: boolean): boolean {
+  const workspaceIsManagedPath = isManagedToolPath(workspacePath, usePosix)
+  const targetIsManagedPath = isManagedToolPath(targetPath, usePosix)
+  return !workspaceIsManagedPath && targetIsManagedPath
+}
+
 /**
  * Edit a file using simple search and replace operations.
  * Much faster and more context-efficient than AST-based editing.
@@ -146,7 +153,8 @@ export async function editFileSearchReplace(
         // Both are Linux paths - compare directly using POSIX rules
         const normalizedCwd = options.cwd.replace(/\/$/, '')
         const normalizedPath = fsPath.replace(/\/$/, '')
-        if (!normalizedPath.startsWith(normalizedCwd + '/') && normalizedPath !== normalizedCwd) {
+        const outsideWorkspace = !normalizedPath.startsWith(normalizedCwd + '/') && normalizedPath !== normalizedCwd
+        if (outsideWorkspace && !isManagedPathException(normalizedCwd, normalizedPath, true)) {
           return {
             success: false,
             sizeBytes: 0,
@@ -159,7 +167,8 @@ export async function editFileSearchReplace(
         const normalizedCwd = path.resolve(options.cwd)
         const normalizedPath = path.resolve(fsPath)
         const rel = path.relative(normalizedCwd, normalizedPath)
-        if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        const outsideWorkspace = rel.startsWith('..') || path.isAbsolute(rel)
+        if (outsideWorkspace && !isManagedPathException(normalizedCwd, normalizedPath, false)) {
           return {
             success: false,
             sizeBytes: 0,
@@ -348,7 +357,8 @@ export async function editFileSearchReplaceFirst(
         // Both are Linux paths - compare directly using POSIX rules
         const normalizedCwd = options.cwd.replace(/\/$/, '')
         const normalizedPath = fsPath.replace(/\/$/, '')
-        if (!normalizedPath.startsWith(normalizedCwd + '/') && normalizedPath !== normalizedCwd) {
+        const outsideWorkspace = !normalizedPath.startsWith(normalizedCwd + '/') && normalizedPath !== normalizedCwd
+        if (outsideWorkspace && !isManagedPathException(normalizedCwd, normalizedPath, true)) {
           return {
             success: false,
             sizeBytes: 0,
@@ -361,7 +371,8 @@ export async function editFileSearchReplaceFirst(
         const normalizedCwd = path.resolve(options.cwd)
         const normalizedPath = path.resolve(fsPath)
         const rel = path.relative(normalizedCwd, normalizedPath)
-        if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        const outsideWorkspace = rel.startsWith('..') || path.isAbsolute(rel)
+        if (outsideWorkspace && !isManagedPathException(normalizedCwd, normalizedPath, false)) {
           return {
             success: false,
             sizeBytes: 0,
@@ -511,7 +522,8 @@ export async function appendToFile(
         // Both are Linux paths - compare directly using POSIX rules
         const normalizedCwd = options.cwd.replace(/\/$/, '')
         const normalizedPath = fsPath.replace(/\/$/, '')
-        if (!normalizedPath.startsWith(normalizedCwd + '/') && normalizedPath !== normalizedCwd) {
+        const outsideWorkspace = !normalizedPath.startsWith(normalizedCwd + '/') && normalizedPath !== normalizedCwd
+        if (outsideWorkspace && !isManagedPathException(normalizedCwd, normalizedPath, true)) {
           return {
             success: false,
             sizeBytes: 0,
@@ -524,7 +536,8 @@ export async function appendToFile(
         const normalizedCwd = path.resolve(options.cwd)
         const normalizedPath = path.resolve(fsPath)
         const rel = path.relative(normalizedCwd, normalizedPath)
-        if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        const outsideWorkspace = rel.startsWith('..') || path.isAbsolute(rel)
+        if (outsideWorkspace && !isManagedPathException(normalizedCwd, normalizedPath, false)) {
           return {
             success: false,
             sizeBytes: 0,

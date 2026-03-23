@@ -683,6 +683,7 @@ export interface TopLevelUserMessagePreview {
   content: string
   plain_text_content: string | null
   note: string | null
+  note_color?: string | null
   created_at: string
 }
 
@@ -981,7 +982,7 @@ export function useModels(provider: string | null) {
       // OpenAI ChatGPT - local models (uses user's ChatGPT Plus/Pro subscription)
       if (normalizedSlug === 'openai(chatgpt)' || normalizedSlug === 'openaichatgpt') {
         const models = getOpenAIChatGPTModels() as Model[]
-        const defaultModel = models[0] || stringToModel('gpt-5.3-codex')
+        const defaultModel = models[0] || stringToModel('gpt-5.4')
 
         const storedSelection = getStoredSelectedModel()
         const selectedModel = storedSelection
@@ -1758,6 +1759,146 @@ export function useFilteredModels(provider: string | null) {
     clearFilters,
     applySorting,
     refreshFavorites: () => setFavoritedModels(getFavoritedModels()),
+  }
+}
+
+export interface TopLevelUserMessageSearchHit {
+  conversation_id: ConversationId
+  project_id: ProjectId | null
+  storage_mode: 'cloud' | 'local'
+  conversation_title: string | null
+  message_id: string
+  message_created_at: string
+  conversation_updated_at: string | null
+  content: string
+  note: string | null
+  match_type: 'fts' | 'fuzzy' | 'fallback'
+  score: number
+}
+
+/**
+ * Search top-level user messages across conversations.
+ * Electron: Uses local SQLite endpoint with FTS-first + fuzzy fallback.
+ * Web: Falls back to existing cloud conversation search endpoint shape.
+ */
+export function useSearchTopLevelUserMessages(
+  projectId?: string | null,
+  options?: {
+    forceServerSearch?: boolean
+  }
+) {
+  const { accessToken, userId } = useAuth()
+  const shouldSearchServer = options?.forceServerSearch ?? true
+  const [searchResults, setSearchResults] = useState<TopLevelUserMessageSearchHit[]>([])
+  const [isSearching, setIsSearching] = useState(false)
+  const [searchedFromServer, setSearchedFromServer] = useState(false)
+
+  const searchServer = useCallback(
+    async (query: string): Promise<TopLevelUserMessageSearchHit[]> => {
+      if (!query.trim()) return []
+
+      if (environment === 'electron') {
+        if (!userId) {
+          console.warn('[useSearchTopLevelUserMessages] No userId available, skipping local search')
+          return []
+        }
+
+        const params = new URLSearchParams({ q: query, limit: '20', userId })
+        if (projectId) {
+          params.set('projectId', projectId)
+        }
+
+        try {
+          const results = await localApi.get<TopLevelUserMessageSearchHit[]>(
+            `/app/conversations/search/top-level-users?${params.toString()}`
+          )
+          return results || []
+        } catch (error) {
+          console.error('Local top-level user message search failed:', error)
+          return []
+        }
+      }
+
+      if (!accessToken) {
+        console.warn('[useSearchTopLevelUserMessages] No accessToken available, skipping server search')
+        return []
+      }
+
+      const params = new URLSearchParams({ q: query, limit: '20' })
+      const endpoint = projectId
+        ? `/search/project?${params.toString()}&projectId=${projectId}`
+        : `/search?${params.toString()}`
+
+      try {
+        const conversations = await api.get<Conversation[]>(endpoint, accessToken)
+        const nowIso = new Date().toISOString()
+
+        return (conversations || []).map(conversation => ({
+          conversation_id: conversation.id,
+          project_id: conversation.project_id || null,
+          storage_mode: conversation.storage_mode === 'local' ? 'local' : 'cloud',
+          conversation_title: conversation.title || null,
+          message_id: String(conversation.id),
+          message_created_at: conversation.updated_at || conversation.created_at || nowIso,
+          conversation_updated_at: conversation.updated_at || conversation.created_at || null,
+          content: conversation.title
+            ? `Title match: ${conversation.title}`
+            : 'Conversation title match (message-level search unavailable on this backend)',
+          note: null,
+          match_type: 'fallback',
+          score: 0,
+        }))
+      } catch (error) {
+        console.error('Top-level user message server fallback search failed:', error)
+        return []
+      }
+    },
+    [accessToken, projectId, userId]
+  )
+
+  const search = useCallback(
+    async (query: string) => {
+      const trimmed = query.trim()
+      if (!trimmed) {
+        setSearchResults([])
+        setSearchedFromServer(false)
+        return
+      }
+
+      if (!shouldSearchServer) {
+        setSearchResults([])
+        setSearchedFromServer(false)
+        return
+      }
+
+      setIsSearching(true)
+
+      try {
+        const serverResults = await searchServer(trimmed)
+        setSearchResults(serverResults)
+        setSearchedFromServer(true)
+      } catch (error) {
+        console.error('Top-level user message search failed:', error)
+        setSearchResults([])
+        setSearchedFromServer(false)
+      } finally {
+        setIsSearching(false)
+      }
+    },
+    [searchServer, shouldSearchServer]
+  )
+
+  const clearSearch = useCallback(() => {
+    setSearchResults([])
+    setSearchedFromServer(false)
+  }, [])
+
+  return {
+    search,
+    clearSearch,
+    searchResults,
+    isSearching,
+    searchedFromServer,
   }
 }
 

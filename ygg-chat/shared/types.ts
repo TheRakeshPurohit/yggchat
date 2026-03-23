@@ -61,6 +61,7 @@ export interface BaseMessage {
   has_attachments?: boolean
   attachments_count?: number
   note?: string
+  note_color?: string | null
   // External agent fields (for Claude Code, etc.)
   ex_agent_session_id?: string | null
   ex_agent_type?: string | null

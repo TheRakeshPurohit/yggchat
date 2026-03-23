@@ -3,7 +3,7 @@ import 'boxicons'
 import 'boxicons/css/boxicons.min.css'
 import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Project, ProjectWithLatestConversation } from '../../../../shared/types'
+import { ProjectWithLatestConversation } from '../../../../shared/types'
 import { Button } from '../components'
 import { useHtmlIframeRegistry } from '../components/HtmlIframeRegistry/HtmlIframeRegistry'
 import { LowBar } from '../components/LowBar/LowBar'
@@ -142,25 +142,6 @@ const Homepage: React.FC = () => {
     navigate(`/conversationPage?projectId=${project.id}`)
   }
 
-  const handleProjectCreated = (project: Project) => {
-    // Optimistically update React Query cache to avoid refetch (scales better)
-    queryClient.setQueryData(['projects', userId], (old: ProjectWithLatestConversation[] | undefined) => {
-      // Convert Project to ProjectWithLatestConversation by adding the required field
-      const projectWithLatest: ProjectWithLatestConversation = {
-        ...project,
-        latest_conversation_updated_at: null,
-      }
-      return old ? [projectWithLatest, ...old] : [projectWithLatest]
-    })
-
-    // Navigate to the newly created project
-    const projectWithLatest: ProjectWithLatestConversation = {
-      ...project,
-      latest_conversation_updated_at: null,
-    }
-    handleSelectProject(projectWithLatest)
-  }
-
   const handleDeleteProject = (project: ProjectWithLatestConversation) => {
     setProjectToDelete(project)
     setShowDeleteConfirm(true)
@@ -194,11 +175,6 @@ const Homepage: React.FC = () => {
 
   const handleEditProject = (project: ProjectWithLatestConversation) => {
     setEditingProject(project)
-    setShowEditModal(true)
-  }
-
-  const handleCreateProject = () => {
-    setEditingProject(null)
     setShowEditModal(true)
   }
 
@@ -316,22 +292,8 @@ const Homepage: React.FC = () => {
             </div>
           </div>
 
-          {/* New Project Button + Sort Controls + Search */}
-          <div className='mb-0 z-5000 flex p-2 flex-wrap justify-between items-center gap-3 outline-2 dark:outline-neutral-300/12 outline-neutral-50/10 acrylic-ultra-light rounded-4xl shadow-[0px_2px_7px_2.5px_rgba(0,0,0,0.10)] dark:shadow-[0px_0px_16px_-2px_rgba(0,0,0,0.45)] 2xl:p-3'>
-            <div className='flex items-center gap-1'>
-              <Button
-                variant='acrylic'
-                size='large'
-                rounded='full'
-                onClick={handleCreateProject}
-                className='group dark:outline-2 rounded-4xl dark:hover:bg-transparent transition-all hover:scale-98 duration-200 shadow-[0px_0px_3px_1px_rgba(0,0,0,0.05)]  dark:shadow-[0px_0px_16px_2px_rgba(0,0,0,0.45)] '
-              >
-                <p className='text-neutral-800 dark:text-neutral-200 hover:text-neutral-800 dark:hover:text-neutral-50'>
-                  New Project
-                </p>
-              </Button>
-            </div>
-
+          {/* Sort Controls */}
+          <div className='mb-0 z-5000 flex p-2 flex-wrap justify-end items-center gap-3 outline-2 dark:outline-neutral-300/12 outline-neutral-50/10 acrylic-ultra-light rounded-4xl shadow-[0px_2px_7px_2.5px_rgba(0,0,0,0.10)] dark:shadow-[0px_0px_16px_-2px_rgba(0,0,0,0.45)] 2xl:p-3'>
             <div className='flex items-center gap-2'>
               {/* Storage Filter (only show in Electron mode) */}
               {isElectronMode && (
@@ -527,7 +489,6 @@ const Homepage: React.FC = () => {
         isOpen={showEditModal}
         onClose={handleCloseModal}
         editingProject={editingProject}
-        onProjectCreated={handleProjectCreated}
       />
 
       {/* Delete Project Confirmation Dialog */}

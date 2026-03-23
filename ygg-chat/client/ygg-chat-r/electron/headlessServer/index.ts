@@ -4,6 +4,7 @@ import { mcpManager } from '../mcp/mcpManager.js'
 import { customToolRegistry } from '../tools/customToolLoader.js'
 import { toolOrchestrator } from '../tools/orchestrator/index.js'
 import { BUILTIN_TOOL_DEFINITIONS } from '../../../../shared/builtinToolDefinitions.js'
+import { syncOpenRouterTokenFromElectronSession } from './providers/electronAppAuth.js'
 import { ProviderTokenStore } from './providers/tokenStore.js'
 import { registerCapabilityRoutes } from './routes/capabilityRoutes.js'
 import { registerChatRoutes } from './routes/chatRoutes.js'
@@ -13,8 +14,10 @@ import { registerMobileUiRoutes } from './routes/mobileUiRoutes.js'
 import { registerCustomToolsRoutes } from './routes/customToolsRoutes.js'
 import { registerCustomToolRpcRoutes } from './routes/customToolRpcRoutes.js'
 import { registerEphemeralGenerateRoutes } from './routes/ephemeralGenerateRoutes.js'
+import { registerSubagentRoutes } from './routes/subagentRoutes.js'
 import { registerTestHarnessRoutes } from './routes/testHarnessRoutes.js'
 import { ChatOrchestrator } from './services/chatOrchestrator.js'
+import { SubagentOrchestrator } from './services/subagentOrchestrator.js'
 import type { ToolExecutor } from './services/toolLoopService.js'
 
 interface HeadlessServerRouteDeps {
@@ -35,6 +38,7 @@ const HEADLESS_RUNTIME_BUILTIN_TOOL_NAMES = new Set([
   'directory',
   'glob',
   'ripgrep',
+  'brave_search',
   'browse_web',
   'bash',
   'html_renderer',
@@ -109,6 +113,10 @@ const resolveDefaultInferenceTools = (): InferenceToolDefinition[] => {
   return dedupeToolsByName(tools)
 }
 
+function bootstrapHeadlessProviderTokens(tokenStore: ProviderTokenStore): void {
+  syncOpenRouterTokenFromElectronSession(tokenStore)
+}
+
 const sleep = (ms: number): Promise<void> =>
   new Promise(resolve => {
     setTimeout(resolve, ms)
@@ -165,6 +173,7 @@ const executeToolViaOrchestrator: ToolExecutor = async (toolCall, context) => {
 
 export function registerHeadlessServerRoutes(app: Express, deps: HeadlessServerRouteDeps): void {
   const tokenStore = new ProviderTokenStore(deps.db)
+  bootstrapHeadlessProviderTokens(tokenStore)
 
   registerCrudRoutes(app, deps)
   registerProviderAuthRoutes(app, { tokenStore })
@@ -173,6 +182,13 @@ export function registerHeadlessServerRoutes(app: Express, deps: HeadlessServerR
   registerCustomToolRpcRoutes(app)
   registerCapabilityRoutes(app, { getDefaultTools: resolveDefaultInferenceTools })
   registerEphemeralGenerateRoutes(app, { tokenStore })
+  registerSubagentRoutes(app, {
+    orchestrator: new SubagentOrchestrator({
+      ...deps,
+      tokenStore,
+      toolExecutor: executeToolViaOrchestrator,
+    }),
+  })
   registerTestHarnessRoutes(app, {
     getDefaultTools: resolveDefaultInferenceTools,
   })

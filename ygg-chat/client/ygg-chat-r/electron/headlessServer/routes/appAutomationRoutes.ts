@@ -60,6 +60,305 @@ function buildMessageTree(messages: any[]): ChatNode | null {
   }
 }
 
+type TopLevelMessageSearchCandidate = {
+  message_id: string
+  conversation_id: string
+  project_id: string | null
+  storage_mode: 'cloud' | 'local'
+  conversation_title: string | null
+  conversation_updated_at: string | null
+  message_created_at: string
+  message_content: string
+  message_plain_text_content: string | null
+  message_note: string | null
+  relevance: number
+  match_type: 'fts' | 'fuzzy'
+}
+
+const TOP_LEVEL_MESSAGE_SEARCH_FTS_CANDIDATE_LIMIT = 220
+const TOP_LEVEL_MESSAGE_SEARCH_FUZZY_CANDIDATE_LIMIT = 900
+
+const normalizeSearchText = (value: string) => value.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+
+const splitSearchTokens = (value: string) => {
+  const normalized = normalizeSearchText(value)
+  if (!normalized) return []
+  return Array.from(new Set(normalized.split(' ').filter(Boolean))).slice(0, 8)
+}
+
+const buildStrictFtsQuery = (tokens: string[]) => {
+  if (tokens.length === 0) return ''
+  return tokens.map(token => `"${token}"`).join(' AND ')
+}
+
+const buildRelaxedFtsQuery = (tokens: string[]) => {
+  if (tokens.length === 0) return ''
+  return tokens.map(token => `"${token}"*`).join(' OR ')
+}
+
+const levenshteinDistance = (a: string, b: string): number => {
+  if (!a.length) return b.length
+  if (!b.length) return a.length
+
+  const matrix: number[][] = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0))
+  for (let i = 0; i <= a.length; i += 1) matrix[i][0] = i
+  for (let j = 0; j <= b.length; j += 1) matrix[0][j] = j
+
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      matrix[i][j] = Math.min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j - 1] + cost)
+    }
+  }
+
+  return matrix[a.length][b.length]
+}
+
+const bestTokenSimilarity = (queryToken: string, candidateTokens: string[]): number => {
+  let best = 0
+
+  for (const candidateToken of candidateTokens) {
+    if (candidateToken === queryToken) return 1
+
+    if (candidateToken.includes(queryToken) || queryToken.includes(candidateToken)) {
+      best = Math.max(best, 0.92)
+      continue
+    }
+
+    const maxLength = Math.max(queryToken.length, candidateToken.length)
+    if (!maxLength) continue
+    const distance = levenshteinDistance(queryToken, candidateToken)
+    const similarity = 1 - distance / maxLength
+    if (similarity > best) best = similarity
+  }
+
+  return best
+}
+
+const calculateFuzzyRelevance = (query: string, messageText: string, note: string | null): number => {
+  const normalizedQuery = normalizeSearchText(query)
+  if (!normalizedQuery) return 0
+
+  const combinedText = `${note || ''} ${messageText || ''}`
+  const normalizedText = normalizeSearchText(combinedText)
+  if (!normalizedText) return 0
+
+  if (normalizedText.includes(normalizedQuery)) {
+    return 1.2
+  }
+
+  const queryTokens = splitSearchTokens(query)
+  if (queryTokens.length === 0) return 0
+
+  const candidateTokens = Array.from(new Set(normalizedText.split(' ').filter(Boolean))).slice(0, 120)
+  if (candidateTokens.length === 0) return 0
+
+  let total = 0
+  for (const queryToken of queryTokens) {
+    total += bestTokenSimilarity(queryToken, candidateTokens)
+  }
+
+  const averageSimilarity = total / queryTokens.length
+  const shortQueryBoost = normalizedQuery.length <= 5 ? 0.94 : 1
+  return averageSimilarity * shortQueryBoost
+}
+
+const buildMessageSnippet = (rawText: string, rawQuery: string, maxLength: number = 220): string => {
+  const text = (rawText || '').replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  if (text.length <= maxLength) return text
+
+  const lowerText = text.toLowerCase()
+  const lowerQuery = rawQuery.toLowerCase().trim()
+  const matchIndex = lowerQuery ? lowerText.indexOf(lowerQuery) : -1
+
+  if (matchIndex === -1) {
+    return `${text.slice(0, maxLength).trim()}…`
+  }
+
+  const halfWindow = Math.floor(maxLength / 2)
+  const start = Math.max(0, matchIndex - halfWindow)
+  const end = Math.min(text.length, start + maxLength)
+  const prefix = start > 0 ? '…' : ''
+  const suffix = end < text.length ? '…' : ''
+  return `${prefix}${text.slice(start, end).trim()}${suffix}`
+}
+
+function searchTopLevelUserMessages(db: Database.Database, params: {
+  userId: string
+  query: string
+  projectId?: string
+  limit: number
+}) {
+  const { userId, query, projectId, limit } = params
+  const trimmedQuery = query.trim()
+  const queryTokens = splitSearchTokens(trimmedQuery)
+  const normalizedQuery = normalizeSearchText(trimmedQuery)
+
+  const candidateMap = new Map<string, TopLevelMessageSearchCandidate>()
+  const scopeClause = projectId ? ' AND c.project_id = ?' : ''
+  const scopeParams = projectId ? [userId, projectId] : [userId]
+
+  const pushCandidate = (candidate: TopLevelMessageSearchCandidate) => {
+    const existing = candidateMap.get(candidate.message_id)
+    if (!existing || candidate.relevance > existing.relevance) {
+      candidateMap.set(candidate.message_id, candidate)
+    }
+  }
+
+  const tryRunFts = (ftsQuery: string) => {
+    if (!ftsQuery) return
+
+    const ftsRows = db
+      .prepare(
+        `
+        SELECT
+          m.id AS message_id,
+          m.conversation_id AS conversation_id,
+          c.project_id AS project_id,
+          c.storage_mode AS storage_mode,
+          c.title AS conversation_title,
+          c.updated_at AS conversation_updated_at,
+          m.created_at AS message_created_at,
+          m.content AS message_content,
+          m.plain_text_content AS message_plain_text_content,
+          m.note AS message_note,
+          bm25(top_level_user_message_search) AS fts_rank
+        FROM top_level_user_message_search
+        INNER JOIN messages m ON m.id = top_level_user_message_search.message_id
+        INNER JOIN conversations c ON c.id = m.conversation_id
+        WHERE top_level_user_message_search MATCH ?
+          AND c.user_id = ?
+          ${scopeClause}
+        ORDER BY fts_rank ASC, datetime(COALESCE(c.updated_at, c.created_at)) DESC, datetime(m.created_at) DESC
+        LIMIT ?
+      `
+      )
+      .all(ftsQuery, ...scopeParams, TOP_LEVEL_MESSAGE_SEARCH_FTS_CANDIDATE_LIMIT) as Array<any>
+
+    for (const row of ftsRows) {
+      const messageText = row.message_plain_text_content || row.message_content || ''
+      const normalizedText = normalizeSearchText(`${row.message_note || ''} ${messageText}`)
+      const rank = Number.isFinite(Number(row.fts_rank)) ? Math.max(Number(row.fts_rank), 0) : 10
+      const rankBoost = 1 / (1 + rank)
+      const containsBoost = normalizedQuery && normalizedText.includes(normalizedQuery) ? 0.25 : 0
+
+      pushCandidate({
+        message_id: String(row.message_id),
+        conversation_id: String(row.conversation_id),
+        project_id: row.project_id || null,
+        storage_mode: row.storage_mode === 'cloud' ? 'cloud' : 'local',
+        conversation_title: row.conversation_title || null,
+        conversation_updated_at: row.conversation_updated_at || null,
+        message_created_at: row.message_created_at,
+        message_content: row.message_content || '',
+        message_plain_text_content: row.message_plain_text_content || null,
+        message_note: row.message_note || null,
+        match_type: 'fts',
+        relevance: 2 + rankBoost + containsBoost,
+      })
+    }
+  }
+
+  if (queryTokens.length > 0) {
+    try {
+      tryRunFts(buildStrictFtsQuery(queryTokens))
+    } catch {
+      // FTS5 may be unavailable in some SQLite builds; fuzzy fallback still works.
+    }
+
+    if (candidateMap.size < limit) {
+      try {
+        tryRunFts(buildRelaxedFtsQuery(queryTokens))
+      } catch {
+        // FTS5 may be unavailable in some SQLite builds; fuzzy fallback still works.
+      }
+    }
+  }
+
+  if (candidateMap.size < limit) {
+    const recentRows = db
+      .prepare(
+        `
+        SELECT
+          m.id AS message_id,
+          m.conversation_id AS conversation_id,
+          c.project_id AS project_id,
+          c.storage_mode AS storage_mode,
+          c.title AS conversation_title,
+          c.updated_at AS conversation_updated_at,
+          m.created_at AS message_created_at,
+          m.content AS message_content,
+          m.plain_text_content AS message_plain_text_content,
+          m.note AS message_note
+        FROM messages m
+        INNER JOIN conversations c ON c.id = m.conversation_id
+        WHERE c.user_id = ?
+          ${scopeClause}
+          AND m.parent_id IS NULL
+          AND m.role = 'user'
+        ORDER BY datetime(COALESCE(c.updated_at, c.created_at)) DESC, datetime(m.created_at) DESC
+        LIMIT ?
+      `
+      )
+      .all(...scopeParams, TOP_LEVEL_MESSAGE_SEARCH_FUZZY_CANDIDATE_LIMIT) as Array<any>
+
+    const fuzzyThreshold = normalizedQuery.length <= 5 ? 0.78 : 0.64
+
+    for (const row of recentRows) {
+      const messageId = String(row.message_id)
+      if (candidateMap.has(messageId)) continue
+
+      const messageText = row.message_plain_text_content || row.message_content || ''
+      const fuzzyRelevance = calculateFuzzyRelevance(trimmedQuery, messageText, row.message_note || null)
+      if (fuzzyRelevance < fuzzyThreshold) continue
+
+      pushCandidate({
+        message_id: messageId,
+        conversation_id: String(row.conversation_id),
+        project_id: row.project_id || null,
+        storage_mode: row.storage_mode === 'cloud' ? 'cloud' : 'local',
+        conversation_title: row.conversation_title || null,
+        conversation_updated_at: row.conversation_updated_at || null,
+        message_created_at: row.message_created_at,
+        message_content: row.message_content || '',
+        message_plain_text_content: row.message_plain_text_content || null,
+        message_note: row.message_note || null,
+        match_type: 'fuzzy',
+        relevance: fuzzyRelevance,
+      })
+    }
+  }
+
+  return Array.from(candidateMap.values())
+    .sort((a, b) => {
+      if (b.relevance !== a.relevance) return b.relevance - a.relevance
+      const aConversationTime = new Date(a.conversation_updated_at || a.message_created_at).getTime()
+      const bConversationTime = new Date(b.conversation_updated_at || b.message_created_at).getTime()
+      if (bConversationTime !== aConversationTime) return bConversationTime - aConversationTime
+      const aMessageTime = new Date(a.message_created_at).getTime()
+      const bMessageTime = new Date(b.message_created_at).getTime()
+      return bMessageTime - aMessageTime
+    })
+    .slice(0, limit)
+    .map(candidate => {
+      const messageText = candidate.message_plain_text_content || candidate.message_content || ''
+      return {
+        conversation_id: candidate.conversation_id,
+        project_id: candidate.project_id,
+        storage_mode: candidate.storage_mode,
+        conversation_title: candidate.conversation_title,
+        message_id: candidate.message_id,
+        message_created_at: candidate.message_created_at,
+        conversation_updated_at: candidate.conversation_updated_at,
+        content: buildMessageSnippet(messageText, trimmedQuery),
+        note: candidate.message_note,
+        match_type: candidate.match_type,
+        score: Number(candidate.relevance.toFixed(6)),
+      }
+    })
+}
+
 export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRouteDeps): void {
   const { db, statements } = deps
 
@@ -270,6 +569,37 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
     } catch (error) {
       console.error('[HeadlessServer] Error searching app conversations:', error)
       res.status(500).json({ error: 'Failed to search conversations' })
+    }
+  })
+
+  app.get('/api/app/conversations/search/top-level-users', (req, res) => {
+    try {
+      const userId = (req.query.userId as string) || (req.query.user_id as string) || ''
+      const rawQuery = (req.query.q as string) || ''
+      const projectId = (req.query.projectId as string) || (req.query.project_id as string) || undefined
+      const rawLimit = Number(req.query.limit ?? 20)
+      const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 20, 1), 50)
+
+      if (!userId) {
+        res.status(400).json({ error: 'userId required' })
+        return
+      }
+      if (!rawQuery.trim()) {
+        res.status(400).json({ error: 'q required' })
+        return
+      }
+
+      const results = searchTopLevelUserMessages(db, {
+        userId,
+        query: rawQuery,
+        projectId,
+        limit,
+      })
+
+      res.json(results)
+    } catch (error) {
+      console.error('[HeadlessServer] Error searching top-level app user messages:', error)
+      res.status(500).json({ error: 'Failed to search top-level user messages' })
     }
   })
 
@@ -514,6 +844,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
           model_name?: string
           tool_calls?: string | any[]
           note?: string
+          note_color?: string | null
           content_blocks?: any
         }>
       }
@@ -552,6 +883,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
           null,
           msg.model_name || 'unknown',
           msg.note || null,
+          msg.note_color || null,
           null,
           null,
           msg.content_blocks
@@ -574,6 +906,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
           tool_calls: msg.tool_calls || null,
           model_name: msg.model_name || 'unknown',
           note: msg.note || null,
+          note_color: msg.note_color || null,
           content_blocks: msg.content_blocks || null,
           created_at: now,
         })
@@ -650,6 +983,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
         null,
         null,
         null,
+        null,
         JSON.stringify(content_blocks || null),
         now
       )
@@ -682,7 +1016,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
   const updateMessageHandler = (req: any, res: any) => {
     try {
       const { id } = req.params
-      const { content, note, content_blocks } = req.body
+      const { content, note, note_color, content_blocks } = req.body
 
       const existing = statements.getMessageById.get(id) as any
       if (!existing) {
@@ -699,9 +1033,10 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
       const contentBlocksJson = content_blocks ? JSON.stringify(content_blocks) : null
 
       statements.updateMessage.run(
-        finalContent || existing.content,
-        note || existing.note,
-        contentBlocksJson || existing.content_blocks,
+        finalContent ?? existing.content,
+        note !== undefined ? note : existing.note,
+        note_color !== undefined ? note_color : existing.note_color,
+        contentBlocksJson ?? existing.content_blocks,
         id
       )
 
@@ -741,6 +1076,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
         JSON.stringify(null),
         null,
         'unknown',
+        null,
         null,
         null,
         null,

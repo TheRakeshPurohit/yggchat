@@ -368,7 +368,7 @@ export const TEST_HARNESS_CLIENT_JS = `;(function () {
     var userId = ui.userId ? ui.userId.value.trim() : ''
     if (!userId) throw new Error('User ID is required')
 
-    var modelName = (ui.model && ui.model.value) || 'gpt-5.1-codex-mini'
+    var modelName = (ui.model && ui.model.value) || 'gpt-5.4'
     var mode = (ui.sendMode && ui.sendMode.value) || 'provider'
     var selectedTools = getSelectedTools()
 
@@ -473,7 +473,7 @@ export const TEST_HARNESS_CLIENT_JS = `;(function () {
     resetSession: resetSession,
   }
 
-  if (ui.model) ui.model.value = 'gpt-5.1-codex-mini'
+  if (ui.model) ui.model.value = 'gpt-5.4'
   if (ui.sendMode) ui.sendMode.value = 'provider'
   addMessage('sys', 'Ready. 1) Connect OAuth 2) Pick tools 3) Choose mode (provider/orchestrator) 4) Send.')
   loadTools().catch(function (error) {

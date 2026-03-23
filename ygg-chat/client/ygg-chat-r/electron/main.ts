@@ -6,6 +6,12 @@ import os from 'os'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import './envLoader.js'
+import {
+  deleteBraveApiKey,
+  getBraveApiKey,
+  hasBraveApiKey,
+  setBraveApiKey,
+} from './keytarSecrets.js'
 import { ensureManagedHooksInitialized } from './hooks/hookStorage.js'
 import { startLocalServer, stopLocalServer } from './localServer.js'
 import { ensureManagedThemesInitialized } from './tools/themeManager.js'
@@ -832,6 +838,46 @@ ipcMain.handle('storage:clear', async () => {
   } catch (error) {
     console.error('[Electron IPC] Failed to clear storage:', error)
     return { success: false, error: String(error) }
+  }
+})
+
+ipcMain.handle('secrets:braveSearch:get', async () => {
+  try {
+    const value = await getBraveApiKey()
+    return { success: true, value }
+  } catch (error) {
+    console.error('[Electron IPC] Failed to get Brave API key:', error)
+    return { success: false, error: error instanceof Error ? error.message : String(error), value: null }
+  }
+})
+
+ipcMain.handle('secrets:braveSearch:has', async () => {
+  try {
+    const configured = await hasBraveApiKey()
+    return { success: true, configured }
+  } catch (error) {
+    console.error('[Electron IPC] Failed to check Brave API key:', error)
+    return { success: false, error: error instanceof Error ? error.message : String(error), configured: false }
+  }
+})
+
+ipcMain.handle('secrets:braveSearch:set', async (_event, value: string) => {
+  try {
+    await setBraveApiKey(value)
+    return { success: true }
+  } catch (error) {
+    console.error('[Electron IPC] Failed to set Brave API key:', error)
+    return { success: false, error: error instanceof Error ? error.message : String(error) }
+  }
+})
+
+ipcMain.handle('secrets:braveSearch:delete', async () => {
+  try {
+    await deleteBraveApiKey()
+    return { success: true }
+  } catch (error) {
+    console.error('[Electron IPC] Failed to delete Brave API key:', error)
+    return { success: false, error: error instanceof Error ? error.message : String(error) }
   }
 })
 

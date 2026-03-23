@@ -107,6 +107,7 @@ const makeInitialState = (): ChatState => {
       },
       sending: false,
       compacting: false,
+      compactingConversationId: null,
       validationError: null,
       draftMessage: null,
       multiReplyCount: 1,
@@ -231,12 +232,15 @@ export const chatSlice = createSlice({
       state.composition.editingBranch = action.payload
     },
 
-    compactingStarted: state => {
+    compactingStarted: (state, action: PayloadAction<{ conversationId?: ConversationId | null } | undefined>) => {
       state.composition.compacting = true
+      state.composition.compactingConversationId =
+        action.payload?.conversationId ?? state.conversation.currentConversationId ?? null
     },
 
     compactingFinished: state => {
       state.composition.compacting = false
+      state.composition.compactingConversationId = null
     },
 
     sendingStarted: (state, action: PayloadAction<SendingStartedPayload | undefined>) => {
@@ -596,13 +600,14 @@ export const chatSlice = createSlice({
 
     messageUpdated: (
       state,
-      action: PayloadAction<{ id: MessageId; content: string; note?: string; content_blocks?: any }>
+      action: PayloadAction<{ id: MessageId; content: string; note?: string; note_color?: string | null; content_blocks?: any }>
     ) => {
-      const { id, content, note, content_blocks } = action.payload
+      const { id, content, note, note_color, content_blocks } = action.payload
       const msg = state.conversation.messages.find(m => m.id === id)
       if (msg) {
         msg.content = content
         if (note !== undefined) msg.note = note
+        if (note_color !== undefined) msg.note_color = note_color
         if (content_blocks) msg.content_blocks = content_blocks
       }
     },
@@ -613,7 +618,37 @@ export const chatSlice = createSlice({
     },
 
     messagesLoaded: (state, action: PayloadAction<Message[]>) => {
-      state.conversation.messages = action.payload
+      // Preserve already-loaded artifacts when a refetch returns messages before
+      // attachment hydration completes (common in local mode right after branch/send).
+      const existingArtifactsById = new Map<MessageId, string[]>()
+      for (const message of state.conversation.messages) {
+        if (Array.isArray(message.artifacts) && message.artifacts.length > 0) {
+          existingArtifactsById.set(message.id, message.artifacts)
+        }
+      }
+
+      state.conversation.messages = action.payload.map(message => {
+        const hasIncomingArtifacts = Array.isArray(message.artifacts) && message.artifacts.length > 0
+        if (hasIncomingArtifacts) return message
+
+        const messageWithAttachmentMeta = message as Message & {
+          has_attachments?: boolean
+          attachments_count?: number
+        }
+        const explicitlyNoAttachments =
+          messageWithAttachmentMeta.has_attachments === false ||
+          (typeof messageWithAttachmentMeta.attachments_count === 'number' &&
+            messageWithAttachmentMeta.attachments_count === 0)
+        if (explicitlyNoAttachments) return message
+
+        const preservedArtifacts = existingArtifactsById.get(message.id)
+        if (!preservedArtifacts || preservedArtifacts.length === 0) return message
+
+        return {
+          ...message,
+          artifacts: preservedArtifacts,
+        }
+      })
 
       // If the conversation becomes empty, clear the currentPath to avoid stale selection
       if (!state.conversation.messages || state.conversation.messages.length === 0) {

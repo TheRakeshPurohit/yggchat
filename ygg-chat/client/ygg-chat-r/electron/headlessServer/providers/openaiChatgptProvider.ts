@@ -36,6 +36,7 @@ interface RefreshedTokenPayload {
 function normalizeModel(model: string): string {
   const m = (model || '').toLowerCase().replace(/\s+/g, '-')
 
+  if (m.includes('gpt-5.4-mini')) return 'gpt-5.4-mini'
   if (m.includes('gpt-5.4-pro')) return 'gpt-5.4-pro'
   if (m.includes('gpt-5.4')) return 'gpt-5.4'
   if (m.includes('gpt-5.3-codex')) return 'gpt-5.3-codex'

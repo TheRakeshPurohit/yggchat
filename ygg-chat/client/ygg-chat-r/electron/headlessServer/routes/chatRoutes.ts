@@ -30,7 +30,7 @@ function buildHeadlessMessageRequest(req: Request, operation: HeadlessChatOperat
     messageId: messageIdParam ?? body.messageId ?? body.message_id ?? null,
     content: body.content ?? '',
     provider: body.provider ?? 'openaichatgpt',
-    modelName: body.modelName ?? body.model_name ?? 'gpt-5.1-codex-mini',
+    modelName: body.modelName ?? body.model_name ?? 'gpt-5.4',
     userId: body.userId ?? body.user_id ?? userIdFromHeader ?? null,
     accessToken: body.accessToken ?? body.access_token ?? (authorizationHeader?.replace(/^Bearer\s+/i, '') ?? null),
     accountId: body.accountId ?? body.account_id ?? accountIdFromHeader ?? null,

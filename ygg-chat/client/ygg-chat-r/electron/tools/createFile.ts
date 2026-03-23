@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { isManagedToolPath } from '../utils/managedToolPaths.js'
 import { isWSLPath, resolveToWindowsPath, toWslPath } from '../utils/wslBridge.js'
 
 export interface CreateFileOptions {
@@ -37,6 +38,11 @@ function assertWithinWorkspace(inputPath: string, resolvedPath: string, cwd: str
     const rel = path.posix.relative(workspace, target)
 
     if (rel.startsWith('..') || path.posix.isAbsolute(rel)) {
+      const workspaceIsManagedPath = isManagedToolPath(workspace, true)
+      const targetIsManagedPath = isManagedToolPath(target, true)
+      if (!workspaceIsManagedPath && targetIsManagedPath) {
+        return
+      }
       throw new Error(
         `Access denied: Path '${inputPath}' resolves to '${resolvedPath}' which is outside the workspace '${cwd}'. File operations are restricted to the workspace directory.`
       )
@@ -49,6 +55,11 @@ function assertWithinWorkspace(inputPath: string, resolvedPath: string, cwd: str
   const rel = path.relative(workspace, target)
 
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    const workspaceIsManagedPath = isManagedToolPath(workspace, false)
+    const targetIsManagedPath = isManagedToolPath(target, false)
+    if (!workspaceIsManagedPath && targetIsManagedPath) {
+      return
+    }
     throw new Error(
       `Access denied: Path '${inputPath}' resolves to '${resolvedPath}' which is outside the workspace '${cwd}'. File operations are restricted to the workspace directory.`
     )

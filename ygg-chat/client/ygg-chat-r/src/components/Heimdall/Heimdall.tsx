@@ -84,6 +84,19 @@ const HeimdallGraphLayers = React.memo<GraphLayersProps>(({ connections, nodes }
 
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+const NOTE_COLOR_PRESETS = ['#ef4444', '#f97316', '#f59e0b', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899']
+
+const isValidHexColor = (value?: string | null): value is string =>
+  typeof value === 'string' && /^#[0-9A-Fa-f]{6}$/.test(value)
+
+const getReadableTextColor = (hex: string) => {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+  return luminance > 150 ? '#0f172a' : '#ffffff'
+}
+
 // interface TreeStats {
 //   totalNodes: number
 //   maxDepth: number
@@ -144,6 +157,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     loading: boolean
     error?: string | null
   } | null>(null)
+  const subagentModalScrollRef = useRef<HTMLDivElement | null>(null)
+  const subagentModalScrollTopRef = useRef<number>(0)
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null)
   const [mousePosition, setMousePosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
   const [isSelecting, setIsSelecting] = useState<boolean>(false)
@@ -161,6 +176,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const [noteDialogPos, setNoteDialogPos] = useState<{ x: number; y: number } | null>(null)
   const [noteMessageId, setNoteMessageId] = useState<MessageId | null>(null)
   const [noteText, setNoteText] = useState<string>('')
+  const [noteColor, setNoteColor] = useState<string | null>(null)
   const [hoveredNote, setHoveredNote] = useState<{
     note: string
     sender: 'user' | 'assistant' | 'ex_agent'
@@ -170,6 +186,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const notePreviewCloseTimeoutRef = useRef<number | null>(null)
   // Store message content in ref to avoid stale closures in debounced update
   const noteMessageContentRef = useRef<string>('')
+  const customColorInputRef = useRef<HTMLInputElement | null>(null)
   // Track dark mode for shadows
   const isDarkMode = useHtmlDarkMode()
   const { theme: customTheme, enabled: customThemeEnabled } = useCustomChatTheme()
@@ -255,6 +272,16 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     return []
   }, [])
 
+  const normalizeComparableText = useCallback((value: unknown) => {
+    if (typeof value !== 'string') return ''
+    return value.trim().replace(/\s+/g, ' ')
+  }, [])
+
+  const haveSameSubagentNodes = useCallback(
+    (a: SubagentNode[], b: SubagentNode[]) => JSON.stringify(a) === JSON.stringify(b),
+    []
+  )
+
   const buildSubagentMap = useCallback(
     (messages: Message[]) => {
       // We compute the map directly from messages to ensure it works even when
@@ -263,6 +290,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       // 1. Legacy: Messages with role="ex_agent" and ex_agent_type="subagent" (grouped by session)
       // 2. New: Assistant messages containing "subagent" tool calls
       const map: Record<string, SubagentNode[]> = {}
+      const assistantIdsWithCapturedSubagentSessions = new Set<string>()
+      const sessionPromptSignaturesByParent: Record<string, Set<string>> = {}
 
       // Build a message lookup map for efficient parent traversal
       const messageById = new Map(messages.map(m => [String(m.id), m]))
@@ -300,8 +329,13 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         const rootMsg = session.find(m => !m.parent_id || !sessionIds.has(String(m.parent_id)))
         if (!rootMsg) return
 
+        const rootAssistantId = rootMsg.parent_id ? String(rootMsg.parent_id) : null
+        if (rootAssistantId) {
+          assistantIdsWithCapturedSubagentSessions.add(rootAssistantId)
+        }
+
         // Find the user message that initiated this subagent session
-        const userParentId = findUserParent(rootMsg.parent_id ? String(rootMsg.parent_id) : '')
+        const userParentId = findUserParent(rootAssistantId || '')
         if (!userParentId) return
 
         if (!map[userParentId]) map[userParentId] = []
@@ -311,6 +345,14 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         const sortedMessages = [...session].sort(
           (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
         )
+
+        const sessionPromptSignature = normalizeComparableText(sortedMessages[0]?.content)
+        if (sessionPromptSignature) {
+          if (!sessionPromptSignaturesByParent[userParentId]) {
+            sessionPromptSignaturesByParent[userParentId] = new Set<string>()
+          }
+          sessionPromptSignaturesByParent[userParentId].add(sessionPromptSignature)
+        }
 
         // Combine all content_blocks from session messages
         const combinedBlocks: any[] = []
@@ -344,18 +386,19 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           const subagentCalls = blocks.filter((block: any) => block.type === 'tool_use' && block.name === 'subagent')
 
           if (subagentCalls.length > 0) {
-            // Check if this assistant message has ex_agent subagent children (session already captured)
-            const hasExAgentSession = messages.some(
-              m => m.role === 'ex_agent' && m.ex_agent_type === 'subagent' && String(m.parent_id) === String(msg.id)
-            )
-
-            // Skip if ex_agent session exists - it's already counted in case 1
-            if (hasExAgentSession) return
+            if (assistantIdsWithCapturedSubagentSessions.has(String(msg.id))) {
+              return
+            }
 
             const parentId = String(msg.parent_id)
             if (!map[parentId]) map[parentId] = []
 
             subagentCalls.forEach((call: any, idx: number) => {
+              const promptSignature = normalizeComparableText(call.input?.prompt)
+              if (promptSignature && sessionPromptSignaturesByParent[parentId]?.has(promptSignature)) {
+                return
+              }
+
               // Filter content_blocks to include:
               // 1. All blocks between this subagent's tool_use and its tool_result (inclusive)
               //    This captures any tool calls the subagent made during execution
@@ -393,9 +436,29 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           }
         }
       })
+
+      // Final dedupe pass: if we have a persisted session entry and a tool-call entry
+      // with the same prompt under the same parent, keep the session entry only.
+      Object.entries(map).forEach(([parentId, nodes]) => {
+        const sessionPromptSignatures = new Set(
+          nodes
+            .filter(node => String(node.id).startsWith('session_'))
+            .map(node => normalizeComparableText(node.message))
+            .filter(Boolean)
+        )
+
+        if (sessionPromptSignatures.size === 0) return
+
+        map[parentId] = nodes.filter(node => {
+          if (String(node.id).startsWith('session_')) return true
+          const signature = normalizeComparableText(node.message)
+          return !(signature && sessionPromptSignatures.has(signature))
+        })
+      })
+
       return map
     },
-    [normalizeContentBlocks]
+    [normalizeComparableText, normalizeContentBlocks]
   )
 
   const subagentMapByParent = useMemo(() => buildSubagentMap(allMessages), [allMessages, buildSubagentMap])
@@ -416,58 +479,102 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   }, [])
 
   useEffect(() => {
+    subagentModalScrollTopRef.current = 0
+  }, [subagentPanel?.parentId])
+
+  useEffect(() => {
+    const parentId = subagentPanel?.parentId
+    if (!parentId) {
+      setSubagentModalData(null)
+      return
+    }
+
     let cancelled = false
-    const fetchSubagentMessages = async (parentId: string) => {
-      // Default to whatever we already have from the filtered store
+    let pollId: number | null = null
+    const initialNodes = subagentMapByParent[parentId] || []
+
+    setSubagentModalData(prev => {
+      if (prev?.parentId === parentId) return prev
+      return {
+        parentId,
+        nodes: initialNodes,
+        loading: environment === 'electron' && !!conversationId && initialNodes.length === 0,
+        error: null,
+      }
+    })
+
+    if (environment !== 'electron' || !conversationId) {
       setSubagentModalData({
         parentId,
-        nodes: subagentMapByParent[parentId] || [],
-        loading: true,
+        nodes: initialNodes,
+        loading: false,
         error: null,
       })
-
-      if (environment !== 'electron' || !conversationId) {
-        setSubagentModalData({
-          parentId,
-          nodes: subagentMapByParent[parentId] || [],
-          loading: false,
-          error: null,
-        })
-        return
+      return () => {
+        cancelled = true
       }
+    }
 
+    const fetchSubagentMessages = async () => {
       try {
         const result = await localApi.get<{ messages: Message[] }>(`/app/conversations/${conversationId}/messages/tree`)
         if (cancelled) return
         const map = buildSubagentMap(Array.isArray(result?.messages) ? result.messages : [])
-        setSubagentModalData({
-          parentId,
-          nodes: map[parentId] || [],
-          loading: false,
-          error: null,
+        const nextNodes = map[parentId] || []
+
+        setSubagentModalData(prev => {
+          const previousNodes = prev?.parentId === parentId ? prev.nodes : []
+          if (prev?.parentId === parentId && haveSameSubagentNodes(previousNodes, nextNodes) && !prev.loading && !prev.error) {
+            return prev
+          }
+
+          return {
+            parentId,
+            nodes: nextNodes,
+            loading: false,
+            error: null,
+          }
         })
       } catch (err) {
         if (cancelled) return
         const errorMsg = err instanceof Error ? err.message : 'Failed to load subagent messages'
-        setSubagentModalData({
+        setSubagentModalData(prev => ({
           parentId,
-          nodes: subagentMapByParent[parentId] || [],
+          nodes: prev?.parentId === parentId ? prev.nodes : initialNodes,
           loading: false,
           error: errorMsg,
-        })
+        }))
       }
     }
 
-    if (subagentPanel?.parentId) {
-      fetchSubagentMessages(subagentPanel.parentId)
-    } else {
-      setSubagentModalData(null)
-    }
+    void fetchSubagentMessages()
+    pollId = window.setInterval(() => {
+      void fetchSubagentMessages()
+    }, 1500)
 
     return () => {
       cancelled = true
+      if (pollId !== null) {
+        window.clearInterval(pollId)
+      }
     }
-  }, [subagentPanel, conversationId, subagentMapByParent, buildSubagentMap])
+  }, [subagentPanel?.parentId, conversationId, buildSubagentMap, haveSameSubagentNodes])
+
+  useEffect(() => {
+    if (!subagentPanel?.parentId) return
+
+    const frameId = window.requestAnimationFrame(() => {
+      const container = subagentModalScrollRef.current
+      if (!container) return
+      const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
+      const targetScrollTop = Math.min(subagentModalScrollTopRef.current, maxScrollTop)
+      if (Math.abs(container.scrollTop - targetScrollTop) > 1) {
+        container.scrollTop = targetScrollTop
+      }
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [subagentPanel?.parentId, subagentModalData?.nodes, subagentModalData?.loading, subagentModalData?.error])
 
   const getSubagentBadgeMetrics = (count: number) => {
     const label = `${count} SUB-CALL${count === 1 ? '' : 'S'}`
@@ -601,13 +708,13 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   const debouncedUpdateNote = useCallback(
-    (messageId: MessageId, content: string, note: string) => {
+    (messageId: MessageId, content: string, note: string, note_color?: string | null) => {
       if (debounceTimeoutRef.current) {
         clearTimeout(debounceTimeoutRef.current)
       }
 
       debounceTimeoutRef.current = setTimeout(() => {
-        dispatch(updateMessage({ id: messageId, content, note }) as any)
+        dispatch(updateMessage({ id: messageId, content, note, note_color }) as any)
       }, 500) // 500ms debounce
     },
     [dispatch]
@@ -624,6 +731,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
       setNoteMessageId(messageId)
       setNoteText(message.note || '')
+      setNoteColor(isValidHexColor(message.note_color) ? message.note_color : null)
       noteMessageContentRef.current = message.content // Store content in ref
       setNoteDialogPos(position)
       setShowNoteDialog(true)
@@ -637,6 +745,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     setNoteDialogPos(null)
     setNoteMessageId(null)
     setNoteText('')
+    setNoteColor(null)
     noteMessageContentRef.current = '' // Clear ref on close
   }, [])
 
@@ -647,11 +756,26 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       if (noteMessageId !== null) {
         const messageContent = noteMessageContentRef.current
         if (messageContent) {
-          debouncedUpdateNote(noteMessageId, messageContent, newNoteText)
+          debouncedUpdateNote(noteMessageId, messageContent, newNoteText, noteColor)
         }
       }
     },
-    [noteMessageId, debouncedUpdateNote]
+    [noteMessageId, noteColor, debouncedUpdateNote]
+  )
+
+  const handleNoteColorChange = useCallback(
+    (newColor: string | null) => {
+      const sanitizedColor = isValidHexColor(newColor) ? newColor : null
+      setNoteColor(sanitizedColor)
+
+      if (noteMessageId !== null) {
+        const messageContent = noteMessageContentRef.current
+        if (messageContent) {
+          debouncedUpdateNote(noteMessageId, messageContent, noteText, sanitizedColor)
+        }
+      }
+    },
+    [noteMessageId, noteText, debouncedUpdateNote]
   )
 
   const clearNotePreviewCloseTimeout = useCallback(() => {
@@ -2004,6 +2128,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         model_name?: string
         tool_calls?: string
         note?: string
+        note_color?: string | null
         content_blocks?: any
       }> = []
 
@@ -2022,6 +2147,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
             model_name: msg.model_name || 'unknown',
             tool_calls: msg.tool_calls || undefined,
             note: msg.note || undefined,
+            note_color: msg.note_color || null,
             content_blocks: msg.content_blocks || undefined,
           })
         }
@@ -2534,6 +2660,25 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     ? getThemeModeColor(customTheme.colors.heimdallNotePillBorder, isDarkMode)
     : 'rgba(0,0,0,0.18)'
 
+  const getNotePillColors = useCallback(
+    (noteColor?: string | null) => {
+      if (isValidHexColor(noteColor)) {
+        return {
+          fill: noteColor,
+          stroke: 'rgba(0,0,0,0.28)',
+          text: getReadableTextColor(noteColor),
+        }
+      }
+
+      return {
+        fill: heimdallNotePillBackgroundColor,
+        stroke: heimdallNotePillBorderColor,
+        text: heimdallNotePillTextColor,
+      }
+    },
+    [heimdallNotePillBackgroundColor, heimdallNotePillBorderColor, heimdallNotePillTextColor]
+  )
+
   const renderNodes = (): JSX.Element[] => {
     return Object.values(visiblePositions).map(({ x, y, node }) => {
       const isExpanded = !compactMode || node.id === focusedNodeId
@@ -2722,6 +2867,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
               if (!hasNote) return null
 
               const badge = getNoteBadgeMetrics(message?.note)
+              const pillColors = getNotePillColors(message?.note_color)
               const badgeX = nodeWidth - badge.width - 8
               const badgeY = nodeHeight - 8
               return (
@@ -2738,8 +2884,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                     width={badge.width}
                     height={badge.height}
                     rx='9'
-                    style={{ fill: heimdallNotePillBackgroundColor }}
-                    stroke={heimdallNotePillBorderColor}
+                    style={{ fill: pillColors.fill }}
+                    stroke={pillColors.stroke}
                     strokeWidth='1'
                   />
                   <text
@@ -2747,7 +2893,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                     y={badge.height / 2 + 4}
                     textAnchor='middle'
                     className='text-[10px] font-semibold'
-                    style={{ fill: heimdallNotePillTextColor }}
+                    style={{ fill: pillColors.text }}
                   >
                     {badge.label}
                   </text>
@@ -2868,6 +3014,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
               if (!hasNote) return null
 
               const badge = getNoteBadgeMetrics(message?.note)
+              const pillColors = getNotePillColors(message?.note_color)
               const badgeX = x + circleRadius + 6
               const badgeY = y + circleRadius + 4
               return (
@@ -2884,8 +3031,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                     width={badge.width}
                     height={badge.height}
                     rx='9'
-                    style={{ fill: heimdallNotePillBackgroundColor }}
-                    stroke={heimdallNotePillBorderColor}
+                    style={{ fill: pillColors.fill }}
+                    stroke={pillColors.stroke}
                     strokeWidth='1'
                   />
                   <text
@@ -2893,7 +3040,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                     y={badge.height / 2 + 4}
                     textAnchor='middle'
                     className='text-[10px] font-semibold'
-                    style={{ fill: heimdallNotePillTextColor }}
+                    style={{ fill: pillColors.text }}
                   >
                     {badge.label}
                   </text>
@@ -3631,7 +3778,14 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                 </div>
 
                 {/* Scrollable content */}
-                <div className='overflow-y-auto flex-1 thin-scrollbar' data-heimdall-wheel-exempt='true'>
+                <div
+                  ref={subagentModalScrollRef}
+                  className='overflow-y-auto flex-1 thin-scrollbar'
+                  data-heimdall-wheel-exempt='true'
+                  onScroll={event => {
+                    subagentModalScrollTopRef.current = event.currentTarget.scrollTop
+                  }}
+                >
                   {isSubagentLoading && (
                     <div className='px-5 py-3 text-xs text-stone-500 dark:text-stone-400'>Loading subagent data...</div>
                   )}
@@ -3656,6 +3810,23 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                       // Parse content_blocks if available
                       const blocks = Array.isArray(node.content_blocks) ? node.content_blocks : []
                       const hasBlocks = blocks.length > 0
+                      const normalizedNodeMessage = node.message?.trim().replace(/\s+/g, ' ')
+                      const hasDuplicatePromptInBlocks =
+                        !!normalizedNodeMessage &&
+                        blocks.some((block: any) => {
+                          if (block.type === 'text') {
+                            const textContent = (block.content ?? block.text)?.trim().replace(/\s+/g, ' ')
+                            return textContent === normalizedNodeMessage
+                          }
+
+                          if (block.type === 'tool_use') {
+                            const prompt = block.input?.prompt
+                            return typeof prompt === 'string' && prompt.trim().replace(/\s+/g, ' ') === normalizedNodeMessage
+                          }
+
+                          return false
+                        })
+                      const shouldRenderNodeMessage = !!node.message && !hasDuplicatePromptInBlocks
 
                       return (
                         <div key={node.id} className='px-5 py-4'>
@@ -3668,8 +3839,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                             </span>
                           </div>
 
-                          {/* Show prompt/message first */}
-                          {node.message && (
+                          {/* Show prompt/message first when it is not already present in content blocks */}
+                          {shouldRenderNodeMessage && (
                             <div className='prose prose-sm dark:prose-invert max-w-none text-stone-800 dark:text-stone-200 prose-p:my-1 prose-headings:my-2 prose-pre:my-2 prose-pre:bg-stone-100 dark:prose-pre:bg-neutral-800 prose-code:text-orange-600 dark:prose-code:text-orange-400 prose-pre:text-xs prose-pre:overflow-x-auto mb-3'>
                               <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
                                 {node.message}
@@ -3790,14 +3961,57 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           data-heimdall-wheel-exempt='true'
         >
           <div className='px-2 py-2'>
-            <div className='flex justify-between items-center mb-1 mx-1'>
-              <h3 className='text-sm font-medium text-stone-800 dark:text-stone-200'>
-                {(() => {
-                  const message = getCurrentMessage(noteMessageId)
-                  const hasNote = message?.note && message.note.trim().length > 0
-                  return hasNote ? 'Edit Note' : 'Add Note'
-                })()}
-              </h3>
+            <div className='flex justify-between items-start mb-2 mx-1 gap-2'>
+              <div className='flex flex-col gap-2 min-w-0'>
+                <h3 className='text-sm font-medium text-stone-800 dark:text-stone-200'>
+                  {(() => {
+                    const message = getCurrentMessage(noteMessageId)
+                    const hasNote = message?.note && message.note.trim().length > 0
+                    return hasNote ? 'Edit Note' : 'Add Note'
+                  })()}
+                </h3>
+                <div className='flex items-center gap-2 flex-wrap'>
+                  {NOTE_COLOR_PRESETS.map(color => {
+                    const isSelected = noteColor?.toLowerCase() === color.toLowerCase()
+                    return (
+                      <button
+                        key={color}
+                        type='button'
+                        onClick={() => handleNoteColorChange(color)}
+                        className={`w-5 h-5 rounded-full border transition-transform ${isSelected ? 'scale-110 ring-2 ring-offset-1 ring-blue-500 dark:ring-blue-300' : 'hover:scale-105'}`}
+                        style={{ backgroundColor: color, borderColor: 'rgba(0,0,0,0.3)' }}
+                        title={`Set note color ${color}`}
+                        aria-label={`Set note color ${color}`}
+                      />
+                    )
+                  })}
+                  <button
+                    type='button'
+                    onClick={() => customColorInputRef.current?.click()}
+                    className='w-5 h-5 rounded-full border border-stone-300 dark:border-stone-600 text-[10px] leading-none flex items-center justify-center bg-gradient-to-r from-red-500 via-yellow-400 to-blue-500'
+                    title='Pick custom color'
+                    aria-label='Pick custom color'
+                  >
+                    🌈
+                  </button>
+                  <button
+                    type='button'
+                    onClick={() => handleNoteColorChange(null)}
+                    className='text-[11px] px-2 py-0.5 rounded-full border border-stone-300 dark:border-stone-600 text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-neutral-800'
+                    title='Use default note pill color'
+                  >
+                    Default
+                  </button>
+                  <input
+                    ref={customColorInputRef}
+                    type='color'
+                    value={noteColor || '#3b82f6'}
+                    onChange={e => handleNoteColorChange(e.target.value)}
+                    className='sr-only'
+                    aria-label='Custom note color picker'
+                  />
+                </div>
+              </div>
               <button
                 onClick={handleCloseNoteDialog}
                 className='text-stone-400 hover:text-stone-600 dark:hover:text-stone-200 active:scale-95'

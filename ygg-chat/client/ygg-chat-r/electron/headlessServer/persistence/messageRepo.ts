@@ -8,12 +8,16 @@ interface MessageRepoDeps {
 export interface CreateMessageInput {
   conversationId: string
   parentId: string | null
-  role: 'user' | 'assistant' | 'tool' | 'system'
+  role: 'user' | 'assistant' | 'tool' | 'system' | 'ex_agent'
   content: string
   modelName?: string | null
   toolCalls?: any[] | null
   toolCallId?: string | null
   contentBlocks?: any[] | null
+  thinkingBlock?: string | null
+  note?: string | null
+  exAgentSessionId?: string | null
+  exAgentType?: string | null
 }
 
 export class MessageRepo {
@@ -37,13 +41,13 @@ export class MessageRepo {
       input.role,
       input.content ?? '',
       input.content ?? '',
-      null,
+      input.thinkingBlock ?? null,
       JSON.stringify(input.toolCalls ?? null),
       input.toolCallId ?? null,
       input.modelName ?? 'unknown',
-      null,
-      null,
-      null,
+      input.note ?? null,
+      input.exAgentSessionId ?? null,
+      input.exAgentType ?? null,
       JSON.stringify(input.contentBlocks ?? null),
       now
     )

@@ -242,6 +242,7 @@ type AddedIdeContext = {
 const EMPTY_PARSED_MESSAGE_DATA: ParsedMessageData = {}
 const COMPOSER_SLASH_COMMANDS = [
   'status-openai',
+  'compactify',
   'bench on',
   'bench off',
   'bench status',
@@ -745,6 +746,7 @@ function Chat() {
   const operationMode = useAppSelector(selectOperationMode)
   // const canSendFromRedux = useAppSelector(selectCanSend)
   const sendingState = useAppSelector(selectSendingState)
+  const compactingConversationId = useAppSelector(state => state.chat.composition.compactingConversationId)
   // Current view stream - automatically selects the relevant stream based on currentPath
   const currentViewStream = useAppSelector(selectCurrentViewStream)
   // Derived streamState object for compatibility (combines current view stream data)
@@ -1158,6 +1160,90 @@ function Chat() {
     [appendBenchEvent, benchEnabled, clearBenchData, exportBenchReport, setBenchEnabledState, showBenchNotice]
   )
 
+  const handleManualCompactifyCommand = useCallback(async (): Promise<ComposerSlashCommandResult> => {
+    if (!currentConversationId) {
+      console.warn('[ManualCompaction] skipped: missing conversation id')
+      return { handled: true, clearInput: true }
+    }
+
+    const compactingCurrentConversation =
+      sendingState.compacting &&
+      compactingConversationId != null &&
+      String(compactingConversationId) === String(currentConversationId)
+
+    if (streamState.active || compactingCurrentConversation || autoCompactionInFlightRef.current) {
+      console.warn('[ManualCompaction] skipped: generation or compaction already active', {
+        streamActive: streamState.active,
+        compactingCurrentConversation,
+        inFlight: autoCompactionInFlightRef.current,
+      })
+      return { handled: true, clearInput: true }
+    }
+
+    const latestCompaction = (() => {
+      for (let i = displayMessages.length - 1; i >= 0; i--) {
+        const message = displayMessages[i]
+        if (message?.role === 'system' && message?.note === AUTO_COMPACTION_NOTE) {
+          return { index: i, message }
+        }
+      }
+      return { index: -1, message: null as Message | null }
+    })()
+
+    const compactionSourceMessages = (
+      latestCompaction.index >= 0 ? displayMessages.slice(latestCompaction.index + 1) : displayMessages
+    ).filter(Boolean)
+
+    const lastMessage = displayMessages[displayMessages.length - 1]
+    if (!lastMessage || lastMessage.note === AUTO_COMPACTION_NOTE || compactionSourceMessages.length < 2) {
+      console.warn('[ManualCompaction] skipped: insufficient source context', {
+        hasLastMessage: Boolean(lastMessage),
+        lastIsCompaction: lastMessage?.note === AUTO_COMPACTION_NOTE,
+        sourceCount: compactionSourceMessages.length,
+      })
+      return { handled: true, clearInput: true }
+    }
+
+    autoCompactionInFlightRef.current = true
+    try {
+      const compactionResult = await dispatch(
+        compactBranch({
+          conversationId: currentConversationId,
+          parentMessageId: lastMessage.id,
+          messages: compactionSourceMessages,
+          providerName: providerSettings.compactionProvider || providers.currentProvider,
+          modelName: providerSettings.compactionModel || null,
+        })
+      ).unwrap()
+
+      const compactedMessage = compactionResult?.message ?? null
+      const hasValidCompactionMarker =
+        compactedMessage?.role === 'system' &&
+        compactedMessage?.note === AUTO_COMPACTION_NOTE &&
+        String(compactedMessage?.parent_id ?? '') === String(lastMessage.id)
+
+      if (!compactedMessage || !hasValidCompactionMarker) {
+        console.error('[ManualCompaction] invalid summary message returned')
+      }
+    } catch (error) {
+      console.error('[ManualCompaction] compactBranch failed:', error)
+    } finally {
+      autoCompactionInFlightRef.current = false
+    }
+
+    return { handled: true, clearInput: true }
+  }, [
+    compactingConversationId,
+    currentConversationId,
+    dispatch,
+    displayMessages,
+    providerSettings.compactionModel,
+    providerSettings.compactionProvider,
+    providers.currentProvider,
+    sendingState.compacting,
+    streamState.active,
+  ])
+
   const runComposerCommand = useCallback(
     async (rawCommand: string): Promise<ComposerSlashCommandResult> => {
       const normalized = rawCommand.trim().toLowerCase().replace(/^\/+/, '')
@@ -1181,6 +1267,10 @@ function Chat() {
         return { handled: true, clearInput: true }
       }
 
+      if (normalized === 'compactify') {
+        return handleManualCompactifyCommand()
+      }
+
       const benchAction = parseBenchAction(rawCommand)
       if (benchAction) {
         return handleBenchAction(benchAction)
@@ -1188,7 +1278,7 @@ function Chat() {
 
       return { handled: false }
     },
-    [handleBenchAction]
+    [handleBenchAction, handleManualCompactifyCommand]
   )
 
   useEffect(() => {
@@ -1221,7 +1311,6 @@ function Chat() {
   //     sample,
   //   })
   // }, [isElectronEnv, mentionableFilesForDebug, workspace?.name, workspace?.rootPath, ideContext.allFiles])
-
 
   const handleCloseExpandedPreview = useCallback(() => {
     if (!expandedFilePath) return
@@ -1484,7 +1573,14 @@ function Chat() {
   const messageRenderRowsCacheRef = useRef<Map<string, MessageRenderRow[]>>(new Map())
 
   const filteredMessagesSignature = useMemo(
-    () => filteredMessages.map(msg => `${msg.id}:${(msg as any).updated_at ?? msg.created_at}`).join('|'),
+    () =>
+      filteredMessages
+        .map(msg => {
+          const updatedAt = (msg as Message & { updated_at?: string }).updated_at ?? msg.created_at
+          const artifactCount = Array.isArray(msg.artifacts) ? msg.artifacts.length : 0
+          return `${msg.id}:${updatedAt}:a${artifactCount}`
+        })
+        .join('|'),
     [filteredMessages]
   )
 
@@ -1777,7 +1873,12 @@ function Chat() {
   // Determine if optimistic/streaming messages should be shown (all modes for instant feedback)
   const showOptimisticMessage = !!optimisticMessage
   const showOptimisticBranchMessage = !!optimisticBranchMessage
-  const showGenerationLoadingAnimation = sendingState.compacting || sendingState.streaming || sendingState.sending
+  const isCurrentConversationCompacting =
+    sendingState.compacting &&
+    currentConversationId != null &&
+    compactingConversationId != null &&
+    String(compactingConversationId) === String(currentConversationId)
+  const showGenerationLoadingAnimation = isCurrentConversationCompacting || streamState.active
   const hasStreamingMessageContent =
     Boolean(streamState.buffer) ||
     Boolean(streamState.thinkingBuffer) ||
@@ -3461,7 +3562,7 @@ function Chat() {
   const handleComposerSlashCommandSelect = useCallback(
     (command: string): ComposerSlashCommandResult | void => {
       const normalized = command.trim().toLowerCase().replace(/^\/+/, '')
-      if (normalized !== 'status-openai' && !parseBenchAction(command)) {
+      if (normalized !== 'status-openai' && normalized !== 'compactify' && !parseBenchAction(command)) {
         return { handled: false }
       }
 
@@ -3476,7 +3577,7 @@ function Chat() {
 
   // Local version of canSend that checks input controller state.
   const canSendLocal = useMemo(() => {
-    const isNotSending = !sendingState.sending && !sendingState.compacting && !streamState.active
+    const isNotSending = !streamState.active && !isCurrentConversationCompacting
     const hasModel = !!selectedModel
 
     // Allow retrigger: empty input when last displayed message is from user
@@ -3484,7 +3585,7 @@ function Chat() {
       !hasLocalInput && displayMessages.length > 0 && displayMessages[displayMessages.length - 1]?.role === 'user'
 
     return (hasLocalInput || isRetrigger) && isNotSending && hasModel
-  }, [hasLocalInput, sendingState.sending, sendingState.compacting, streamState.active, selectedModel, displayMessages])
+  }, [hasLocalInput, isCurrentConversationCompacting, streamState.active, selectedModel, displayMessages])
 
   // Helper: scroll to bottom immediately using the sentinel or container fallback
   const scrollToBottomNow = useCallback((behavior: ScrollBehavior = 'auto') => {
@@ -3505,7 +3606,8 @@ function Chat() {
       const trimmedInputValue = localInputValue.trim()
       const normalizedInput = trimmedInputValue.toLowerCase().replace(/^\/+/, '')
       const slashBenchAction = parseBenchAction(trimmedInputValue)
-      const isKnownSlashCommand = normalizedInput === 'status-openai' || slashBenchAction != null
+      const isKnownSlashCommand =
+        normalizedInput === 'status-openai' || normalizedInput === 'compactify' || slashBenchAction != null
 
       if (trimmedInputValue.startsWith('/') && isKnownSlashCommand) {
         void runComposerCommand(trimmedInputValue).then(result => {
@@ -3534,8 +3636,9 @@ function Chat() {
           hasLocalInput,
           trimmedInputLength: trimmedInputValue.length,
           streamActive: streamState.active,
-          sending: sendingState.sending,
-          compacting: sendingState.compacting,
+          compactingCurrentConversation: isCurrentConversationCompacting,
+          globalSending: sendingState.sending,
+          globalCompacting: sendingState.compacting,
         })
 
         // Hermes mode routes messages to the local Hermes bridge endpoint.
@@ -3866,6 +3969,7 @@ function Chat() {
       dispatch,
       getLocalInput,
       hasLocalInput,
+      isCurrentConversationCompacting,
       sendingState.sending,
       sendingState.compacting,
       clearLocalInput,
@@ -3962,7 +4066,9 @@ function Chat() {
         } else {
           // Regular message branching logic (non-Hermes mode)
           if (originalMessage) {
-            // Create optimistic branch message for instant UI feedback
+            // Create optimistic branch message for instant UI feedback.
+            // Keep artifacts so pasted images do not flicker away during branch send.
+            const optimisticArtifacts = Array.isArray(originalMessage.artifacts) ? originalMessage.artifacts : []
             const optimisticBranchMessage: Message = {
               id: `branch-temp-${Date.now()}`,
               conversation_id: currentConversationId,
@@ -3975,7 +4081,7 @@ function Chat() {
               model_name: selectedModel?.name || '',
               partial: false,
               pastedContext: [],
-              artifacts: [],
+              artifacts: optimisticArtifacts,
             }
             dispatch(chatSliceActions.optimisticBranchMessageSet(optimisticBranchMessage))
           }
@@ -3993,6 +4099,7 @@ function Chat() {
             .unwrap()
             .then(() => {
               clearPendingCwdAnnouncement(currentConversationId, pendingCwdValue)
+              dispatch(chatSliceActions.messageArtifactsBackupCleared({ messageId: parsedId }))
               // Invalidate React Query cache after successful branch to fetch new messages
               // Note: messages query now includes tree data, so only one invalidation needed
               queryClient.invalidateQueries({
@@ -4096,7 +4203,9 @@ function Chat() {
             })
         } else {
           // Has children: create a branch (same as branch button behavior)
-          // Create optimistic branch message for instant UI feedback
+          // Create optimistic branch message for instant UI feedback.
+          // Keep artifacts so pasted images do not flicker away during branch send.
+          const optimisticArtifacts = Array.isArray(originalMessage.artifacts) ? originalMessage.artifacts : []
           const optimisticBranchMessage: Message = {
             id: `branch-temp-${Date.now()}`,
             conversation_id: currentConversationId,
@@ -4109,7 +4218,7 @@ function Chat() {
             model_name: selectedModel?.name || '',
             partial: false,
             pastedContext: [],
-            artifacts: [],
+            artifacts: optimisticArtifacts,
           }
           dispatch(chatSliceActions.optimisticBranchMessageSet(optimisticBranchMessage))
 
@@ -4126,6 +4235,7 @@ function Chat() {
             .unwrap()
             .then(() => {
               clearPendingCwdAnnouncement(currentConversationId, pendingCwdValue)
+              dispatch(chatSliceActions.messageArtifactsBackupCleared({ messageId: parsedId }))
               // Invalidate React Query cache after successful branch to fetch new messages
               queryClient.invalidateQueries({
                 queryKey: ['conversations', currentConversationId, 'messages'],
@@ -4591,10 +4701,15 @@ function Chat() {
         )
           .then(drafts => {
             dispatch(chatSliceActions.imageDraftsAppended(drafts))
-            if (focusedChatMessageId != null) {
+
+            // During branch editing, always attach previews to the actively edited message.
+            const targetMessageId =
+              activeBranchEditingMessageId != null ? parseId(activeBranchEditingMessageId) : focusedChatMessageId
+
+            if (targetMessageId != null) {
               dispatch(
                 chatSliceActions.messageArtifactsAppended({
-                  messageId: focusedChatMessageId,
+                  messageId: targetMessageId,
                   artifacts: drafts.map(d => d.dataUrl),
                 })
               )
@@ -4605,7 +4720,7 @@ function Chat() {
 
       e.target.value = ''
     },
-    [dispatch, focusedChatMessageId, updateLocalInput, focusLocalInput]
+    [dispatch, focusedChatMessageId, activeBranchEditingMessageId, updateLocalInput, focusLocalInput]
   )
 
   // const handleMultiReplyCountChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -4893,7 +5008,7 @@ function Chat() {
                 }}
               >
                 {/* Workspace Actions */}
-                <Button
+                {/* <Button
                   variant='outline2'
                   size='medium'
                   className='!rounded-full !p-2 transition-all duration-200 hover:bg-black/5 dark:hover:bg-white/5'
@@ -4905,7 +5020,7 @@ function Chat() {
                   title='New Chat'
                 >
                   <i className='bx bx-chat text-lg' aria-hidden='true'></i>
-                </Button>
+                </Button> */}
 
                 <Button
                   variant='outline2'
@@ -5832,7 +5947,11 @@ function Chat() {
                                 onChange={e => setCcCwdFromUser(e.target.value)}
                                 placeholder='Working directory (optional)'
                                 className='flex-1 px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-900 rounded-lg bg-white dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-orange-500/60'
-                                style={actionPopoverInputBorderColor ? { borderColor: actionPopoverInputBorderColor } : undefined}
+                                style={
+                                  actionPopoverInputBorderColor
+                                    ? { borderColor: actionPopoverInputBorderColor }
+                                    : undefined
+                                }
                                 title='Specify the working directory used by local agent backends'
                               />
                               <button
@@ -5844,7 +5963,11 @@ function Chat() {
                                   }
                                 }}
                                 className='px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-900 rounded-lg bg-white dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-orange-500/60'
-                                style={actionPopoverInputBorderColor ? { borderColor: actionPopoverInputBorderColor } : undefined}
+                                style={
+                                  actionPopoverInputBorderColor
+                                    ? { borderColor: actionPopoverInputBorderColor }
+                                    : undefined
+                                }
                                 title='Select Folder to let the AI work in'
                               >
                                 <svg
@@ -6103,7 +6226,7 @@ function Chat() {
                     onClick={handleStopGeneration}
                     disabled={!streamState.active}
                     title={
-                      sendingState.compacting
+                      isCurrentConversationCompacting
                         ? 'Compacting context...'
                         : streamState.active
                           ? 'Stop generation'

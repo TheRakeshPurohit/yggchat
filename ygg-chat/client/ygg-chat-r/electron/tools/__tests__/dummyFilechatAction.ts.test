@@ -40,7 +40,7 @@ import { persistToolResultsWithFallback } from './toolResultPersistence'
 // OpenAI OAuth is handled internally by OpenAIChatGPT module
 import { getDefaultMaxTurns, getSubagentEnabledTools, isOrchestratorEnabled } from '../../helpers/subagentToolSettings'
 import { loadProviderSettings } from '../../helpers/providerSettingsStorage'
-import { getDefaultBashTimeoutMs } from '../../helpers/toolExecutionSettings'
+import { getDefaultToolCallTimeoutMs } from '../../helpers/toolExecutionSettings'
 import { updateToolEnabledState } from '../../helpers/toolSettingsStorage'
 import { generateStreamId, STREAM_PRUNE_DELAY } from './streamHelpers'
 import sysPromptConfig from './sys_prompt.json'
@@ -740,24 +740,19 @@ const sanitizeContentBlocksForModel = (
 }
 
 /**
- * Resolve timeout for a tool call (default 60s; long-duration defaults to 5m)
+ * Resolve timeout for a tool call.
+ * Priority: explicit override -> tool args -> tool metadata -> global default.
  */
 const resolveToolTimeoutMs = (toolCall: any, override?: number) => {
-  if (typeof override === 'number') return override
+  if (typeof override === 'number' && Number.isFinite(override)) return override
 
   const args = getToolCallArgsObject(toolCall)
   const argTimeout = typeof args?.timeoutMs === 'number' ? args.timeoutMs : undefined
   const metadataTimeout = typeof toolCall?.timeoutMs === 'number' ? toolCall.timeoutMs : undefined
-  const isLongDuration =
-    toolCall?.metadata?.longDuration === true ||
-    args?.longDuration === true ||
-    args?.long_duration === true
 
-  if (typeof argTimeout === 'number') return argTimeout
-  if (typeof metadataTimeout === 'number') return metadataTimeout
-  if (isLongDuration) return 300000 // 5 minutes for long tasks
-  if (getToolCallName(toolCall) === 'bash') return getDefaultBashTimeoutMs()
-  return 60000 // default 60s
+  if (typeof argTimeout === 'number' && Number.isFinite(argTimeout)) return argTimeout
+  if (typeof metadataTimeout === 'number' && Number.isFinite(metadataTimeout)) return metadataTimeout
+  return getDefaultToolCallTimeoutMs()
 }
 
 const resolveOpenRouterTemperature = (providerSlug: string): number | undefined => {

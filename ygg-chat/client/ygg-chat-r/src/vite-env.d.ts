@@ -32,6 +32,14 @@ interface ElectronAPI {
     set: (key: string, value: any) => Promise<void>
     clear: () => Promise<{ success: boolean; error?: string }>
   }
+  secrets: {
+    braveSearch: {
+      get: () => Promise<{ success: boolean; value: string | null; error?: string }>
+      has: () => Promise<{ success: boolean; configured: boolean; error?: string }>
+      set: (value: string) => Promise<{ success: boolean; error?: string }>
+      delete: () => Promise<{ success: boolean; error?: string }>
+    }
+  }
   platformInfo: {
     get: () => Promise<{ platform: string; version: string; isElectron: boolean }>
   }

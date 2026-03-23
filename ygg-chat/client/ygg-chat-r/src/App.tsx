@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'react'
 import { BrowserRouter, HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import './App.css'
 import { HtmlIframeRegistryProvider, useHtmlIframeRegistry } from './components/HtmlIframeRegistry/HtmlIframeRegistry'
+import { GlobalNotifications } from './components/GlobalNotifications/GlobalNotifications'
 import { HtmlToolsModal } from './components/HtmlToolsModal/HtmlToolsModal'
 import { LiquidGlassSVG } from './components/LiquidGlassSVG'
 import ProtectedRoute from './components/ProtectedRoute'
@@ -272,6 +273,7 @@ function App() {
         <RightBarShell />
       </div>
       <HtmlToolsShell enabled={isElectron} />
+      <GlobalNotifications />
     </>
   )
 

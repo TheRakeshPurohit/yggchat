@@ -23,8 +23,9 @@ import {
   useConversationsByProject,
   useFavoritedConversations,
   useLocalTopLevelUserMessages,
+  useMoveConversationToProject,
   useProjects,
-  useSearchConversations,
+  useSearchTopLevelUserMessages,
 } from '../hooks/useQueries'
 import { localApi } from '../utils/api'
 
@@ -74,6 +75,7 @@ interface ProjectAccordionItemProps {
   isCollapsed: boolean
   activeConversationId: ConversationId | null
   favoriteConversationIds: Set<ConversationId>
+  hoveredPreviewConversationId?: ConversationId | null
   isElectronMode: boolean
   onToggle: (projectId: string) => void
   onSelectConversation: (conversation: Conversation) => void
@@ -81,6 +83,7 @@ interface ProjectAccordionItemProps {
   onEditProject: (project: SidebarProject) => void
   onDeleteProject: (project: SidebarProject) => void
   onToggleFavorite: (conversation: Conversation) => void
+  onMoveConversation: (conversation: Conversation) => void
   onDeleteConversation: (conversation: Conversation) => void
   enableConversationHoverPreview?: boolean
   onConversationHoverStart?: (conversation: Conversation) => void
@@ -91,9 +94,11 @@ interface ProjectConversationsPanelProps {
   projectId: Project['id']
   activeConversationId: ConversationId | null
   favoriteConversationIds: Set<ConversationId>
+  hoveredPreviewConversationId?: ConversationId | null
   isElectronMode: boolean
   onSelectConversation: (conversation: Conversation) => void
   onToggleFavorite: (conversation: Conversation) => void
+  onMoveConversation: (conversation: Conversation) => void
   onDeleteConversation: (conversation: Conversation) => void
   enableConversationHoverPreview?: boolean
   onConversationHoverStart?: (conversation: Conversation) => void
@@ -105,9 +110,11 @@ const ProjectConversationsPanel: React.FC<ProjectConversationsPanelProps> = memo
     projectId,
     activeConversationId,
     favoriteConversationIds,
+    hoveredPreviewConversationId = null,
     isElectronMode,
     onSelectConversation,
     onToggleFavorite,
+    onMoveConversation,
     onDeleteConversation,
     enableConversationHoverPreview = false,
     onConversationHoverStart,
@@ -141,6 +148,10 @@ const ProjectConversationsPanel: React.FC<ProjectConversationsPanelProps> = memo
           sortedConversations.map(conversation => {
             const isActive = String(activeConversationId) === String(conversation.id)
             const isFavorite = favoriteConversationIds.has(conversation.id)
+            const isPreviewHighlighted =
+              enableConversationHoverPreview &&
+              hoveredPreviewConversationId != null &&
+              String(hoveredPreviewConversationId) === String(conversation.id)
             const conversationUpdatedDate = formatDate(conversation.updated_at)
 
             return (
@@ -163,7 +174,9 @@ const ProjectConversationsPanel: React.FC<ProjectConversationsPanelProps> = memo
                   className={`w-full min-w-0 overflow-hidden text-left rounded-md px-2 py-1.5 text-xs md:text-[11px] lg:text-[12px] transition-colors ${
                     isActive
                       ? 'bg-blue-100 dark:bg-neutral-500/40 text-blue-700 dark:text-orange-300'
-                      : 'text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/70'
+                      : isPreviewHighlighted
+                        ? 'text-neutral-700 dark:text-neutral-300 bg-neutral-200/60 dark:bg-neutral-800/70'
+                        : 'text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/70'
                   }`}
                 >
                   <div className='min-w-0'>
@@ -195,6 +208,17 @@ const ProjectConversationsPanel: React.FC<ProjectConversationsPanelProps> = memo
                   variant='outline2'
                   size='smaller'
                   rounded='full'
+                  className='mt-0.5 px-2 py-1 shrink-0 opacity-0 pointer-events-none group-hover/conv:opacity-100 group-hover/conv:pointer-events-auto group-focus-within/conv:opacity-100 group-focus-within/conv:pointer-events-auto transition-opacity duration-150'
+                  onClick={() => onMoveConversation(conversation)}
+                  title='Conversation actions'
+                  aria-label={`Conversation actions for ${conversation.title || conversation.id}`}
+                >
+                  <i className='bx bx-dots-horizontal-rounded text-lg' aria-hidden='true'></i>
+                </Button>
+                <Button
+                  variant='outline2'
+                  size='smaller'
+                  rounded='full'
                   className='mt-0.5 px-2 py-1 shrink-0 text-red-500 dark:text-red-400 opacity-0 pointer-events-none group-hover/conv:opacity-100 group-hover/conv:pointer-events-auto group-focus-within/conv:opacity-100 group-focus-within/conv:pointer-events-auto transition-opacity duration-150'
                   onClick={() => onDeleteConversation(conversation)}
                   title='Delete conversation'
@@ -219,6 +243,7 @@ const ProjectAccordionItem: React.FC<ProjectAccordionItemProps> = memo(
     isCollapsed,
     activeConversationId,
     favoriteConversationIds,
+    hoveredPreviewConversationId = null,
     isElectronMode,
     onToggle,
     onSelectConversation,
@@ -226,6 +251,7 @@ const ProjectAccordionItem: React.FC<ProjectAccordionItemProps> = memo(
     onEditProject,
     onDeleteProject,
     onToggleFavorite,
+    onMoveConversation,
     onDeleteConversation,
     enableConversationHoverPreview = false,
     onConversationHoverStart,
@@ -338,9 +364,11 @@ const ProjectAccordionItem: React.FC<ProjectAccordionItemProps> = memo(
                 projectId={project.id}
                 activeConversationId={activeConversationId}
                 favoriteConversationIds={favoriteConversationIds}
+                hoveredPreviewConversationId={hoveredPreviewConversationId}
                 isElectronMode={isElectronMode}
                 onSelectConversation={onSelectConversation}
                 onToggleFavorite={onToggleFavorite}
+                onMoveConversation={onMoveConversation}
                 onDeleteConversation={onDeleteConversation}
                 enableConversationHoverPreview={enableConversationHoverPreview}
                 onConversationHoverStart={onConversationHoverStart}
@@ -388,6 +416,11 @@ const SideBar: React.FC<SideBarProps> = ({
   const [conversationTab, setConversationTab] = useState<ConversationTab>('recent')
   const [showEditProjectModal, setShowEditProjectModal] = useState(false)
   const [editingProject, setEditingProject] = useState<SidebarProject | null>(null)
+  const [showMoveModal, setShowMoveModal] = useState(false)
+  const [showMoveConfirm, setShowMoveConfirm] = useState(false)
+  const [conversationToMove, setConversationToMove] = useState<Conversation | null>(null)
+  const [destinationProject, setDestinationProject] = useState<{ id: string; name: string } | null>(null)
+  const moveConversationMutation = useMoveConversationToProject()
   // NOTE: 'recent' tab is repurposed as the Projects tab across the app.
   const isProjectsTab = conversationTab !== 'favorites'
 
@@ -451,26 +484,29 @@ const SideBar: React.FC<SideBarProps> = ({
   const {
     search,
     clearSearch,
-    searchResults: searchedConversations,
+    searchResults: searchedTopLevelMessages,
     isSearching,
-  } = useSearchConversations(null, { forceServerSearch: true })
+  } = useSearchTopLevelUserMessages(null, { forceServerSearch: true })
 
   const projectNameById = useMemo(() => {
     return new Map(projectData.map(project => [String(project.id), project.name]))
   }, [projectData])
 
   const sidebarSearchResults = useMemo<SearchResultItem[]>(() => {
-    return searchedConversations.map(conversation => {
-      const projectName = conversation.project_id ? projectNameById.get(String(conversation.project_id)) : null
+    return searchedTopLevelMessages.map(result => {
+      const projectName = result.project_id ? projectNameById.get(String(result.project_id)) : null
+      const notePrefix = result.note ? `${result.note}\n` : ''
+      const contentPreview = `${notePrefix}${result.content}`.trim()
+
       return {
-        conversationId: conversation.id,
-        messageId: String(conversation.id),
-        content: projectName ? `Project: ${projectName}` : 'Project: None',
-        conversationTitle: conversation.title || 'Untitled conversation',
-        createdAt: conversation.updated_at || conversation.created_at || new Date().toISOString(),
+        conversationId: result.conversation_id,
+        messageId: result.message_id,
+        content: contentPreview || (projectName ? `Project: ${projectName}` : 'No preview'),
+        conversationTitle: result.conversation_title || 'Untitled conversation',
+        createdAt: result.message_created_at || result.conversation_updated_at || new Date().toISOString(),
       }
     })
-  }, [searchedConversations, projectNameById])
+  }, [projectNameById, searchedTopLevelMessages])
 
   // Drawer collapse state with localStorage persistence and mobile-first default
   const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
@@ -499,6 +535,7 @@ const SideBar: React.FC<SideBarProps> = ({
   )
   const [previewPortalWidth, setPreviewPortalWidth] = useState(SIDEBAR_PREVIEW_PORTAL_MIN_WIDTH_PX)
   const [hoveredPreviewConversation, setHoveredPreviewConversation] = useState<Conversation | null>(null)
+  const [hoverPreviewSearchQuery, setHoverPreviewSearchQuery] = useState('')
   const hoverPreviewCloseTimeoutRef = useRef<number | null>(null)
   const sidebarRef = useRef<HTMLElement | null>(null)
   const expandButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -653,6 +690,10 @@ const SideBar: React.FC<SideBarProps> = ({
   }, [isProjectsTab, searchQuery, clearSearch])
 
   useEffect(() => {
+    setHoverPreviewSearchQuery('')
+  }, [hoveredPreviewConversation?.id])
+
+  useEffect(() => {
     return () => {
       clearHoverPreviewCloseTimeout()
     }
@@ -675,11 +716,22 @@ const SideBar: React.FC<SideBarProps> = ({
     search(trimmedQuery)
   }
 
-  const handleSearchResultClick = (conversationId: ConversationId) => {
-    const match = searchedConversations.find(conversation => String(conversation.id) === String(conversationId))
+  const handleSearchResultClick = (conversationId: ConversationId, messageId?: string) => {
+    const match = searchedTopLevelMessages.find(result => {
+      const sameConversation = String(result.conversation_id) === String(conversationId)
+      if (!sameConversation) return false
+      if (!messageId) return true
+      return String(result.message_id) === String(messageId)
+    })
     if (!match) return
 
-    handleProjectConversationSelect(match)
+    closeExpandPortal(false)
+    dispatch(chatSliceActions.conversationSet(match.conversation_id))
+    dispatch(activeConversationIdSet(match.conversation_id))
+    navigate(`/chat/${match.project_id || 'unknown'}/${match.conversation_id}`, {
+      state: match.storage_mode ? { storageMode: match.storage_mode } : undefined,
+    })
+
     setSearchQuery('')
     clearSearch()
   }
@@ -720,6 +772,24 @@ const SideBar: React.FC<SideBarProps> = ({
       })
     },
     [closeExpandPortal, dispatch, navigate]
+  )
+
+  const handlePreviewMessageSelect = useCallback(
+    (messageId: string) => {
+      if (!hoveredPreviewConversation) return
+
+      const targetConversation = hoveredPreviewConversation
+      const encodedMessageId = encodeURIComponent(String(messageId))
+
+      closeExpandPortal(false)
+      setHoverPreviewSearchQuery('')
+      dispatch(chatSliceActions.conversationSet(targetConversation.id))
+      dispatch(activeConversationIdSet(targetConversation.id))
+      navigate(`/chat/${targetConversation.project_id || 'unknown'}/${targetConversation.id}#${encodedMessageId}`, {
+        state: targetConversation.storage_mode ? { storageMode: targetConversation.storage_mode } : undefined,
+      })
+    },
+    [closeExpandPortal, dispatch, hoveredPreviewConversation, navigate]
   )
 
   const handleToggleProjectExpansion = useCallback(
@@ -814,6 +884,41 @@ const SideBar: React.FC<SideBarProps> = ({
     },
     [activeConversationId, dispatch, navigate, queryClient]
   )
+
+  const handleOpenMoveConversation = useCallback((conversation: Conversation) => {
+    setConversationToMove(conversation)
+    setDestinationProject(null)
+    setShowMoveConfirm(false)
+    setShowMoveModal(true)
+  }, [])
+
+  const handleSelectDestinationProject = useCallback((project: { id: string; name: string }) => {
+    setDestinationProject(project)
+    setShowMoveModal(false)
+    setShowMoveConfirm(true)
+  }, [])
+
+  const handleCancelMoveProject = useCallback(() => {
+    setShowMoveConfirm(false)
+    setDestinationProject(null)
+  }, [])
+
+  const confirmMoveProject = useCallback(async () => {
+    if (!conversationToMove || !destinationProject) return
+
+    const sourceProjectId = conversationToMove.project_id || null
+
+    await moveConversationMutation.mutateAsync({
+      conversationId: conversationToMove.id,
+      sourceProjectId,
+      destinationProjectId: destinationProject.id,
+    })
+
+    setShowMoveConfirm(false)
+    setShowMoveModal(false)
+    setConversationToMove(null)
+    setDestinationProject(null)
+  }, [conversationToMove, destinationProject, moveConversationMutation])
 
   const handleToggleFavorite = useCallback(
     async (conversation: Conversation) => {
@@ -951,6 +1056,38 @@ const SideBar: React.FC<SideBarProps> = ({
     setEditingProject(null)
   }, [])
 
+  const handleOpenCreateProject = useCallback(() => {
+    setEditingProject(null)
+    setShowEditProjectModal(true)
+  }, [])
+
+  const handleSidebarProjectCreated = useCallback(
+    async (project: Project) => {
+      const projectWithLatest: SidebarProject = {
+        ...project,
+        latest_conversation_updated_at: null,
+      }
+
+      if (userId) {
+        queryClient.setQueryData<SidebarProject[]>(['projects', userId], previous => {
+          const existingProjects = previous || []
+          return [
+            projectWithLatest,
+            ...existingProjects.filter(existingProject => String(existingProject.id) !== String(project.id)),
+          ]
+        })
+      }
+
+      setExpandedProjectIds(prev => {
+        const normalizedProjectId = String(project.id)
+        return prev.includes(normalizedProjectId) ? prev : [normalizedProjectId, ...prev]
+      })
+
+      await handleCreateConversationForProject(projectWithLatest)
+    },
+    [handleCreateConversationForProject, queryClient, userId]
+  )
+
   const sidebarActions = useMemo(
     () => [
       {
@@ -989,7 +1126,11 @@ const SideBar: React.FC<SideBarProps> = ({
     [cycleTheme, navigate, themeMode]
   )
 
-  const renderSidebarBody = (renderCollapsed: boolean, enableMiniHoverPreview: boolean = false) => {
+  const renderSidebarBody = (
+    renderCollapsed: boolean,
+    enableMiniHoverPreview: boolean = false,
+    hoveredConversationId: ConversationId | null = null
+  ) => {
     const actionIconShellClass = renderCollapsed
       ? 'acrylic-light flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-transparent text-neutral-700 dark:bg-transparent dark:text-neutral-300 dark:outline dark:outline-1 dark:outline-neutral-400/15'
       : 'flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-neutral-200/80 bg-neutral-50 text-neutral-700 dark:border-neutral-700/70 dark:bg-neutral-900 dark:text-neutral-300'
@@ -1028,19 +1169,35 @@ const SideBar: React.FC<SideBarProps> = ({
         )}
 
         {!renderCollapsed && isProjectsTab && (
-          <div className='px-2 pb-2 relative z-50'>
-            <SearchList
-              value={searchQuery}
-              onChange={handleSearchChange}
-              onSubmit={handleSearchSubmit}
-              results={sidebarSearchResults}
-              loading={isSearching}
-              onResultClick={conversationId => handleSearchResultClick(conversationId)}
-              placeholder='Search chat...'
-              dropdownVariant='neutral'
-              dropdownZIndex={enableMiniHoverPreview ? 1301 : 50}
-            />
-          </div>
+          <>
+            <div className='px-2 pb-2 relative z-50'>
+              <SearchList
+                value={searchQuery}
+                onChange={handleSearchChange}
+                onSubmit={handleSearchSubmit}
+                results={sidebarSearchResults}
+                loading={isSearching}
+                onResultClick={(conversationId, messageId) => handleSearchResultClick(conversationId, messageId)}
+                placeholder='Search chat...'
+                dropdownVariant='neutral'
+                dropdownZIndex={enableMiniHoverPreview ? 1301 : 50}
+              />
+            </div>
+            <div className='px-2 pb-2'>
+              <Button
+                variant='outline2'
+                size='medium'
+                rounded='full'
+                onClick={handleOpenCreateProject}
+                className='group w-full justify-center gap-2'
+                title='Create a new project'
+                aria-label='Create a new project'
+              >
+                <i className='bx bx-plus text-lg transition-transform duration-100 group-active:scale-90'></i>
+                <span className='text-sm font-medium'>New Project</span>
+              </Button>
+            </div>
+          </>
         )}
 
         <div className='flex-1 overflow-y-auto overflow-x-hidden p-2 pt-2 2xl:pt-2 no-scrollbar scroll-fade dark:border-neutral-800 rounded-xl border-t-0'>
@@ -1073,6 +1230,7 @@ const SideBar: React.FC<SideBarProps> = ({
                     isCollapsed={renderCollapsed}
                     activeConversationId={activeConversationId}
                     favoriteConversationIds={favoriteConversationIds}
+                    hoveredPreviewConversationId={hoveredConversationId}
                     isElectronMode={isElectronMode}
                     onToggle={handleToggleProjectExpansion}
                     onSelectConversation={handleProjectConversationSelect}
@@ -1080,6 +1238,7 @@ const SideBar: React.FC<SideBarProps> = ({
                     onEditProject={handleOpenEditProject}
                     onDeleteProject={handleDeleteSidebarProject}
                     onToggleFavorite={handleToggleFavorite}
+                    onMoveConversation={handleOpenMoveConversation}
                     onDeleteConversation={handleDeleteSidebarConversation}
                     enableConversationHoverPreview={enableMiniHoverPreview}
                     onConversationHoverStart={handleConversationHoverStart}
@@ -1095,6 +1254,10 @@ const SideBar: React.FC<SideBarProps> = ({
               {!renderCollapsed &&
                 displayedFavoriteConversations.map(conv => {
                   const isActive = activeConversationId === conv.id
+                  const isPreviewHighlighted =
+                    enableMiniHoverPreview &&
+                    hoveredConversationId != null &&
+                    String(hoveredConversationId) === String(conv.id)
                   const projectName = conv.project_id ? projectNameById.get(String(conv.project_id)) : undefined
                   const conversationUpdatedDate = formatDate(conv.updated_at)
 
@@ -1122,7 +1285,13 @@ const SideBar: React.FC<SideBarProps> = ({
                             handleSelect(conv.id)
                           }
                         }}
-                        className={`w-full text-left rounded-lg transition-all duration-200 cursor-pointer hover:bg-stone-100/30 hover:ring-neutral-100 hover:ring-1 sm:py-1 xl:py-2 dark:hover:ring-neutral-600/60 outline-transparent dark:hover:bg-yBlack-900/10 ${isActive ? 'bg-indigo-100 dark:bg-indigo-900/40 border-l-4 border-indigo-500' : ''}`}
+                        className={`w-full text-left rounded-lg transition-all duration-200 cursor-pointer hover:bg-stone-100/30 hover:ring-neutral-100 hover:ring-1 sm:py-1 xl:py-2 dark:hover:ring-neutral-600/60 outline-transparent dark:hover:bg-yBlack-900/10 ${
+                          isActive
+                            ? 'bg-indigo-100 dark:bg-indigo-900/40 border-l-4 border-indigo-500'
+                            : isPreviewHighlighted
+                              ? 'bg-stone-100/30 ring-neutral-100 ring-1 dark:ring-neutral-600/60 dark:bg-yBlack-900/10'
+                              : ''
+                        }`}
                       >
                         <div className='flex flex-col gap-0 md:gap-1 lg:gap-1.5 xl:gap-1 2xl:gap-2 py-2 md:py-0 lg:py-0 xl:py-0 mx-2'>
                           <span className='text-[14px] font-medium text-neutral-900 dark:text-stone-200 truncate'>
@@ -1216,6 +1385,20 @@ const SideBar: React.FC<SideBarProps> = ({
     error: topLevelUserPreviewError,
   } = useLocalTopLevelUserMessages(hoveredPreviewConversationId, shouldShowConversationPreviewPortal)
 
+  const normalizedHoverPreviewSearch = hoverPreviewSearchQuery.trim().toLowerCase()
+  const filteredTopLevelUserPreviewMessages = useMemo(() => {
+    if (!normalizedHoverPreviewSearch) return topLevelUserPreviewMessages
+
+    return topLevelUserPreviewMessages.filter(message => {
+      const searchableContent = [message.note, message.plain_text_content, message.content]
+        .filter(Boolean)
+        .join('\n')
+        .toLowerCase()
+
+      return searchableContent.includes(normalizedHoverPreviewSearch)
+    })
+  }, [normalizedHoverPreviewSearch, topLevelUserPreviewMessages])
+
   return (
     <>
       <aside
@@ -1244,7 +1427,7 @@ const SideBar: React.FC<SideBarProps> = ({
           </Button>
         </div>
 
-        {renderSidebarBody(isCollapsed)}
+        {renderSidebarBody(isCollapsed, false, hoveredPreviewConversationId)}
       </aside>
 
       {typeof document !== 'undefined' &&
@@ -1299,7 +1482,7 @@ const SideBar: React.FC<SideBarProps> = ({
                       </div>
                     </div>
 
-                    {renderSidebarBody(false, true)}
+                    {renderSidebarBody(false, true, hoveredPreviewConversationId)}
                   </div>
                 </motion.section>
 
@@ -1327,11 +1510,23 @@ const SideBar: React.FC<SideBarProps> = ({
                       transition={{ duration: 0.18, ease: 'easeOut' }}
                     >
                       <div className='h-full min-h-0 flex flex-col'>
-                        <div className='px-3 py-2 border-b border-neutral-200/80 dark:border-neutral-800/80'>
-                          <h3 className='text-sm font-semibold text-neutral-800 dark:text-neutral-100 truncate'>
-                            {hoveredPreviewConversation?.title || 'Untitled conversation'}
-                          </h3>
-                          <p className='text-[11px] text-neutral-500 dark:text-neutral-400'>Top-level user messages</p>
+                        <div className='px-3 py-2 border-b border-neutral-200/80 dark:border-neutral-800/80 space-y-2'>
+                          <div>
+                            <h3 className='text-sm font-semibold text-neutral-800 dark:text-neutral-100 truncate'>
+                              {hoveredPreviewConversation?.title || 'Untitled conversation'}
+                            </h3>
+                            <p className='text-[11px] text-neutral-500 dark:text-neutral-400'>Top-level user messages</p>
+                          </div>
+
+                          <div className='relative'>
+                            <input
+                              type='text'
+                              value={hoverPreviewSearchQuery}
+                              onChange={event => setHoverPreviewSearchQuery(event.target.value)}
+                              placeholder='Search messages in this preview...'
+                              className='w-full rounded-md border border-neutral-200 bg-neutral-50 px-2.5 py-1.5 text-xs text-neutral-800 outline-none focus:border-blue-400 dark:border-neutral-700 dark:bg-neutral-900/80 dark:text-neutral-100 dark:focus:border-orange-400'
+                            />
+                          </div>
                         </div>
 
                         <div className='flex-1 min-h-0 overflow-y-auto thin-scrollbar p-3 space-y-2'>
@@ -1357,10 +1552,22 @@ const SideBar: React.FC<SideBarProps> = ({
 
                           {!topLevelUserPreviewLoading &&
                             !topLevelUserPreviewError &&
-                            topLevelUserPreviewMessages.map(message => (
-                              <article
+                            topLevelUserPreviewMessages.length > 0 &&
+                            filteredTopLevelUserPreviewMessages.length === 0 && (
+                              <div className='text-xs text-neutral-500 dark:text-neutral-400'>
+                                No messages match "{hoverPreviewSearchQuery}".
+                              </div>
+                            )}
+
+                          {!topLevelUserPreviewLoading &&
+                            !topLevelUserPreviewError &&
+                            filteredTopLevelUserPreviewMessages.map(message => (
+                              <button
+                                type='button'
                                 key={message.id}
-                                className='rounded-lg border border-neutral-200/80 bg-neutral-50 px-3 py-2 dark:border-neutral-700/70 dark:bg-neutral-900/80'
+                                onClick={() => handlePreviewMessageSelect(String(message.id))}
+                                className='w-full text-left rounded-lg border border-neutral-200/80 bg-neutral-50 px-3 py-2 transition-colors hover:bg-neutral-100 dark:border-neutral-700/70 dark:bg-neutral-900/80 dark:hover:bg-neutral-800'
+                                title='Open this conversation branch'
                               >
                                 {message.note && (
                                   <p className='mb-1 text-[11px] font-medium whitespace-pre-wrap break-words text-blue-600 dark:text-orange-400'>
@@ -1370,7 +1577,7 @@ const SideBar: React.FC<SideBarProps> = ({
                                 <p className='text-xs text-neutral-800 dark:text-neutral-100 whitespace-pre-wrap break-words'>
                                   {message.plain_text_content || message.content}
                                 </p>
-                              </article>
+                              </button>
                             ))}
                         </div>
                       </div>
@@ -1383,10 +1590,128 @@ const SideBar: React.FC<SideBarProps> = ({
           document.body
         )}
 
+      {/* Move Project Modal */}
+      {showMoveModal && conversationToMove && (
+        <div
+          className='fixed inset-0 bg-neutral-400/40 dark:bg-black/30 bg-opacity-50 backdrop-blur-sm flex items-center justify-center z-[1300] p-4'
+          onClick={() => setShowMoveModal(false)}
+        >
+          <div
+            className='bg-neutral-100 text-neutral-900 mica-medium dark:bg-yBlack-900 rounded-3xl border border-gray-200 dark:border-zinc-700 w-full max-w-md p-6 shadow-[0_8px_32px_rgba(0,0,0,0.1)] dark:shadow-[0_8px_32px_rgba(0,0,0,0.3)]'
+            onClick={event => event.stopPropagation()}
+          >
+            <h3 className='text-xl font-semibold mb-2 dark:text-neutral-100'>Conversation Actions</h3>
+            <p className='text-sm text-neutral-600 dark:text-neutral-400 mb-4'>
+              Choose an action for "
+              <span className='font-medium'>{conversationToMove.title || `Conversation ${conversationToMove.id}`}</span>
+              ".
+            </p>
+
+            <h4 className='text-sm font-semibold mb-2 dark:text-neutral-200'>
+              Move to Project
+              <span className='ml-2 text-xs font-normal text-neutral-500 dark:text-neutral-400'>
+                ({conversationToMove.storage_mode === 'local' ? 'Local' : 'Cloud'} projects only)
+              </span>
+            </h4>
+            <div className='max-h-[400px] overflow-y-auto space-y-3 thin-scrollbar'>
+              {projectData
+                .filter(project => {
+                  const convMode = conversationToMove.storage_mode || 'cloud'
+                  const projMode = project.storage_mode || 'cloud'
+                  return project.id !== conversationToMove.project_id && projMode === convMode
+                })
+                .map(project => (
+                  <button
+                    key={project.id}
+                    className='w-full text-left px-4 py-3 rounded-xl border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-50 dark:hover:bg-neutral-800/50 transition-colors flex items-center justify-between'
+                    onClick={() => handleSelectDestinationProject({ id: project.id, name: project.name })}
+                  >
+                    <span className='font-medium dark:text-neutral-100'>{project.name}</span>
+                    <i className='bx bx-chevron-right text-lg text-neutral-400' aria-hidden='true'></i>
+                  </button>
+                ))}
+              {projectData.filter(project => {
+                const convMode = conversationToMove.storage_mode || 'cloud'
+                const projMode = project.storage_mode || 'cloud'
+                return project.id !== conversationToMove.project_id && projMode === convMode
+              }).length === 0 && (
+                <p className='text-sm text-neutral-500 dark:text-neutral-400 text-center py-4'>
+                  No other {conversationToMove.storage_mode === 'local' ? 'local' : 'cloud'} projects available.
+                </p>
+              )}
+            </div>
+            <div className='flex gap-3 justify-end mt-4'>
+              <Button variant='outline2' size='circle' rounded='full' className='group' onClick={() => setShowMoveModal(false)}>
+                <p className='transition-transform duration-100 group-active:scale-95'>Cancel</p>
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Move Confirmation Dialog */}
+      {showMoveConfirm && conversationToMove && destinationProject && (
+        <div
+          className='fixed inset-0 bg-neutral-400/40 dark:bg-black/30 bg-opacity-50 backdrop-blur-sm flex items-center justify-center z-[1300] p-4'
+          onClick={handleCancelMoveProject}
+        >
+          <div
+            className='bg-neutral-100 text-neutral-900 mica-medium rounded-3xl border border-gray-200 dark:border-zinc-700 w-full max-w-md p-6 shadow-[0_8px_32px_rgba(0,0,0,0.1)] dark:shadow-[0_8px_32px_rgba(0,0,0,0.3)]'
+            onClick={event => event.stopPropagation()}
+          >
+            <h3 className='text-[24px] font-semibold mb-2 dark:text-neutral-100'>Confirm Move</h3>
+            <p className='text-[18px] text-neutral-800 dark:text-neutral-400 mb-4'>
+              Move "
+              <span className='font-medium'>{conversationToMove.title || `Conversation ${conversationToMove.id}`}</span>
+              " to a new project?
+            </p>
+            <div className='flex items-center justify-center gap-3 py-4 px-2 acrylic rounded-xl mb-4'>
+              <div className='text-center'>
+                <div className='text-[16px] text-neutral-500 dark:text-neutral-400 mb-1'>From</div>
+                <div className='font-medium dark:text-neutral-100 text-[16px]'>
+                  {conversationToMove.project_id
+                    ? projectNameById.get(String(conversationToMove.project_id)) || 'Unknown Project'
+                    : 'No Project'}
+                </div>
+              </div>
+              <i className='bx bx-right-arrow-alt text-2xl text-neutral-400' aria-hidden='true'></i>
+              <div className='text-center'>
+                <div className='text-[16px] text-neutral-500 dark:text-neutral-400 mb-1'>To</div>
+                <div className='font-medium dark:text-neutral-100 text-[16px]'>{destinationProject.name}</div>
+              </div>
+            </div>
+            <div className='flex gap-3 pt-2 justify-end'>
+              <Button
+                variant='outline2'
+                size='circle'
+                rounded='full'
+                className='group'
+                onClick={handleCancelMoveProject}
+              >
+                <p className='transition-transform duration-100 group-active:scale-95'>Cancel</p>
+              </Button>
+              <Button
+                variant='outline2'
+                size='circle'
+                rounded='full'
+                className='group bg-blue-500 hover:bg-blue-600 dark:bg-blue-600 hover:text-black dark:hover:bg-blue-700 text-white border-blue-600 dark:border-blue-700'
+                onClick={confirmMoveProject}
+                disabled={moveConversationMutation.isPending}
+              >
+                <p className='transition-transform duration-100 group-active:scale-95'>
+                  {moveConversationMutation.isPending ? 'Moving...' : 'Move'}
+                </p>
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <EditProject
         isOpen={showEditProjectModal}
         onClose={handleCloseEditProjectModal}
         editingProject={editingProject}
+        onProjectCreated={handleSidebarProjectCreated}
       />
     </>
   )

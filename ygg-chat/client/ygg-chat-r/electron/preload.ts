@@ -22,6 +22,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     set: (key: string, value: any) => ipcRenderer.invoke('storage:set', key, value),
     clear: () => ipcRenderer.invoke('storage:clear'),
   },
+  secrets: {
+    braveSearch: {
+      get: () => ipcRenderer.invoke('secrets:braveSearch:get'),
+      has: () => ipcRenderer.invoke('secrets:braveSearch:has'),
+      set: (value: string) => ipcRenderer.invoke('secrets:braveSearch:set', value),
+      delete: () => ipcRenderer.invoke('secrets:braveSearch:delete'),
+    },
+  },
   platformInfo: {
     get: () => ipcRenderer.invoke('platform:info'),
   },

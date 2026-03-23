@@ -157,8 +157,8 @@ export const selectStreamCountByType = createSelector([selectStreamingRoot], str
   return counts
 })
 
-// Get the stream that should be displayed for the current view
-// This considers the current path and current conversation and returns the most relevant active stream
+// Get the stream that should be displayed for the current view.
+// Branch selection should win over global active streams.
 export const selectCurrentViewStream = createSelector(
   [
     selectStreamingRoot,
@@ -166,8 +166,6 @@ export const selectCurrentViewStream = createSelector(
     (state: RootState) => state.chat.conversation.currentConversationId,
   ],
   (streaming, currentPath, currentConversationId) => {
-    const pathIds = new Set(currentPath.map(id => String(id)))
-
     const activeStreams = Object.entries(streaming.byId).filter(([, stream]) => {
       if (!stream.active) return false
       if (currentConversationId == null) return true
@@ -178,67 +176,83 @@ export const selectCurrentViewStream = createSelector(
       return null
     }
 
-    const scoreStreamForPath = (stream: (typeof activeStreams)[number][1]): number => {
-      let score = 0
-
-      const candidateIds = [
-        stream.messageId,
-        stream.streamingMessageId,
-        stream.lineage.rootMessageId,
-        stream.lineage.originMessageId,
-      ]
-
-      for (const candidateId of candidateIds) {
-        if (candidateId != null && pathIds.has(String(candidateId))) {
-          score += 100
+    // If no path is selected yet, fall back to conversation-scoped primary/first active stream.
+    if (currentPath.length === 0) {
+      if (streaming.primaryStreamId) {
+        const primary = streaming.byId[streaming.primaryStreamId]
+        if (
+          primary?.active &&
+          (currentConversationId == null || String(primary.conversationId) === String(currentConversationId))
+        ) {
+          return { id: streaming.primaryStreamId, ...primary }
         }
       }
 
-      if (stream.lineage.rootMessageId != null && pathIds.has(String(stream.lineage.rootMessageId))) {
-        score += 50
-      }
-      if (stream.lineage.originMessageId != null && pathIds.has(String(stream.lineage.originMessageId))) {
-        score += 25
-      }
-      if (streaming.primaryStreamId != null && streaming.primaryStreamId === activeStreams.find(([, s]) => s === stream)?.[0]) {
-        score += 5
-      }
-
-      return score
-    }
-
-    let bestMatch: { id: string; score: number; stream: (typeof activeStreams)[number][1] } | null = null
-
-    for (const [id, stream] of activeStreams) {
-      const score = scoreStreamForPath(stream)
-      if (score <= 0) continue
-      if (!bestMatch || score > bestMatch.score) {
-        bestMatch = { id, score, stream }
-      }
-    }
-
-    if (bestMatch) {
-      return { id: bestMatch.id, ...bestMatch.stream }
-    }
-
-    if (currentPath.length === 0 && streaming.primaryStreamId) {
-      const primaryStream = streaming.byId[streaming.primaryStreamId]
-      if (
-        primaryStream?.active &&
-        (currentConversationId == null || String(primaryStream.conversationId) === String(currentConversationId))
-      ) {
-        return { id: streaming.primaryStreamId, ...primaryStream }
-      }
-    }
-
-    // If exactly one active stream exists for this conversation, it is safe to show it.
-    if (activeStreams.length === 1) {
       const [id, stream] = activeStreams[0]
       return { id, ...stream }
     }
 
-    // Multiple active streams but none match the selected path strongly enough.
-    // Return null instead of showing the wrong stream from another branch.
+    const pathIndexById = new Map<string, number>()
+    currentPath.forEach((pathId, index) => {
+      pathIndexById.set(String(pathId), index)
+    })
+
+    const tipId = String(currentPath[currentPath.length - 1])
+    // Require match near the tail of the selected path to avoid ancestor-only false matches.
+    const minRelevantIndex = Math.max(0, currentPath.length - 2)
+
+    const ranked = activeStreams
+      .map(([id, stream]) => {
+        let bestPathIndex = -1
+        let score = 0
+
+        const candidateIds = [
+          stream.streamingMessageId,
+          stream.messageId,
+          stream.lineage.rootMessageId,
+          stream.lineage.originMessageId,
+        ]
+
+        for (const candidate of candidateIds) {
+          if (candidate == null) continue
+          const key = String(candidate)
+          const pathIndex = pathIndexById.get(key)
+          if (pathIndex == null) continue
+
+          bestPathIndex = Math.max(bestPathIndex, pathIndex)
+          score += (pathIndex + 1) * 10
+
+          if (key === tipId) {
+            score += 250
+          }
+        }
+
+        if (stream.lineage.rootMessageId != null) {
+          const rootKey = String(stream.lineage.rootMessageId)
+          if (rootKey === tipId) {
+            score += 150
+          }
+        }
+
+        if (streaming.primaryStreamId === id) {
+          score += 1
+        }
+
+        return { id, stream, bestPathIndex, score }
+      })
+      .filter(entry => entry.bestPathIndex >= minRelevantIndex)
+      .sort((a, b) => {
+        if (b.bestPathIndex !== a.bestPathIndex) return b.bestPathIndex - a.bestPathIndex
+        if (b.score !== a.score) return b.score - a.score
+        return b.stream.createdAt.localeCompare(a.stream.createdAt)
+      })
+
+    if (ranked.length > 0) {
+      const winner = ranked[0]
+      return { id: winner.id, ...winner.stream }
+    }
+
+    // Path exists but no stream matches that branch closely enough.
     return null
   }
 )

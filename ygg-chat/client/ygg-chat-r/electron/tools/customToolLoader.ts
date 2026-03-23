@@ -1,10 +1,11 @@
 // electron/tools/customToolLoader.ts
 // Dynamic loader for user-defined custom tools from userData/custom-tools/
 
-import { createRequire as createNodeRequire } from 'module'
+import Conf from 'conf'
 import { EventEmitter } from 'events'
 import fs, { FSWatcher } from 'fs'
 import fsPromises from 'fs/promises'
+import { createRequire as createNodeRequire } from 'module'
 import path from 'path'
 import { pathToFileURL } from 'url'
 
@@ -13,8 +14,13 @@ const CUSTOM_TOOLS_GUIDE_FILE = 'CUSTOM_TOOLS_GUIIDE.md'
 const CUSTOM_TOOLS_STATE_FILE = 'custom-tools-state.json'
 const DEFINITION_FILE = 'definition.json'
 const IMPLEMENTATION_FILE = 'index.js'
-const EXECUTION_TIMEOUT_MS = 60000 // 60 seconds
+const TOOL_EXECUTION_SETTINGS_STORAGE_KEY = 'ygg_tool_execution_settings'
+const DEFAULT_EXECUTION_TIMEOUT_MS = 6000000 // 60 seconds
+const MIN_EXECUTION_TIMEOUT_MS = 1000
+const MAX_EXECUTION_TIMEOUT_MS = 60000000
 const DEFAULT_REFRESH_DEBOUNCE_MS = 500
+
+let cachedSettingsStore: Conf<Record<string, unknown>> | null | undefined
 
 // Cached base directory
 let cachedBaseDir: string | null = null
@@ -104,6 +110,44 @@ function isWithinDirectory(targetPath: string, parentPath: string): boolean {
 function normalizeDebounce(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_REFRESH_DEBOUNCE_MS
   return Math.min(5000, Math.max(100, Math.floor(value)))
+}
+
+function clampExecutionTimeoutMs(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_EXECUTION_TIMEOUT_MS
+  }
+
+  return Math.max(MIN_EXECUTION_TIMEOUT_MS, Math.min(MAX_EXECUTION_TIMEOUT_MS, Math.floor(value)))
+}
+
+function getSettingsStore(): Conf<Record<string, unknown>> | null {
+  if (cachedSettingsStore !== undefined) {
+    return cachedSettingsStore
+  }
+
+  try {
+    cachedSettingsStore = new Conf<Record<string, unknown>>({
+      projectName: 'ygg-chat-r',
+      configFileMode: 0o600,
+    })
+  } catch {
+    cachedSettingsStore = null
+  }
+
+  return cachedSettingsStore
+}
+
+function getCustomToolExecutionTimeoutMs(): number {
+  try {
+    const settingsStore = getSettingsStore()
+    const storedSettings = (settingsStore?.get(TOOL_EXECUTION_SETTINGS_STORAGE_KEY) ?? null) as {
+      toolCallTimeoutMs?: unknown
+    } | null
+
+    return clampExecutionTimeoutMs(storedSettings?.toolCallTimeoutMs)
+  } catch {
+    return DEFAULT_EXECUTION_TIMEOUT_MS
+  }
 }
 
 // Tool definition interface (matches toolDefinitions.ts pattern)
@@ -769,13 +813,15 @@ class CustomToolRegistry extends EventEmitter {
     }
 
     try {
+      const executionTimeoutMs = getCustomToolExecutionTimeoutMs()
+
       // Execute with timeout
       const result = await Promise.race([
         implementation.execute(args, options),
         new Promise<ToolResult>((_, reject) =>
           setTimeout(
-            () => reject(new Error(`Tool execution timed out after ${EXECUTION_TIMEOUT_MS}ms`)),
-            EXECUTION_TIMEOUT_MS
+            () => reject(new Error(`Tool execution timed out after ${executionTimeoutMs}ms`)),
+            executionTimeoutMs
           )
         ),
       ])

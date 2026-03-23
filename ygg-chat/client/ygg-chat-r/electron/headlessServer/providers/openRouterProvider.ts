@@ -1,4 +1,5 @@
 import type { HeadlessStreamEvent } from '../contracts/headlessApi.js'
+import { normalizeAuthorizationToken, syncOpenRouterTokenFromElectronSession } from './electronAppAuth.js'
 import { buildToolNameMap, sanitizeToolResultContentForModel } from './toolResultSanitizer.js'
 import { openStreamingWithPreFirstByteRetry } from './streamResilience.js'
 import type { ProviderTokenStore } from './tokenStore.js'
@@ -285,10 +286,6 @@ function getRemoteApiBase(explicit?: string): string {
   return raw.replace(/\/+$/, '')
 }
 
-function normalizeAuthorizationToken(token: string | null | undefined): string {
-  return String(token || '').replace(/^Bearer\s+/i, '').trim()
-}
-
 function createAbortError(): Error {
   if (typeof DOMException !== 'undefined') {
     return new DOMException('The operation was aborted.', 'AbortError')
@@ -312,8 +309,9 @@ export class OpenRouterProvider implements HeadlessProvider {
     const directToken = normalizeAuthorizationToken(input.accessToken)
     if (directToken) return directToken
 
-    if (this.tokenStore && input.userId) {
-      const stored = this.tokenStore.get('openrouter', input.userId)
+    if (this.tokenStore) {
+      syncOpenRouterTokenFromElectronSession(this.tokenStore)
+      const stored = input.userId ? this.tokenStore.get('openrouter', input.userId) : this.tokenStore.getLatest('openrouter')
       const storedToken = normalizeAuthorizationToken(stored?.accessToken)
       if (storedToken) return storedToken
     }

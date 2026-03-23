@@ -42,13 +42,14 @@ import { persistToolResultsWithFallback } from './toolResultPersistence'
 // OpenAI OAuth is handled internally by OpenAIChatGPT module
 import { getDefaultMaxTurns, getSubagentEnabledTools, isOrchestratorEnabled } from '../../helpers/subagentToolSettings'
 import { DEFAULT_COMPACTION_SYSTEM_PROMPT, loadProviderSettings } from '../../helpers/providerSettingsStorage'
-import { getDefaultBashTimeoutMs } from '../../helpers/toolExecutionSettings'
+import { getDefaultBashTimeoutMs, getDefaultToolCallTimeoutMs } from '../../helpers/toolExecutionSettings'
 import { updateToolEnabledState } from '../../helpers/toolSettingsStorage'
 import { generateStreamId, STREAM_PRUNE_DELAY } from './streamHelpers'
 import sysPromptConfig from './sys_prompt.json'
 import {
   getAllTools,
   getToolsForAI,
+  getToolsForOpenAIChatGPT,
   setCustomTools,
   setMcpTools,
   updateToolEnabled as updateToolEnabledInDefinitions,
@@ -325,6 +326,7 @@ const updateMessageInCache = (
   messageId: MessageId,
   updatedContent: string,
   updatedNote?: string,
+  updatedNoteColor?: string | null,
   updatedContentBlocks?: any
 ) => {
   if (!queryClient) return
@@ -341,6 +343,7 @@ const updateMessageInCache = (
             content: updatedContent,
             content_plain_text: updatedContent,
             ...(updatedNote !== undefined && { note: updatedNote }),
+            ...(updatedNoteColor !== undefined && { note_color: updatedNoteColor }),
             ...(updatedContentBlocks && { content_blocks: updatedContentBlocks }),
           }
         : msg
@@ -779,24 +782,39 @@ const sanitizeContentBlocksForModel = (
 }
 
 /**
- * Resolve timeout for a tool call (default 60s; long-duration defaults to 5m)
+ * Resolve timeout for a tool call.
+ * Priority: explicit override -> tool args -> tool metadata -> global default.
  */
 const resolveToolTimeoutMs = (toolCall: any, override?: number) => {
-  if (typeof override === 'number') return override
+  if (typeof override === 'number' && Number.isFinite(override)) return override
 
   const args = getToolCallArgsObject(toolCall)
   const argTimeout = typeof args?.timeoutMs === 'number' ? args.timeoutMs : undefined
   const metadataTimeout = typeof toolCall?.timeoutMs === 'number' ? toolCall.timeoutMs : undefined
-  const isLongDuration =
-    toolCall?.metadata?.longDuration === true ||
-    args?.longDuration === true ||
-    args?.long_duration === true
 
-  if (typeof argTimeout === 'number') return argTimeout
-  if (typeof metadataTimeout === 'number') return metadataTimeout
-  if (isLongDuration) return 300000 // 5 minutes for long tasks
-  if (getToolCallName(toolCall) === 'bash') return getDefaultBashTimeoutMs()
-  return 60000 // default 60s
+  if (typeof argTimeout === 'number' && Number.isFinite(argTimeout)) return argTimeout
+  if (typeof metadataTimeout === 'number' && Number.isFinite(metadataTimeout)) return metadataTimeout
+  return getDefaultToolCallTimeoutMs()
+}
+
+const applyDefaultBashProcessTimeout = (toolCall: any, jobTimeoutMs: number) => {
+  if (getToolCallName(toolCall) !== 'bash') return toolCall
+
+  const args = getToolCallArgsObject(toolCall) ?? {}
+  if (typeof args.timeoutMs === 'number' && Number.isFinite(args.timeoutMs)) {
+    return toolCall
+  }
+
+  const defaultBashTimeout = getDefaultBashTimeoutMs()
+  const boundedTimeout = Math.max(1, Math.min(defaultBashTimeout, jobTimeoutMs))
+
+  return {
+    ...toolCall,
+    arguments: {
+      ...args,
+      timeoutMs: boundedTimeout,
+    },
+  }
 }
 
 const resolveOpenRouterTemperature = (providerSlug: string): number | undefined => {
@@ -1048,10 +1066,46 @@ const shouldContinueFromStopHook = async (params: {
 
 
 export const AUTO_COMPACTION_NOTE = '__auto_compaction_summary__'
+export const AUTO_COMPACTION_SUMMARY_RESUME_LINE = 'Following is summary of the session, you have to resume the work.'
 
 const isAutoCompactionSummaryMessage = (msg: Message | undefined | null): boolean => {
   if (!msg) return false
   return typeof msg.note === 'string' && msg.note === AUTO_COMPACTION_NOTE
+}
+
+const ensureCompactionSummaryResumeLine = (content: string | null | undefined): string => {
+  const trimmed = typeof content === 'string' ? content.trim() : ''
+  if (!trimmed) return AUTO_COMPACTION_SUMMARY_RESUME_LINE
+  if (trimmed.startsWith(AUTO_COMPACTION_SUMMARY_RESUME_LINE)) return trimmed
+  return `${AUTO_COMPACTION_SUMMARY_RESUME_LINE}\n\n${trimmed}`
+}
+
+const getCompactionSummaryHistoryContent = (msg: Message | undefined | null): string | null => {
+  if (!isAutoCompactionSummaryMessage(msg)) return null
+
+  const rawContent =
+    typeof msg?.content === 'string'
+      ? msg.content
+      : typeof msg?.content_plain_text === 'string'
+        ? msg.content_plain_text
+        : ''
+
+  const normalized = ensureCompactionSummaryResumeLine(rawContent)
+  return normalized.trim().length > 0 ? normalized : null
+}
+
+const appendCompactionSummaryToLmStudioHistory = (target: any[], msg: Message | undefined | null): boolean => {
+  const content = getCompactionSummaryHistoryContent(msg)
+  if (!content) return false
+  target.push({ role: 'system', content })
+  return true
+}
+
+const appendCompactionSummaryToOpenAIChatGPTHistory = (target: any[], msg: Message | undefined | null): boolean => {
+  const content = getCompactionSummaryHistoryContent(msg)
+  if (!content) return false
+  target.push({ role: 'developer', content })
+  return true
 }
 
 const trimHistoryToLatestCompaction = (messages: Array<Message | undefined>): Message[] => {
@@ -1109,7 +1163,8 @@ const executeBrowseWebLocally = async (
  */
 const executeSimpleSubagentCall = async (toolCall: any, accessToken: string | null): Promise<string> => {
   const args = toolCall.arguments || {}
-  const { prompt, model, systemPrompt, maxTokens, temperature } = args
+  const { prompt, model, systemPrompt, maxTokens, temperature, response_format, responseFormat } = args
+  const effectiveResponseFormat = response_format ?? responseFormat
 
   if (!prompt) {
     throw new Error('Subagent requires a prompt')
@@ -1125,6 +1180,7 @@ const executeSimpleSubagentCall = async (toolCall: any, accessToken: string | nu
         maxTokens: Math.min(maxTokens || 4096, 16384),
         temperature: temperature ?? 0.7,
         systemPrompt,
+        response_format: effectiveResponseFormat,
       }),
     })
 
@@ -1327,12 +1383,15 @@ const executeSubagentCall = async (
     systemPrompt,
     maxTokens,
     temperature,
+    response_format,
+    responseFormat,
     maxTurns: requestedMaxTurns,
     maxToolCalls: requestedMaxToolCalls,
     orchestratorMode = false,
     tools: requestedTools,
     inheritAutoApprove = true,
   } = args
+  const effectiveResponseFormat = response_format ?? responseFormat
 
   if (!prompt) {
     throw new Error('Subagent requires a prompt')
@@ -1415,6 +1474,7 @@ const executeSubagentCall = async (
           maxTokens: Math.min(maxTokens || 4096, 16384),
           temperature: temperature ?? 0.7,
           systemPrompt,
+          response_format: effectiveResponseFormat,
           tools: subagentTools.length > 0 ? subagentTools : undefined,
         }),
         signal: subagentAbortController.signal,
@@ -1942,14 +2002,15 @@ export const executeLocalTool = async (
   }
 ) => {
   const timeoutMs = resolveToolTimeoutMs(toolCall, context?.timeoutMs)
+  const preparedToolCall = applyDefaultBashProcessTimeout(toolCall, timeoutMs)
 
   // Subagent: execute via ephemeral endpoint (works in both electron and web)
-  if (toolCall?.name === 'subagent') {
+  if (preparedToolCall?.name === 'subagent') {
     if (!context?.dispatch || !context?.getState || !context?.conversationId || !context?.messageId) {
       // Fallback to simple mode if context not available
-      return await executeSimpleSubagentCall(toolCall, context?.accessToken ?? null)
+      return await executeSimpleSubagentCall(preparedToolCall, context?.accessToken ?? null)
     }
-    return await executeSubagentCall(toolCall, context.accessToken ?? null, {
+    return await executeSubagentCall(preparedToolCall, context.accessToken ?? null, {
       dispatch: context.dispatch,
       getState: context.getState,
       conversationId: context.conversationId,
@@ -1961,23 +2022,23 @@ export const executeLocalTool = async (
 
   // Non-electron: only allow browse_web, otherwise bail
   if (!isElectronEnvironment) {
-    if (toolCall?.name === 'browse_web') {
-      return await executeBrowseWebLocally(toolCall, rootPath, operationMode, timeoutMs)
+    if (preparedToolCall?.name === 'browse_web') {
+      return await executeBrowseWebLocally(preparedToolCall, rootPath, operationMode, timeoutMs)
     }
     throw new Error('Tool execution is only available in the desktop app.')
   }
 
   try {
-    const result = await executeToolAsJobAndWait(toolCall, rootPath, operationMode, {
+    const result = await executeToolAsJobAndWait(preparedToolCall, rootPath, operationMode, {
       conversationId: context?.conversationId,
       messageId: context?.messageId,
       streamId: context?.streamId,
       priority: context?.priority ?? 'normal',
       timeoutMs,
     })
-    const action = toolCall?.arguments?.action
+    const action = preparedToolCall?.arguments?.action
     if (
-      toolCall?.name === 'mcp_manager' &&
+      preparedToolCall?.name === 'mcp_manager' &&
       context?.dispatch &&
       typeof action === 'string' &&
       ['stop', 'list_tools'].includes(action) &&
@@ -2026,7 +2087,7 @@ export const submitToolAsJob = async (
           messageId: options?.messageId,
           streamId: options?.streamId,
           priority: options?.priority ?? 'normal',
-          timeoutMs: options?.timeoutMs ?? 60000,
+          timeoutMs: options?.timeoutMs ?? getDefaultToolCallTimeoutMs(),
         },
       }),
     })
@@ -2070,7 +2131,7 @@ export const executeToolAsJobAndWait = async (
       body: JSON.stringify({
         toolName: toolCall.name,
         args: toolCall.arguments,
-        timeoutMs: options?.timeoutMs ?? 60000,
+        timeoutMs: options?.timeoutMs ?? getDefaultToolCallTimeoutMs(),
         options: {
           rootPath,
           operationMode,
@@ -2342,7 +2403,7 @@ export const compactBranch = createAsyncThunk<
 >(
   'chat/compactBranch',
   async ({ conversationId, parentMessageId, messages, providerName, modelName }, { dispatch, getState, extra, rejectWithValue }) => {
-    dispatch(chatSliceActions.compactingStarted())
+    dispatch(chatSliceActions.compactingStarted({ conversationId }))
 
     try {
       const { auth } = extra
@@ -2520,14 +2581,16 @@ export const compactBranch = createAsyncThunk<
         throw new Error('Compaction returned empty summary')
       }
 
+      const persistedSummaryContent = ensureCompactionSummaryResumeLine(finalSummary)
+
       const summaryMessage: Message = {
         id: uuidv4(),
         conversation_id: conversationId,
         parent_id: parentMessageId,
         children_ids: [],
         role: 'system',
-        content: finalSummary,
-        content_plain_text: finalSummary,
+        content: persistedSummaryContent,
+        content_plain_text: persistedSummaryContent,
         thinking_block: '',
         tool_calls: [],
         content_blocks: [],
@@ -2882,6 +2945,8 @@ const executionMode = 'client'
                   }))
                 }
                 lmMessages.push(assistantMsg)
+              } else if (appendCompactionSummaryToLmStudioHistory(lmMessages, m)) {
+                continue
               } else if (m.role === 'tool' && m.tool_call_id) {
                 const toolName = toolNameById.get(m.tool_call_id)
                 const sanitizedContent = sanitizeToolResultContentForModel(m.content, toolName ?? null)
@@ -3113,6 +3178,8 @@ const executionMode = 'client'
                   }))
                 }
                 chatgptMessages.push(assistantMsg)
+              } else if (appendCompactionSummaryToOpenAIChatGPTHistory(chatgptMessages, m)) {
+                continue
               } else if (m.role === 'tool' && m.tool_call_id) {
                 const toolName = toolNameById.get(m.tool_call_id)
                 const sanitizedContent = sanitizeToolResultContentForModel(m.content, toolName ?? null)
@@ -3141,7 +3208,7 @@ const executionMode = 'client'
                 systemPrompt,
                 messages: chatgptMessages,
                 attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined,
-                tools: getToolsForAI(),
+                tools: getToolsForOpenAIChatGPT(),
                 reasoningConfig,
               },
               {
@@ -3402,6 +3469,8 @@ const executionMode = 'client'
                   }))
                 }
                 lmMessages.push(assistantMsg)
+              } else if (appendCompactionSummaryToLmStudioHistory(lmMessages, m)) {
+                continue
               } else if (m.role === 'tool' && m.tool_call_id) {
                 // Tool result message
                 const toolName = toolNameById.get(m.tool_call_id)
@@ -3622,6 +3691,8 @@ const executionMode = 'client'
                   }))
                 }
                 chatgptMessages.push(assistantMsg)
+              } else if (appendCompactionSummaryToOpenAIChatGPTHistory(chatgptMessages, m)) {
+                continue
               } else if (m.role === 'tool' && m.tool_call_id) {
                 const toolName = toolNameById.get(m.tool_call_id)
                 const sanitizedContent = sanitizeToolResultContentForModel(m.content, toolName ?? null)
@@ -3650,7 +3721,7 @@ const executionMode = 'client'
                 systemPrompt,
                 messages: chatgptMessages,
                 attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined,
-                tools: getToolsForAI(),
+                tools: getToolsForOpenAIChatGPT(),
                 reasoningConfig,
               },
               {
@@ -4368,11 +4439,11 @@ const executionMode = 'client'
 
 export const updateMessage = createAsyncThunk<
   Message,
-  { id: MessageId; content: string; note?: string; content_blocks?: any },
+  { id: MessageId; content: string; note?: string; note_color?: string | null; content_blocks?: any },
   { state: RootState; extra: ThunkExtraArgument }
 >(
   'chat/updateMessage',
-  async ({ id, content, note, content_blocks }, { dispatch, getState, extra, rejectWithValue }) => {
+  async ({ id, content, note, note_color, content_blocks }, { dispatch, getState, extra, rejectWithValue }) => {
     const { auth } = extra
     try {
       const currentState = getState() as RootState
@@ -4388,6 +4459,9 @@ export const updateMessage = createAsyncThunk<
       if (isLocalMode) {
         // In local mode, persist to local SQLite via localApi
         const body: any = { content, note }
+        if (note_color !== undefined && isLocalMode) {
+          body.note_color = note_color
+        }
         if (content_blocks) {
           body.content_blocks = content_blocks
         }
@@ -4404,13 +4478,14 @@ export const updateMessage = createAsyncThunk<
           body: JSON.stringify(body),
         })
       }
-      dispatch(chatSliceActions.messageUpdated({ id, content, note, content_blocks }))
+      const appliedNoteColor = isLocalMode ? note_color : undefined
+      dispatch(chatSliceActions.messageUpdated({ id, content, note, note_color: appliedNoteColor, content_blocks }))
 
       // Sync to React Query cache immediately
       const state = getState()
       const conversationId = state.chat.conversation.currentConversationId
       if (conversationId) {
-        updateMessageInCache(extra.queryClient, conversationId, id, content, note, content_blocks)
+        updateMessageInCache(extra.queryClient, conversationId, id, content, note, appliedNoteColor, content_blocks)
       }
 
       // Sync message update to local SQLite (fire-and-forget)
@@ -4920,6 +4995,8 @@ const executionMode = 'client' // Prefer client execution for tools
                 }))
               }
               lmMessages.push(assistantMsg)
+            } else if (appendCompactionSummaryToLmStudioHistory(lmMessages, m)) {
+              continue
             } else if (m.role === 'tool' && m.tool_call_id) {
               const toolName = toolNameById.get(m.tool_call_id)
               const sanitizedContent = sanitizeToolResultContentForModel(m.content, toolName ?? null)
@@ -5216,6 +5293,8 @@ const executionMode = 'client' // Prefer client execution for tools
                 }))
               }
               chatgptMessages.push(assistantMsg)
+            } else if (appendCompactionSummaryToOpenAIChatGPTHistory(chatgptMessages, m)) {
+              continue
             } else if (m.role === 'tool' && m.tool_call_id) {
               const toolName = toolNameById.get(m.tool_call_id)
               const sanitizedContent = sanitizeToolResultContentForModel(m.content, toolName ?? null)
@@ -5235,7 +5314,7 @@ const executionMode = 'client' // Prefer client execution for tools
               systemPrompt,
               messages: chatgptMessages,
               attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined,
-              tools: getToolsForAI(),
+              tools: getToolsForOpenAIChatGPT(),
             },
             {
               onChunk: chunk => {
@@ -5807,12 +5886,15 @@ const executionMode = 'client' // Prefer client execution for tools
               // Inform UI of tool result
               dispatch(
                 chatSliceActions.streamChunkReceived({
-                  type: 'chunk',
-                  part: 'tool_result',
-                  toolResult: {
-                    tool_use_id: toolCall.id,
-                    content: toolResultBlock.content,
-                    is_error: isError,
+                  streamId,
+                  chunk: {
+                    type: 'chunk',
+                    part: 'tool_result',
+                    toolResult: {
+                      tool_use_id: toolCall.id,
+                      content: toolResultBlock.content,
+                      is_error: isError,
+                    },
                   },
                 })
               )
@@ -6140,6 +6222,8 @@ const executionMode = 'client'
                 }))
               }
               lmMessages.push(assistantMsg)
+            } else if (appendCompactionSummaryToLmStudioHistory(lmMessages, m)) {
+              continue
             } else if (m.role === 'tool' && m.tool_call_id) {
               const toolName = toolNameById.get(m.tool_call_id)
               const sanitizedContent = sanitizeToolResultContentForModel(m.content, toolName ?? null)
@@ -6416,6 +6500,8 @@ const executionMode = 'client'
                 }))
               }
               chatgptMessages.push(assistantMsg)
+            } else if (appendCompactionSummaryToOpenAIChatGPTHistory(chatgptMessages, m)) {
+              continue
             } else if (m.role === 'tool' && m.tool_call_id) {
               const toolName = toolNameById.get(m.tool_call_id)
               const sanitizedContent = sanitizeToolResultContentForModel(m.content, toolName ?? null)
@@ -6435,7 +6521,7 @@ const executionMode = 'client'
               systemPrompt: effectiveSystemPrompt || '',
               messages: chatgptMessages,
               attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined,
-              tools: getToolsForAI(),
+              tools: getToolsForOpenAIChatGPT(),
             },
             {
               onChunk: chunk => {
@@ -6927,12 +7013,15 @@ const executionMode = 'client'
               // Inform UI of tool result
               dispatch(
                 chatSliceActions.streamChunkReceived({
-                  type: 'chunk',
-                  part: 'tool_result',
-                  toolResult: {
-                    tool_use_id: toolCall.id,
-                    content: toolResultBlock.content,
-                    is_error: isError,
+                  streamId,
+                  chunk: {
+                    type: 'chunk',
+                    part: 'tool_result',
+                    toolResult: {
+                      tool_use_id: toolCall.id,
+                      content: toolResultBlock.content,
+                      is_error: isError,
+                    },
                   },
                 })
               )
@@ -7926,6 +8015,7 @@ export const insertBulkMessages = createAsyncThunk<
       model_name?: string
       tool_calls?: string
       note?: string
+      note_color?: string | null
       content_blocks?: any
     }>
     storageMode?: 'local' | 'cloud' // Optional: explicitly set storage mode (useful for newly created conversations)

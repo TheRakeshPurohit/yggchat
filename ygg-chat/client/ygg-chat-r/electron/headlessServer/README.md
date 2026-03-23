@@ -45,7 +45,7 @@ What it does:
 - Stores tokens in server token store via `/api/provider-auth/openai/token`
 - Sends chat to `/api/headless/ephemeral/chat` (no DB conversation persistence)
 - Keeps UI state in memory only (no browser localStorage)
-- Uses default model: `gpt-5.1-codex-mini`
+- Uses default model: `gpt-5.4`
 
 ## Mobile LAN interface (React)
 - Entry URL: `http://<local-server-host>:<port>/mobile`

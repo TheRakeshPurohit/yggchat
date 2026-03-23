@@ -60,10 +60,42 @@ export async function runChatHook(request: ChatHookRequest): Promise<ChatHookRes
     return { matched: false, hookCount: 0 }
   }
 
+  const isStopEvent = request.event === 'Stop'
+
   try {
-    return await localApi.post<ChatHookResult>('/hooks/run', request)
+    if (isStopEvent) {
+      console.debug('[chatHookClient][Stop] request', {
+        conversationId: request.conversationId ?? null,
+        operation: request.operation ?? null,
+        messageId: request.messageId ?? null,
+        parentId: request.parentId ?? null,
+        lineage: request.lineage ?? null,
+        turn: request.turn ?? null,
+      })
+    }
+
+    const result = await localApi.post<ChatHookResult>('/hooks/run', request)
+
+    if (isStopEvent || (Array.isArray(result.errors) && result.errors.length > 0)) {
+      console.debug('[chatHookClient] hook result', {
+        event: request.event,
+        matched: result.matched,
+        hookCount: result.hookCount,
+        blocked: result.blocked ?? false,
+        reason: result.reason ?? null,
+        additionalContext: result.additionalContext ?? null,
+        errors: result.errors ?? [],
+      })
+    }
+
+    return result
   } catch (error) {
-    console.warn('[chatHookClient] Hook execution failed:', error)
+    console.warn('[chatHookClient] Hook execution failed:', error, {
+      event: request.event,
+      conversationId: request.conversationId ?? null,
+      turn: request.turn ?? null,
+      lineage: request.lineage ?? null,
+    })
     return {
       matched: false,
       hookCount: 0,

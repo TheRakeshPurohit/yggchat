@@ -261,6 +261,34 @@ export const getToolsForAI = (): ToolDefinition[] => {
   })
 }
 
+// OpenAI ChatGPT tool calls are executed locally in Electron.
+// Only expose built-in tools that have a local executor (or are handled specially in chatActions).
+// This prevents server-only tools like search_history from being advertised on the OpenAI route.
+const OPENAI_LOCALLY_SUPPORTED_BUILTIN_TOOL_NAMES = new Set<string>([
+  'todo_list',
+  'theme_manager',
+  'read_file',
+  'read_files',
+  'read_file_continuation',
+  'create_file',
+  'delete_file',
+  'edit_file',
+  'brave_search',
+  'ripgrep',
+  'bash',
+  'html_renderer',
+  'glob',
+  'browse_web',
+  'custom_tool_manager',
+  'mcp_manager',
+  'skill_manager',
+  'subagent',
+])
+
+export const getToolsForOpenAIChatGPT = (): ToolDefinition[] => {
+  return getToolsForAI().filter(tool => tool.isMcp || OPENAI_LOCALLY_SUPPORTED_BUILTIN_TOOL_NAMES.has(tool.name))
+}
+
 // Get tool by name
 export const getToolByName = (name: string): ToolDefinition | undefined => {
   return mergedToolDefinitions.find(t => t.name === name)

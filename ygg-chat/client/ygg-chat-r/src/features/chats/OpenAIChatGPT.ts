@@ -25,6 +25,7 @@ function normalizeModel(model: string): string {
   const m = model.toLowerCase().replace(/\s+/g, '-')
 
   // GPT-5.4 variants
+  if (m.includes('gpt-5.4-mini')) return 'gpt-5.4-mini'
   if (m.includes('gpt-5.4-pro')) return 'gpt-5.4-pro'
   if (m.includes('gpt-5.4')) return 'gpt-5.4'
 
@@ -537,6 +538,17 @@ function transformMessagesForChatGPT(messages: any[]): any[] {
     if (msg.role === 'system') {
       // System prompts are sent via instructions for the Codex backend
       continue
+    } else if (msg.role === 'developer') {
+      const developerContent = toUserInputContent(msg)
+      if (developerContent.length === 0) {
+        continue
+      }
+
+      input.push({
+        type: 'message',
+        role: 'developer',
+        content: developerContent,
+      })
     } else if (msg.role === 'user') {
       const userContent = toUserInputContent(msg)
       if (userContent.length === 0) {

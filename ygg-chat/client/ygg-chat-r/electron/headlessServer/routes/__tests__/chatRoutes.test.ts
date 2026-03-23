@@ -66,7 +66,7 @@ describe('registerChatRoutes', () => {
       type: 'started',
       conversationId: 'c1',
       provider: 'openaichatgpt',
-      modelName: 'gpt-5.1-codex-mini',
+      modelName: 'gpt-5.4',
     })
     expect(dataLines[1]).toMatchObject({ type: 'chunk', part: 'text', delta: 'hello' })
     expect(dataLines[2]).toMatchObject({ type: 'complete', message: { id: 'assistant-1' } })

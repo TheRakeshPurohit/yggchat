@@ -530,9 +530,13 @@ await send('CUSTOM_TOOL_CLEAR_CACHE', {})
 
 ---
 
-## LLM Generation (Ephemeral Endpoint)
+## LLM Generation (`REQUEST_GENERATION` bridge)
 
 Call Yggdrasil's LLM for AI-powered features. Supports text and image generation.
+
+> Runtime routing:
+> - **Electron:** routed through the local headless server (`/api/conversations/:id/messages`) so custom tool UIs can use providers like **OpenRouter**.
+> - **Web/non-Electron:** falls back to cloud `/generate/ephemeral`.
 
 ### Text Generation
 
@@ -540,9 +544,27 @@ Call Yggdrasil's LLM for AI-powered features. Supports text and image generation
 const res = await send('REQUEST_GENERATION', {
   prompt: 'Explain quantum computing in simple terms',
   model: 'anthropic/claude-sonnet-4', // or 'google/gemini-3-flash-preview'
+  provider: 'openrouter', // optional; inferred from model when omitted
   maxTokens: 4096, // optional
   temperature: 0.7, // optional
   systemPrompt: 'You are a helpful assistant.', // optional
+  response_format: {
+    // optional, OpenRouter structured outputs
+    type: 'json_schema',
+    json_schema: {
+      name: 'explanation',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          summary: { type: 'string' },
+          bullets: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['summary', 'bullets'],
+      },
+    },
+  },
   attachmentsBase64: [
     // optional, for vision models
     { dataUrl: 'data:image/jpeg;base64,...', type: 'image/jpeg' },
@@ -585,7 +607,7 @@ async function generateWithStreaming(prompt) {
     {
       type: 'REQUEST_GENERATION',
       requestId: myReqId,
-      options: { prompt, model: 'google/gemini-3-flash-preview' },
+      options: { prompt, model: 'google/gemini-3-flash-preview', provider: 'openrouter' },
     },
     '*'
   )

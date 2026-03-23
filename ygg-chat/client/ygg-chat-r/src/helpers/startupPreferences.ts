@@ -1,6 +1,6 @@
 export type StartupLandingPreference = 'homepage' | 'latest-chat'
 
-const DEFAULT_STARTUP_LANDING: StartupLandingPreference = 'homepage'
+const DEFAULT_STARTUP_LANDING: StartupLandingPreference = 'latest-chat'
 const STORAGE_KEY = 'startup:landing-preference'
 
 export const STARTUP_LANDING_CHANGE_EVENT = 'startup-landing-preference-change'

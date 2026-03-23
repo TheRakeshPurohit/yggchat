@@ -38,7 +38,7 @@ describe('registerTestHarnessRoutes', () => {
     const html = await res.text()
 
     expect(html).toContain('Headless OpenAI OAuth + Chat Harness')
-    expect(html).toContain('gpt-5.1-codex-mini')
+    expect(html).toContain('gpt-5.4')
     expect(html).toContain('/api/openai/auth/start')
     expect(html).toContain('/api/headless/ephemeral/chat')
     expect(html).toContain('/api/headless/ephemeral/tools')

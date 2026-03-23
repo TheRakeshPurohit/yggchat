@@ -1,3 +1,4 @@
+import * as os from 'os'
 import * as path from 'path'
 import { promises as fs } from 'fs'
 import { describe, expect, it } from 'vitest'
@@ -25,6 +26,30 @@ describe('readTextFile workspace enforcement', () => {
     const result = await readTextFile('inside.txt', { cwd: harness.workspaceDir })
     expect(result.content).toBe('hello\\nworld\\n')
     expect(result.truncated).toBe(false)
+  })
+
+  it('allows reading managed custom-tools paths outside workspace', async () => {
+    const harness = await createToolFsHarness()
+    const originalUserData = process.env.YGG_APP_USER_DATA
+
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ygg-user-data-'))
+    try {
+      process.env.YGG_APP_USER_DATA = userDataDir
+      const managedFile = path.join(userDataDir, 'custom-tools', 'demo-tool', 'index.ts')
+      await fs.mkdir(path.dirname(managedFile), { recursive: true })
+      await fs.writeFile(managedFile, 'export const ok = true\n', 'utf8')
+
+      const result = await readTextFile(managedFile, { cwd: harness.workspaceDir })
+      expect(result.content).toContain('export const ok = true')
+      expect(result.truncated).toBe(false)
+    } finally {
+      if (originalUserData === undefined) {
+        delete process.env.YGG_APP_USER_DATA
+      } else {
+        process.env.YGG_APP_USER_DATA = originalUserData
+      }
+      await fs.rm(userDataDir, { recursive: true, force: true })
+    }
   })
 })
 

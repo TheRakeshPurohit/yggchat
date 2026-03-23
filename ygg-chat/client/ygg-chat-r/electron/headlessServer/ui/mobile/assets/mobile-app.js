@@ -65586,7 +65586,7 @@ var App = () => {
     () => normalizeProviderName(readStorageValue(MOBILE_LAST_PROVIDER_STORAGE_KEY))
   );
   const [providerModels, setProviderModels] = (0, import_react34.useState)([]);
-  const [modelName, setModelName] = (0, import_react34.useState)("gpt-5.3-codex");
+  const [modelName, setModelName] = (0, import_react34.useState)("gpt-5.4");
   const [statusText, setStatusText] = (0, import_react34.useState)("Loading\u2026");
   const [users, setUsers] = (0, import_react34.useState)([]);
   const [selectedUserId, setSelectedUserId] = (0, import_react34.useState)(() => readStorageValue(MOBILE_LAST_USER_STORAGE_KEY));

@@ -55,11 +55,6 @@ import {
   saveProviderSettings,
 } from '../helpers/providerSettingsStorage'
 import {
-  loadStartupLandingPreference,
-  saveStartupLandingPreference,
-  type StartupLandingPreference,
-} from '../helpers/startupPreferences'
-import {
   buildRemoteMobileUrl,
   loadRemoteServerSettings,
   normalizeRemoteBaseUrl,
@@ -69,7 +64,9 @@ import {
 import {
   loadToolExecutionSettings,
   MAX_BASH_TIMEOUT_MS,
+  MAX_TOOL_CALL_TIMEOUT_MS,
   MIN_BASH_TIMEOUT_MS,
+  MIN_TOOL_CALL_TIMEOUT_MS,
   saveToolExecutionSettings,
   TOOL_EXECUTION_SETTINGS_CHANGE_EVENT,
   ToolExecutionSettings,
@@ -195,6 +192,10 @@ const Settings: React.FC = () => {
   const [toUserId, setToUserId] = useState('')
   const [isChangelogOpen, setIsChangelogOpen] = useState(false)
   const [providerSettings, setProviderSettings] = useState<ProviderSettings>(() => loadProviderSettings())
+  const [braveApiKeyInput, setBraveApiKeyInput] = useState('')
+  const [braveApiKeyConfigured, setBraveApiKeyConfigured] = useState(false)
+  const [braveApiKeyLoading, setBraveApiKeyLoading] = useState(import.meta.env.VITE_ENVIRONMENT === 'electron')
+  const [braveApiKeySaving, setBraveApiKeySaving] = useState(false)
   const [openRouterTemperatureInput, setOpenRouterTemperatureInput] = useState<string>(() => {
     const configured = loadProviderSettings().openRouterTemperature
     return typeof configured === 'number' ? String(configured) : ''
@@ -207,13 +208,14 @@ const Settings: React.FC = () => {
   const [toolExecutionSettings, setToolExecutionSettings] = useState<ToolExecutionSettings>(() =>
     loadToolExecutionSettings()
   )
+  const [toolCallTimeoutInput, setToolCallTimeoutInput] = useState<string>(() =>
+    String(loadToolExecutionSettings().toolCallTimeoutMs)
+  )
+  const [toolCallTimeoutTouched, setToolCallTimeoutTouched] = useState(false)
   const [bashTimeoutInput, setBashTimeoutInput] = useState<string>(() =>
     String(loadToolExecutionSettings().bashTimeoutMs)
   )
   const [bashTimeoutTouched, setBashTimeoutTouched] = useState(false)
-  const [startupLandingPreference, setStartupLandingPreference] = useState<StartupLandingPreference>(() =>
-    loadStartupLandingPreference()
-  )
   const [chatReasoningSettings, setChatReasoningSettings] = useState<ChatReasoningSettings>(() =>
     loadChatReasoningSettings()
   )
@@ -243,6 +245,21 @@ const Settings: React.FC = () => {
   const remoteQrCodeImageUrl = effectiveRemoteMobileUrl
     ? `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(effectiveRemoteMobileUrl)}`
     : null
+
+  const readBraveApiKeyFromSecureStore = async (): Promise<string | null> => {
+    const braveSecretsApi = window.electronAPI?.secrets?.braveSearch
+    if (!braveSecretsApi?.get) {
+      throw new Error('Secure credential storage is unavailable in this build.')
+    }
+
+    const result = await braveSecretsApi.get()
+    if (!result?.success) {
+      throw new Error(result?.error || 'Failed to load Brave Search API key from secure storage.')
+    }
+
+    const value = typeof result.value === 'string' ? result.value.trim() : ''
+    return value || null
+  }
 
   // Fetch Google Drive connection status
   const fetchGoogleDriveStatus = async () => {
@@ -322,6 +339,47 @@ const Settings: React.FC = () => {
     window.addEventListener(PROVIDER_SETTINGS_CHANGE_EVENT, handleProviderSettingsChange as EventListener)
     return () =>
       window.removeEventListener(PROVIDER_SETTINGS_CHANGE_EVENT, handleProviderSettingsChange as EventListener)
+  }, [])
+
+  useEffect(() => {
+    if (import.meta.env.VITE_ENVIRONMENT !== 'electron') {
+      setBraveApiKeyLoading(false)
+      return
+    }
+
+    let active = true
+
+    const loadBraveApiKey = async () => {
+      const maxAttempts = 3
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          const value = await readBraveApiKeyFromSecureStore()
+          if (!active) return
+
+          setBraveApiKeyInput(value ?? '')
+          setBraveApiKeyConfigured(Boolean(value))
+          return
+        } catch (error) {
+          if (attempt >= maxAttempts) {
+            if (active) {
+              console.error('Failed to load Brave API key:', error)
+            }
+            return
+          }
+          await new Promise(resolve => setTimeout(resolve, attempt * 200))
+        }
+      }
+    }
+
+    void loadBraveApiKey().finally(() => {
+      if (active) {
+        setBraveApiKeyLoading(false)
+      }
+    })
+
+    return () => {
+      active = false
+    }
   }, [])
 
   useEffect(() => {
@@ -470,6 +528,77 @@ const Settings: React.FC = () => {
       dispatch(chatSliceActions.providerSelected('OpenRouter'))
     }
     showStatus({ type: 'success', text: 'Signed out of OpenAI ChatGPT. You can sign in again from Chat.' })
+  }
+
+  const handleSaveBraveApiKey = async () => {
+    const normalized = braveApiKeyInput.trim()
+    if (!normalized) {
+      showStatus({ type: 'error', text: 'Enter a Brave Search API key before saving.' })
+      return
+    }
+
+    if (!window.electronAPI?.secrets?.braveSearch?.set) {
+      showStatus({ type: 'error', text: 'Secure credential storage is unavailable in this build.' })
+      return
+    }
+
+    setBraveApiKeySaving(true)
+    try {
+      const result = await window.electronAPI.secrets.braveSearch.set(normalized)
+      if (!result?.success) {
+        throw new Error(result?.error || 'Failed to save Brave API key.')
+      }
+
+      // Verify persistence by reading it back from secure storage.
+      const persistedValue = await readBraveApiKeyFromSecureStore()
+      if (!persistedValue) {
+        throw new Error('Brave Search API key could not be verified after save.')
+      }
+
+      setBraveApiKeyInput(persistedValue)
+      setBraveApiKeyConfigured(true)
+      showStatus({ type: 'success', text: 'Brave Search API key saved securely.' })
+    } catch (error) {
+      console.error('Failed to save Brave API key:', error)
+      showStatus({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'Failed to save Brave Search API key.',
+      })
+    } finally {
+      setBraveApiKeySaving(false)
+    }
+  }
+
+  const handleDeleteBraveApiKey = async () => {
+    if (!window.electronAPI?.secrets?.braveSearch?.delete) {
+      showStatus({ type: 'error', text: 'Secure credential storage is unavailable in this build.' })
+      return
+    }
+
+    setBraveApiKeySaving(true)
+    try {
+      const result = await window.electronAPI.secrets.braveSearch.delete()
+      if (!result?.success) {
+        throw new Error(result?.error || 'Failed to delete Brave API key.')
+      }
+
+      const persistedValue = await readBraveApiKeyFromSecureStore().catch(() => null)
+      if (persistedValue) {
+        throw new Error('Brave Search API key still appears configured after delete.')
+      }
+
+      setBraveApiKeyInput('')
+      setBraveApiKeyConfigured(false)
+      showStatus({ type: 'success', text: 'Brave Search API key removed.' })
+    } catch (error) {
+      console.error('Failed to delete Brave API key:', error)
+      showStatus({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'Failed to delete Brave Search API key.',
+      })
+    } finally {
+      setBraveApiKeySaving(false)
+    }
   }
 
   const handleSaveRemoteBaseUrl = () => {
@@ -721,19 +850,6 @@ const Settings: React.FC = () => {
     fetchLocalUsers()
   }, [userId])
 
-  const handleStartupLandingPreferenceChange = (value: string) => {
-    const nextPreference: StartupLandingPreference = value === 'latest-chat' ? 'latest-chat' : 'homepage'
-    saveStartupLandingPreference(nextPreference)
-    setStartupLandingPreference(nextPreference)
-    showStatus({
-      type: 'success',
-      text:
-        nextPreference === 'latest-chat'
-          ? 'Startup default set to Latest Chat.'
-          : 'Startup default set to Homepage.',
-    })
-  }
-
   const handleDefaultThinkingToggle = () => {
     const updated: ChatReasoningSettings = {
       ...chatReasoningSettings,
@@ -947,6 +1063,11 @@ const Settings: React.FC = () => {
   }, [agentSettings.loopIntervalMs, loopIntervalTouched])
 
   useEffect(() => {
+    if (toolCallTimeoutTouched) return
+    setToolCallTimeoutInput(String(toolExecutionSettings.toolCallTimeoutMs))
+  }, [toolExecutionSettings.toolCallTimeoutMs, toolCallTimeoutTouched])
+
+  useEffect(() => {
     if (bashTimeoutTouched) return
     setBashTimeoutInput(String(toolExecutionSettings.bashTimeoutMs))
   }, [toolExecutionSettings.bashTimeoutMs, bashTimeoutTouched])
@@ -1025,6 +1146,11 @@ const Settings: React.FC = () => {
     setLoopIntervalTouched(true)
   }
 
+  const handleToolCallTimeoutInputChange = (value: string) => {
+    setToolCallTimeoutInput(value)
+    setToolCallTimeoutTouched(true)
+  }
+
   const handleBashTimeoutInputChange = (value: string) => {
     setBashTimeoutInput(value)
     setBashTimeoutTouched(true)
@@ -1061,6 +1187,36 @@ const Settings: React.FC = () => {
       'Loop cadence updated.',
       'Failed to update loop cadence.'
     )
+  }
+
+  const commitToolCallTimeoutChange = (value: string) => {
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setToolCallTimeoutTouched(false)
+      setToolCallTimeoutInput(String(toolExecutionSettings.toolCallTimeoutMs))
+      showStatus({ type: 'error', text: 'Tool call timeout must be a positive number of milliseconds.' })
+      return
+    }
+
+    const clamped = Math.max(MIN_TOOL_CALL_TIMEOUT_MS, Math.min(MAX_TOOL_CALL_TIMEOUT_MS, Math.floor(parsed)))
+    const nextSettings: ToolExecutionSettings = {
+      ...toolExecutionSettings,
+      toolCallTimeoutMs: clamped,
+    }
+    saveToolExecutionSettings(nextSettings)
+    setToolExecutionSettings(nextSettings)
+    setToolCallTimeoutTouched(false)
+    setToolCallTimeoutInput(String(clamped))
+
+    if (clamped !== Math.floor(parsed)) {
+      showStatus({
+        type: 'info',
+        text: `Tool call timeout adjusted to ${clamped}ms (allowed range ${MIN_TOOL_CALL_TIMEOUT_MS}-${MAX_TOOL_CALL_TIMEOUT_MS}ms).`,
+      })
+      return
+    }
+
+    showStatus({ type: 'success', text: 'Default tool call timeout updated.' })
   }
 
   const commitBashTimeoutChange = (value: string) => {
@@ -1373,33 +1529,6 @@ const Settings: React.FC = () => {
             </div>
           </div>
         )}
-
-        <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-          <div className='flex flex-col gap-1'>
-            <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Sidebar</h2>
-            <p className='text-sm text-stone-500 dark:text-stone-200'>
-              Configure where the app should land after login.
-            </p>
-          </div>
-
-          <div className='mt-4 flex flex-col gap-4'>
-            <div className='flex flex-col gap-2'>
-              <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Startup Destination After Login</p>
-              <p className='text-sm text-stone-500 dark:text-stone-400'>
-                Choose where the app opens when login completes.
-              </p>
-              <Select
-                value={startupLandingPreference}
-                onChange={handleStartupLandingPreferenceChange}
-                options={[
-                  { value: 'homepage', label: 'Homepage' },
-                  { value: 'latest-chat', label: 'Latest Chat' },
-                ]}
-                className='max-w-xs'
-              />
-            </div>
-          </div>
-        </section>
 
         <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
           <div className='flex flex-col gap-1'>
@@ -1820,6 +1949,65 @@ const Settings: React.FC = () => {
         {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
           <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
             <div className='flex flex-col gap-1'>
+              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>API Keys</h2>
+              <p className='text-sm text-stone-500 dark:text-stone-200'>
+                Store local tool credentials securely in your OS keychain via keytar.
+              </p>
+            </div>
+
+            <div className='mt-4 flex flex-col gap-4'>
+              <div className='flex flex-col gap-2'>
+                <div className='flex flex-wrap items-center gap-3'>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Brave Search API Key</p>
+                  <span
+                    className={`text-xs px-2 py-1 rounded-full border ${
+                      braveApiKeyConfigured
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-900/30 dark:border-emerald-700 dark:text-emerald-300'
+                        : 'bg-stone-100 border-stone-200 text-stone-600 dark:bg-stone-800 dark:border-stone-700 dark:text-stone-300'
+                    }`}
+                  >
+                    {braveApiKeyLoading ? 'Loading…' : braveApiKeyConfigured ? 'Configured' : 'Not configured'}
+                  </span>
+                </div>
+                <p className='text-sm text-stone-500 dark:text-stone-400'>
+                  Used by the local <code>brave_search</code> tool when running in Electron.
+                </p>
+                <input
+                  type='password'
+                  value={braveApiKeyInput}
+                  placeholder='Enter Brave Search API key'
+                  onChange={e => setBraveApiKeyInput(e.target.value)}
+                  className='w-full max-w-xl rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                />
+                <div className='flex flex-wrap items-center gap-2'>
+                  <Button
+                    variant='primary'
+                    size='small'
+                    onClick={handleSaveBraveApiKey}
+                    disabled={braveApiKeySaving || braveApiKeyLoading || !braveApiKeyInput.trim()}
+                  >
+                    {braveApiKeySaving ? 'Saving…' : 'Save Brave API Key'}
+                  </Button>
+                  <Button
+                    variant='outline2'
+                    size='small'
+                    onClick={handleDeleteBraveApiKey}
+                    disabled={braveApiKeySaving || braveApiKeyLoading || !braveApiKeyConfigured}
+                  >
+                    Remove
+                  </Button>
+                </div>
+                <p className='text-xs text-stone-500 dark:text-stone-400'>
+                  Saved in the desktop app only. The key is not stored in browser localStorage.
+                </p>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
+          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+            <div className='flex flex-col gap-1'>
               <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Local Ownership Migration</h2>
               <p className='text-sm text-stone-500 dark:text-stone-200'>
                 Manually move local project/conversation ownership from one user ID to another.
@@ -2138,35 +2326,68 @@ const Settings: React.FC = () => {
                 toolsExpanded ? ' opacity-100 my-4' : 'max-h-0 opacity-0'
               }`}
             >
-              <div className='mb-3 rounded-lg border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-stone-800/30'>
-                <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
-                  <div>
-                    <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
-                      Default Bash Timeout (ms)
-                    </p>
-                    <p className='text-xs text-stone-500 dark:text-stone-400'>
-                      Used when the `bash` tool call does not specify `timeoutMs`.
-                    </p>
+              <div className='mb-3 space-y-3'>
+                <div className='rounded-lg border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-stone-800/30'>
+                  <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                    <div>
+                      <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
+                        Default Tool Call Timeout (ms)
+                      </p>
+                      <p className='text-xs text-stone-500 dark:text-stone-400'>
+                        Global timeout used for all tool calls unless a tool explicitly sets `timeoutMs`.
+                      </p>
+                    </div>
+                    <input
+                      type='number'
+                      min={MIN_TOOL_CALL_TIMEOUT_MS}
+                      max={MAX_TOOL_CALL_TIMEOUT_MS}
+                      step={1000}
+                      value={toolCallTimeoutInput}
+                      onChange={e => handleToolCallTimeoutInputChange(e.target.value)}
+                      onBlur={e => commitToolCallTimeoutChange(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          e.currentTarget.blur()
+                        }
+                      }}
+                      className='w-44 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                    />
                   </div>
-                  <input
-                    type='number'
-                    min={MIN_BASH_TIMEOUT_MS}
-                    max={MAX_BASH_TIMEOUT_MS}
-                    step={1000}
-                    value={bashTimeoutInput}
-                    onChange={e => handleBashTimeoutInputChange(e.target.value)}
-                    onBlur={e => commitBashTimeoutChange(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') {
-                        e.currentTarget.blur()
-                      }
-                    }}
-                    className='w-44 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
-                  />
+                  <p className='mt-2 text-xs text-stone-500 dark:text-stone-400'>
+                    Range: {MIN_TOOL_CALL_TIMEOUT_MS}ms to {MAX_TOOL_CALL_TIMEOUT_MS}ms.
+                  </p>
                 </div>
-                <p className='mt-2 text-xs text-stone-500 dark:text-stone-400'>
-                  Range: {MIN_BASH_TIMEOUT_MS}ms to {MAX_BASH_TIMEOUT_MS}ms.
-                </p>
+
+                <div className='rounded-lg border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-stone-800/30'>
+                  <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                    <div>
+                      <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
+                        Default Bash Process Timeout (ms)
+                      </p>
+                      <p className='text-xs text-stone-500 dark:text-stone-400'>
+                        Used by `bash` when that tool call omits `timeoutMs`.
+                      </p>
+                    </div>
+                    <input
+                      type='number'
+                      min={MIN_BASH_TIMEOUT_MS}
+                      max={MAX_BASH_TIMEOUT_MS}
+                      step={1000}
+                      value={bashTimeoutInput}
+                      onChange={e => handleBashTimeoutInputChange(e.target.value)}
+                      onBlur={e => commitBashTimeoutChange(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          e.currentTarget.blur()
+                        }
+                      }}
+                      className='w-44 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                    />
+                  </div>
+                  <p className='mt-2 text-xs text-stone-500 dark:text-stone-400'>
+                    Range: {MIN_BASH_TIMEOUT_MS}ms to {MAX_BASH_TIMEOUT_MS}ms.
+                  </p>
+                </div>
               </div>
 
               {/* Reload button */}

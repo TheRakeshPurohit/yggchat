@@ -10,6 +10,7 @@ import { useHtmlDarkMode } from '../components/ThemeManager/themeConfig'
 import { updateResearchNote } from '../features/conversations/conversationActions'
 import { makeSelectConversationById } from '../features/conversations/conversationSelectors'
 import { Conversation } from '../features/conversations/conversationTypes'
+import type { StreamEvent, StreamState } from '../features/chats/chatTypes'
 import { uiActions } from '../features/ui'
 import { AGENT_SETTINGS_CHANGE_EVENT, AgentSettings, loadAgentSettings } from '../helpers/agentSettingsStorage'
 import { useAuth } from '../hooks/useAuth'
@@ -77,6 +78,23 @@ type GitDiffTabState = {
   staged: boolean
   untracked: boolean
   conflicted: boolean
+}
+
+type AgentStreamActivityKind = StreamEvent['type'] | 'idle'
+
+type AgentStreamListItem = {
+  streamId: string
+  streamType: string
+  conversationId: string | null
+  projectId: string | null
+  conversationTitle: string | null
+  anchorMessageId: string | null
+  hasError: boolean
+  createdAt: string
+  rootMessageId: string | null
+  activityKind: AgentStreamActivityKind
+  activityLabel: string
+  completedAt: string | null
 }
 
 const getFileDockTabId = (filePath: string): string => `file:${filePath}`
@@ -238,8 +256,9 @@ const RightBar: React.FC<RightBarProps> = ({
     }
   }, [fileSearchQuery])
 
-  // Tab state: 'git' for repository tools, 'note' for single conversation note, 'list' for all notes, 'global' for agent (hidden)
-  const [activeTab, setActiveTab] = useState<'git' | 'note' | 'list' | 'global'>('note')
+  // Tab state: 'git' for repository tools, 'note' for single conversation note,
+  // 'list' for all notes, 'agents' for active stream overview, 'global' for agent (hidden)
+  const [activeTab, setActiveTab] = useState<'git' | 'note' | 'list' | 'agents' | 'global'>('note')
   const gitBasePath = currentPath || ccCwd || null
   const isGitTabAvailable = !isWeb
   const [selectedGitDiff, setSelectedGitDiff] = useState<{
@@ -295,6 +314,8 @@ const RightBar: React.FC<RightBarProps> = ({
     endDate: '',
     allowedWeekdays: [...ALL_WEEKDAYS],
   })
+  const [streamHistory, setStreamHistory] = useState<AgentStreamListItem[]>([])
+  const previousActiveStreamIdsRef = useRef<Set<string>>(new Set())
 
   // Use React Query hooks for agent messages
   const { data: agentData } = useGlobalAgentMessages()
@@ -416,6 +437,181 @@ const RightBar: React.FC<RightBarProps> = ({
 
   // Get conversation data using selector
   const conversation = useSelector(conversationId ? makeSelectConversationById(conversationId) : () => null)
+  const conversations = useSelector((state: RootState) => state.conversations.items)
+  const streamingRoot = useSelector((state: RootState) => state.chat.streaming)
+
+  const summarizeId = useCallback((value: string | null | undefined) => {
+    if (!value) return '—'
+    return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value
+  }, [])
+
+  const getActivityBadgeClasses = useCallback((kind: AgentStreamActivityKind): string => {
+    if (kind === 'tool_call' || kind === 'tool_result') {
+      return 'rounded-full border border-violet-300/70 dark:border-violet-500/50 bg-violet-50 dark:bg-violet-500/10 text-violet-700 dark:text-violet-200 px-2 py-0.5'
+    }
+    if (kind === 'reasoning') {
+      return 'rounded-full border border-sky-300/70 dark:border-sky-500/50 bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-200 px-2 py-0.5'
+    }
+    if (kind === 'text') {
+      return 'rounded-full border border-emerald-300/70 dark:border-emerald-500/50 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-200 px-2 py-0.5'
+    }
+    if (kind === 'image') {
+      return 'rounded-full border border-fuchsia-300/70 dark:border-fuchsia-500/50 bg-fuchsia-50 dark:bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-200 px-2 py-0.5'
+    }
+    return 'rounded-full border border-neutral-200 dark:border-neutral-700 px-2 py-0.5'
+  }, [])
+
+  const notesByConversationId = useMemo(() => {
+    const map = new Map<string, ResearchNoteItem>()
+    for (const note of notes) {
+      map.set(String(note.id), note)
+    }
+    return map
+  }, [notes])
+
+  const conversationsById = useMemo(() => {
+    const map = new Map<string, Conversation>()
+    for (const item of conversations) {
+      map.set(String(item.id), item)
+    }
+    return map
+  }, [conversations])
+
+  const getStreamActivity = useCallback((stream: StreamState): { activityKind: AgentStreamActivityKind; activityLabel: string } => {
+    if (Array.isArray(stream.events) && stream.events.length > 0) {
+      for (let index = stream.events.length - 1; index >= 0; index -= 1) {
+        const event = stream.events[index]
+        if (!event) continue
+
+        if (event.type === 'tool_call') {
+          const toolName = event.toolCall?.name || stream.toolCalls[stream.toolCalls.length - 1]?.name || 'tool'
+          return {
+            activityKind: 'tool_call',
+            activityLabel: `tool: ${toolName}`,
+          }
+        }
+
+        if (event.type === 'tool_result') {
+          const matchingTool = stream.toolCalls.find(toolCall => toolCall.id === event.toolResult?.tool_use_id)
+          return {
+            activityKind: 'tool_result',
+            activityLabel: matchingTool?.name ? `result: ${matchingTool.name}` : 'tool result',
+          }
+        }
+
+        if (event.type === 'reasoning') {
+          return { activityKind: 'reasoning', activityLabel: 'reasoning' }
+        }
+
+        if (event.type === 'text') {
+          return { activityKind: 'text', activityLabel: 'text' }
+        }
+
+        if (event.type === 'image') {
+          return { activityKind: 'image', activityLabel: 'image' }
+        }
+      }
+    }
+
+    if (stream.toolCalls.length > 0) {
+      const latestTool = stream.toolCalls[stream.toolCalls.length - 1]
+      return {
+        activityKind: 'tool_call',
+        activityLabel: `tool: ${latestTool?.name || 'tool'}`,
+      }
+    }
+
+    if (stream.thinkingBuffer.trim().length > 0) {
+      return { activityKind: 'reasoning', activityLabel: 'reasoning' }
+    }
+
+    if (stream.buffer.trim().length > 0) {
+      return { activityKind: 'text', activityLabel: 'text' }
+    }
+
+    return { activityKind: 'idle', activityLabel: 'starting' }
+  }, [])
+
+  const buildAgentStreamListItem = useCallback(
+    (streamId: string, stream: StreamState, completedAt: string | null = null): AgentStreamListItem => {
+      const streamConversationId = stream.conversationId ? String(stream.conversationId) : null
+      const convo = streamConversationId ? conversationsById.get(streamConversationId) : null
+      const note = streamConversationId ? notesByConversationId.get(streamConversationId) : null
+      const anchorMessageId =
+        stream.streamingMessageId || stream.messageId || stream.lineage.originMessageId || stream.lineage.rootMessageId || null
+      const { activityKind, activityLabel } = getStreamActivity(stream)
+
+      return {
+        streamId,
+        streamType: stream.streamType,
+        conversationId: streamConversationId,
+        projectId: convo?.project_id ? String(convo.project_id) : note?.project_id ? String(note.project_id) : null,
+        conversationTitle: convo?.title || note?.title || (streamConversationId ? `Conversation ${streamConversationId}` : null),
+        anchorMessageId: anchorMessageId ? String(anchorMessageId) : null,
+        hasError: Boolean(stream.error),
+        createdAt: stream.createdAt,
+        rootMessageId: stream.lineage.rootMessageId ? String(stream.lineage.rootMessageId) : null,
+        activityKind,
+        activityLabel,
+        completedAt,
+      }
+    },
+    [conversationsById, getStreamActivity, notesByConversationId]
+  )
+
+  const activeStreams = useMemo(() => {
+    const items: AgentStreamListItem[] = []
+
+    for (const streamId of streamingRoot.activeIds) {
+      const stream = streamingRoot.byId[streamId]
+      if (!stream || !stream.active) continue
+      items.push(buildAgentStreamListItem(streamId, stream, null))
+    }
+
+    return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  }, [buildAgentStreamListItem, streamingRoot.activeIds, streamingRoot.byId])
+
+  useEffect(() => {
+    const currentActiveIds = new Set<string>()
+
+    for (const streamId of streamingRoot.activeIds) {
+      const stream = streamingRoot.byId[streamId]
+      if (stream?.active) {
+        currentActiveIds.add(streamId)
+      }
+    }
+
+    const completedItems: AgentStreamListItem[] = []
+
+    previousActiveStreamIdsRef.current.forEach(streamId => {
+      if (currentActiveIds.has(streamId)) return
+      const stream = streamingRoot.byId[streamId]
+      if (!stream) return
+      completedItems.push(buildAgentStreamListItem(streamId, stream, new Date().toISOString()))
+    })
+
+    if (completedItems.length > 0) {
+      setStreamHistory(previous => {
+        const incomingById = new Map(completedItems.map(item => [item.streamId, item]))
+        const merged = [...completedItems, ...previous.filter(item => !incomingById.has(item.streamId))]
+        return merged
+          .sort((a, b) => (b.completedAt || b.createdAt).localeCompare(a.completedAt || a.createdAt))
+          .slice(0, 40)
+      })
+    }
+
+    previousActiveStreamIdsRef.current = currentActiveIds
+  }, [buildAgentStreamListItem, streamingRoot.activeIds, streamingRoot.byId])
+
+  const handleActiveStreamClick = useCallback(
+    (item: (typeof activeStreams)[number]) => {
+      if (!item.conversationId) return
+      const projectSegment = item.projectId ? String(item.projectId) : 'unknown'
+      const hash = item.anchorMessageId ? `#${item.anchorMessageId}` : ''
+      navigate(`/chat/${projectSegment}/${item.conversationId}${hash}`)
+    },
+    [navigate]
+  )
 
   // Initialize local note from conversation data
   useEffect(() => {
@@ -1551,6 +1747,17 @@ const RightBar: React.FC<RightBarProps> = ({
               >
                 List
               </button>
+              <button
+                onClick={() => setActiveTab('agents')}
+                className={`flex-1 px-2 py-2 text-sm font-medium rounded-xl transition-all duration-200 ${
+                  activeTab === 'agents'
+                    ? 'bg-neutral-50 acrylic-ultra-light-nb-3 text-stone-800 dark:text-stone-200 scale-102 dark:border-transparent shadow-[0px_0.5px_3px_-0.5px_rgba(0,0,0,0.05)] dark:shadow-[0px_0.5px_3px_2px_rgba(0,0,0,0.05)]'
+                    : 'bg-transparent hover:scale-101 text-stone-600 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-neutral-900/50 '
+                }`}
+                title='Active streaming branches'
+              >
+                Agents {activeStreams.length > 0 ? `(${activeStreams.length})` : ''}
+              </button>
               {/* Global tab intentionally hidden.
             <button
               onClick={() => setActiveTab('global')}
@@ -2189,6 +2396,132 @@ const RightBar: React.FC<RightBarProps> = ({
                   </div>
                 </div>
               )
+            ) : activeTab === 'agents' ? (
+              <div className='space-y-3'>
+                <div>
+                  <div className='px-2 pb-1 text-[11px] uppercase tracking-[0.16em] text-neutral-500 dark:text-neutral-400'>
+                    Running
+                  </div>
+                  {activeStreams.length === 0 ? (
+                    <div className='text-xs text-neutral-500 dark:text-neutral-400 px-2 py-1'>
+                      No active chat streams right now.
+                    </div>
+                  ) : (
+                    <div className='space-y-2'>
+                      {activeStreams.map(stream => (
+                        <div key={stream.streamId} className='group relative'>
+                          <div
+                            role='button'
+                            tabIndex={0}
+                            onClick={() => handleActiveStreamClick(stream)}
+                            onKeyDown={event => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault()
+                                handleActiveStreamClick(stream)
+                              }
+                            }}
+                            className='w-full text-left rounded-lg transition-all duration-200 cursor-pointer border border-transparent hover:border-neutral-200 hover:bg-stone-100/40 dark:hover:border-neutral-700 dark:hover:bg-yBlack-900/20 px-2 py-2'
+                          >
+                            <div className='flex items-start justify-between gap-2'>
+                              <div className='min-w-0 flex-1'>
+                                <div className='text-[12px] font-medium text-neutral-900 dark:text-stone-200 truncate'>
+                                  {stream.conversationTitle || `Conversation ${stream.conversationId || 'Unknown'}`}
+                                </div>
+                                <div className='mt-1 text-[11px] text-neutral-500 dark:text-neutral-400 flex flex-wrap gap-2'>
+                                  <span className='rounded-full border border-neutral-200 dark:border-neutral-700 px-2 py-0.5'>
+                                    {stream.streamType}
+                                  </span>
+                                  <span className={getActivityBadgeClasses(stream.activityKind)}>{stream.activityLabel}</span>
+                                  <span className='rounded-full border border-neutral-200 dark:border-neutral-700 px-2 py-0.5'>
+                                    stream {summarizeId(stream.streamId)}
+                                  </span>
+                                  <span className='rounded-full border border-neutral-200 dark:border-neutral-700 px-2 py-0.5'>
+                                    anchor {summarizeId(stream.anchorMessageId)}
+                                  </span>
+                                </div>
+                                <div className='mt-1 text-[10px] text-neutral-500 dark:text-neutral-400'>
+                                  conversation {summarizeId(stream.conversationId)}
+                                </div>
+                              </div>
+                              <div className='flex flex-col items-end gap-1'>
+                                <span className='text-[10px] text-neutral-500 dark:text-neutral-400'>
+                                  {new Date(stream.createdAt).toLocaleTimeString()}
+                                </span>
+                                {stream.hasError && (
+                                  <span className='text-[10px] rounded-full border border-rose-300 dark:border-rose-500/40 bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-200 px-2 py-0.5'>
+                                    error
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className='border-t border-neutral-200 dark:border-neutral-800' />
+
+                <div>
+                  <div className='px-2 pb-1 text-[11px] uppercase tracking-[0.16em] text-neutral-500 dark:text-neutral-400'>
+                    History
+                  </div>
+                  {streamHistory.length === 0 ? (
+                    <div className='text-xs text-neutral-500 dark:text-neutral-400 px-2 py-1'>
+                      No completed streams yet.
+                    </div>
+                  ) : (
+                    <div className='space-y-2'>
+                      {streamHistory.map(stream => (
+                        <div key={`history-${stream.streamId}`} className='group relative'>
+                          <div
+                            role='button'
+                            tabIndex={0}
+                            onClick={() => handleActiveStreamClick(stream)}
+                            onKeyDown={event => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault()
+                                handleActiveStreamClick(stream)
+                              }
+                            }}
+                            className='w-full text-left rounded-lg transition-all duration-200 cursor-pointer border border-neutral-200/80 dark:border-neutral-800 hover:border-neutral-300 dark:hover:border-neutral-700 bg-stone-50/40 dark:bg-yBlack-900/20 px-2 py-2'
+                          >
+                            <div className='flex items-start justify-between gap-2'>
+                              <div className='min-w-0 flex-1'>
+                                <div className='text-[12px] font-medium text-neutral-800 dark:text-stone-200 truncate'>
+                                  {stream.conversationTitle || `Conversation ${stream.conversationId || 'Unknown'}`}
+                                </div>
+                                <div className='mt-1 text-[11px] text-neutral-500 dark:text-neutral-400 flex flex-wrap gap-2'>
+                                  <span className='rounded-full border border-neutral-200 dark:border-neutral-700 px-2 py-0.5'>
+                                    {stream.streamType}
+                                  </span>
+                                  <span className={getActivityBadgeClasses(stream.activityKind)}>{stream.activityLabel}</span>
+                                  <span className='rounded-full border border-neutral-200 dark:border-neutral-700 px-2 py-0.5'>
+                                    stream {summarizeId(stream.streamId)}
+                                  </span>
+                                  {stream.hasError ? (
+                                    <span className='text-[10px] rounded-full border border-rose-300 dark:border-rose-500/40 bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-200 px-2 py-0.5'>
+                                      ended with error
+                                    </span>
+                                  ) : (
+                                    <span className='text-[10px] rounded-full border border-neutral-200 dark:border-neutral-700 px-2 py-0.5'>
+                                      completed
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <div className='text-[10px] text-neutral-500 dark:text-neutral-400 whitespace-nowrap'>
+                                {new Date(stream.completedAt || stream.createdAt).toLocaleTimeString()}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
             ) : activeTab === 'list' ? (
               // List tab - show all research notes
               <>

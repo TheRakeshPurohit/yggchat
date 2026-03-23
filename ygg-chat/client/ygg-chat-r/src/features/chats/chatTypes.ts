@@ -251,6 +251,7 @@ export interface CompositionState {
   input: MessageInput
   sending: boolean
   compacting: boolean
+  compactingConversationId: ConversationId | null
   validationError: string | null
   draftMessage: String | null
   multiReplyCount: number

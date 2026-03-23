@@ -4,9 +4,10 @@
  * to ensure consistent IPC handler support across all contexts.
  */
 
-import { createStreamingRequest, environment, localApi } from './api'
 import { getToolByName } from '../features/chats/toolDefinitions'
+import { getSessionFromStorage, refreshTokenIfNeeded } from '../lib/jwtUtils'
 import { globalAgentLoop } from '../services'
+import { buildLocalApiUrl, createStreamingRequest, environment, localApi } from './api'
 
 type StreamState = {
   targets: Set<string>
@@ -27,6 +28,33 @@ type BridgeContext = {
   getIframe: () => HTMLIFrameElement | null
   getUserId: () => string | null
   getToolContext?: () => ToolContext | null
+}
+
+type GenerationProvider = 'openrouter' | 'openaichatgpt' | 'lmstudio'
+
+type GenerationStreamResult = {
+  text: string
+  images: Array<{ url: string; mimeType: string }>
+}
+
+function normalizeGenerationProvider(provider: string): GenerationProvider | null {
+  const normalized = provider.trim().toLowerCase()
+  if (normalized === 'openrouter') return 'openrouter'
+  if (normalized === 'lmstudio') return 'lmstudio'
+  if (normalized === 'openai' || normalized === 'openaichatgpt' || normalized === 'openai(chatgpt)') {
+    return 'openaichatgpt'
+  }
+  return null
+}
+
+function resolveGenerationProvider(modelName: string, provider?: string): GenerationProvider {
+  const explicit = typeof provider === 'string' ? normalizeGenerationProvider(provider) : null
+  if (explicit) return explicit
+
+  if (modelName.includes('/')) return 'openrouter'
+  if (/^(gpt-|o1|o3|o4)/i.test(modelName)) return 'openaichatgpt'
+  if (/lmstudio|local-model/i.test(modelName)) return 'lmstudio'
+  return 'openrouter'
 }
 
 /**
@@ -246,8 +274,7 @@ export function createMessageHandler(
             response = { success: false, error: 'Agent write access not permitted' }
             break
           }
-          const description =
-            typeof options?.description === 'string' ? options.description.trim() : ''
+          const description = typeof options?.description === 'string' ? options.description.trim() : ''
           if (!description) {
             response = { success: false, error: 'Missing task description' }
             break
@@ -383,36 +410,92 @@ export function createMessageHandler(
         }
 
         case 'REQUEST_GENERATION': {
-          const { prompt, model, maxTokens, temperature, systemPrompt, attachmentsBase64 } = options || {}
+          const {
+            prompt,
+            model,
+            provider,
+            userId,
+            accountId,
+            maxTokens,
+            temperature,
+            systemPrompt,
+            attachmentsBase64,
+            tools,
+            cwd,
+            rootPath,
+            response_format,
+            responseFormat,
+          } = options || {}
 
           if (!prompt) {
             response = { success: false, error: 'Missing prompt' }
             break
           }
 
-          try {
+          const modelName = typeof model === 'string' && model.trim() ? model.trim() : 'anthropic/claude-sonnet-4'
+          const resolvedProvider = resolveGenerationProvider(modelName, provider)
+          const effectiveResponseFormat = response_format ?? responseFormat
+
+          const postChunk = (delta: string, fullText: string) => {
+            iframe.contentWindow?.postMessage(
+              {
+                type: 'REQUEST_GENERATION_CHUNK',
+                requestId,
+                chunk: delta,
+                text: fullText,
+              },
+              '*'
+            )
+          }
+
+          const postReasoning = (delta: string) => {
+            iframe.contentWindow?.postMessage(
+              {
+                type: 'REQUEST_GENERATION_REASONING',
+                requestId,
+                reasoning: delta,
+              },
+              '*'
+            )
+          }
+
+          const postImage = (
+            image: { url: string; mimeType: string },
+            images: Array<{ url: string; mimeType: string }>
+          ) => {
+            iframe.contentWindow?.postMessage(
+              {
+                type: 'REQUEST_GENERATION_IMAGE',
+                requestId,
+                image,
+                images: [...images],
+              },
+              '*'
+            )
+          }
+
+          const streamCloudEphemeral = async (): Promise<GenerationStreamResult> => {
             const streamResponse = await createStreamingRequest('/generate/ephemeral', null, {
               method: 'POST',
               body: JSON.stringify({
                 prompt,
-                model: model || 'anthropic/claude-sonnet-4',
+                model: modelName,
                 maxTokens: maxTokens || 4096,
                 temperature: temperature ?? 0.7,
                 systemPrompt,
                 attachmentsBase64,
+                response_format: effectiveResponseFormat,
               }),
             })
 
             if (!streamResponse.ok) {
               const errorText = await streamResponse.text()
-              response = { success: false, error: `HTTP ${streamResponse.status}: ${errorText}` }
-              break
+              throw new Error(`HTTP ${streamResponse.status}: ${errorText}`)
             }
 
             const reader = streamResponse.body?.getReader()
             if (!reader) {
-              response = { success: false, error: 'No response body' }
-              break
+              throw new Error('No response body')
             }
 
             const decoder = new TextDecoder()
@@ -424,75 +507,308 @@ export function createMessageHandler(
               const { done, value } = await reader.read()
               if (done) break
 
-              const chunk = decoder.decode(value, { stream: true })
-              sseBuffer += chunk
-
+              sseBuffer += decoder.decode(value, { stream: true })
               const lines = sseBuffer.split('\n')
               sseBuffer = lines.pop() || ''
 
               for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                  const data = line.slice(6)
-                  if (data === '[DONE]') continue
-                  try {
-                    const parsed = JSON.parse(data)
-                    if (parsed.text) {
-                      fullText += parsed.text
-                      iframe.contentWindow?.postMessage(
-                        {
-                          type: 'REQUEST_GENERATION_CHUNK',
-                          requestId,
-                          chunk: parsed.text,
-                          text: fullText,
-                        },
-                        '*'
-                      )
-                    } else if (parsed.image) {
-                      const imageData = { url: parsed.image, mimeType: parsed.mimeType || 'image/png' }
-                      images.push(imageData)
-                      iframe.contentWindow?.postMessage(
-                        {
-                          type: 'REQUEST_GENERATION_IMAGE',
-                          requestId,
-                          image: imageData,
-                          images: [...images],
-                        },
-                        '*'
-                      )
-                    } else if (parsed.reasoning) {
-                      iframe.contentWindow?.postMessage(
-                        {
-                          type: 'REQUEST_GENERATION_REASONING',
-                          requestId,
-                          reasoning: parsed.reasoning,
-                        },
-                        '*'
-                      )
-                    }
-                  } catch {
-                    if (data.trim()) {
-                      fullText += data
-                      iframe.contentWindow?.postMessage(
-                        {
-                          type: 'REQUEST_GENERATION_CHUNK',
-                          requestId,
-                          chunk: data,
-                          text: fullText,
-                        },
-                        '*'
-                      )
-                    }
+                const trimmed = line.trim()
+                if (!trimmed.startsWith('data:')) continue
+                const data = trimmed.slice(5).trim()
+                if (!data || data === '[DONE]') continue
+
+                try {
+                  const parsed = JSON.parse(data)
+                  if (typeof parsed?.text === 'string' && parsed.text) {
+                    fullText += parsed.text
+                    postChunk(parsed.text, fullText)
                   }
+                  if (typeof parsed?.reasoning === 'string' && parsed.reasoning) {
+                    postReasoning(parsed.reasoning)
+                  }
+                  if (typeof parsed?.image === 'string' && parsed.image) {
+                    const image = { url: parsed.image, mimeType: parsed?.mimeType || 'image/png' }
+                    images.push(image)
+                    postImage(image, images)
+                  }
+                } catch {
+                  fullText += data
+                  postChunk(data, fullText)
                 }
               }
             }
 
-            response = { success: true, text: fullText, images }
+            return { text: fullText, images }
+          }
+
+          const streamLocalHeadless = async (): Promise<GenerationStreamResult> => {
+            await refreshTokenIfNeeded().catch(() => false)
+            const session = getSessionFromStorage()
+            const sessionUserId = session?.user?.id || null
+            const accessToken = session?.access_token || null
+            const effectiveUserId =
+              (typeof userId === 'string' && userId.trim()) || context.getUserId() || sessionUserId || 'custom-tool-ui'
+            const effectiveRootPath =
+              (typeof rootPath === 'string' && rootPath.trim()) || (typeof cwd === 'string' && cwd.trim()) || null
+
+            const conversation = await localApi.post<any>('/app/conversations', {
+              user_id: effectiveUserId,
+              title: `Custom Tool Generation (${resolvedProvider})`,
+              project_id: null,
+              cwd: effectiveRootPath,
+            })
+
+            const conversationId = typeof conversation?.id === 'string' ? conversation.id : null
+            if (!conversationId) {
+              throw new Error('Failed to create local conversation for generation')
+            }
+
+            const endpoint = await buildLocalApiUrl(`/conversations/${encodeURIComponent(conversationId)}/messages`)
+            const requestBody: Record<string, any> = {
+              content: String(prompt),
+              provider: resolvedProvider,
+              modelName,
+              userId: effectiveUserId,
+              systemPrompt,
+              temperature: typeof temperature === 'number' ? temperature : undefined,
+              attachmentsBase64: Array.isArray(attachmentsBase64) ? attachmentsBase64 : undefined,
+              tools: Array.isArray(tools) ? tools : undefined,
+              rootPath: effectiveRootPath,
+            }
+
+            if (typeof accountId === 'string' && accountId.trim()) {
+              requestBody.accountId = accountId.trim()
+            }
+            if (accessToken) {
+              requestBody.accessToken = accessToken
+            }
+
+            const streamResponse = await fetch(endpoint, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'text/event-stream',
+                ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+              },
+              body: JSON.stringify(requestBody),
+            })
+
+            if (!streamResponse.ok) {
+              const errorText = await streamResponse.text()
+              throw new Error(`HTTP ${streamResponse.status}: ${errorText}`)
+            }
+
+            const reader = streamResponse.body?.getReader()
+            if (!reader) {
+              throw new Error('No response body')
+            }
+
+            const decoder = new TextDecoder()
+            let fullText = ''
+            const images: Array<{ url: string; mimeType: string }> = []
+            let sseBuffer = ''
+
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+
+              sseBuffer += decoder.decode(value, { stream: true })
+              const lines = sseBuffer.split('\n')
+              sseBuffer = lines.pop() || ''
+
+              for (const line of lines) {
+                const trimmed = line.trim()
+                if (!trimmed.startsWith('data:')) continue
+                const data = trimmed.slice(5).trim()
+                if (!data || data === '[DONE]') continue
+
+                let parsed: any = null
+                try {
+                  parsed = JSON.parse(data)
+                } catch {
+                  fullText += data
+                  postChunk(data, fullText)
+                  continue
+                }
+
+                if (parsed?.type === 'error') {
+                  throw new Error(parsed?.error || 'Headless generation error')
+                }
+
+                if (parsed?.type === 'chunk') {
+                  if (parsed.part === 'text' && typeof parsed.delta === 'string') {
+                    fullText += parsed.delta
+                    postChunk(parsed.delta, fullText)
+                  }
+                  if (parsed.part === 'reasoning' && typeof parsed.delta === 'string') {
+                    postReasoning(parsed.delta)
+                  }
+                  if (parsed.part === 'image' && typeof parsed.url === 'string') {
+                    const image = { url: parsed.url, mimeType: parsed?.mimeType || 'image/png' }
+                    images.push(image)
+                    postImage(image, images)
+                  }
+                  continue
+                }
+
+                if (parsed?.type === 'complete') {
+                  const messageContent = typeof parsed?.message?.content === 'string' ? parsed.message.content : ''
+                  if (!fullText && messageContent) {
+                    fullText = messageContent
+                    postChunk(messageContent, fullText)
+                  }
+                  continue
+                }
+
+                if (typeof parsed?.text === 'string' && parsed.text) {
+                  fullText += parsed.text
+                  postChunk(parsed.text, fullText)
+                }
+                if (typeof parsed?.reasoning === 'string' && parsed.reasoning) {
+                  postReasoning(parsed.reasoning)
+                }
+                if (typeof parsed?.image === 'string' && parsed.image) {
+                  const image = { url: parsed.image, mimeType: parsed?.mimeType || 'image/png' }
+                  images.push(image)
+                  postImage(image, images)
+                }
+              }
+            }
+
+            return { text: fullText, images }
+          }
+
+          try {
+            const generated = isElectron ? await streamLocalHeadless() : await streamCloudEphemeral()
+            response = { success: true, text: generated.text, images: generated.images, provider: resolvedProvider }
           } catch (err) {
-            response = { success: false, error: String(err) }
+            response = { success: false, error: String(err), provider: resolvedProvider }
           }
           break
         }
+
+        // case 'REQUEST_GENERATION_LEGACY': {
+        //   const {
+        //     prompt,
+        //     model,
+        //     maxTokens,
+        //     temperature,
+        //     systemPrompt,
+        //     attachmentsBase64,
+        //     response_format,
+        //     responseFormat,
+        //   } = options || {}
+        //   const effectiveResponseFormat = response_format ?? responseFormat
+
+        //   if (!prompt) {
+        //     response = { success: false, error: 'Missing prompt' }
+        //     break
+        //   }
+
+        //   try {
+        //     const streamResponse = await createStreamingRequest('/generate/ephemeral', null, {
+        //       method: 'POST',
+        //       body: JSON.stringify({
+        //         prompt,
+        //         model: model || 'anthropic/claude-sonnet-4',
+        //         maxTokens: maxTokens || 4096,
+        //         temperature: temperature ?? 0.7,
+        //         systemPrompt,
+        //         attachmentsBase64,
+        //         response_format: effectiveResponseFormat,
+        //       }),
+        //     })
+
+        //     if (!streamResponse.ok) {
+        //       const errorText = await streamResponse.text()
+        //       response = { success: false, error: `HTTP ${streamResponse.status}: ${errorText}` }
+        //       break
+        //     }
+
+        //     const reader = streamResponse.body?.getReader()
+        //     if (!reader) {
+        //       response = { success: false, error: 'No response body' }
+        //       break
+        //     }
+
+        //     const decoder = new TextDecoder()
+        //     let fullText = ''
+        //     const images: Array<{ url: string; mimeType: string }> = []
+        //     let sseBuffer = ''
+
+        //     while (true) {
+        //       const { done, value } = await reader.read()
+        //       if (done) break
+
+        //       const chunk = decoder.decode(value, { stream: true })
+        //       sseBuffer += chunk
+
+        //       const lines = sseBuffer.split('\n')
+        //       sseBuffer = lines.pop() || ''
+
+        //       for (const line of lines) {
+        //         if (line.startsWith('data: ')) {
+        //           const data = line.slice(6)
+        //           if (data === '[DONE]') continue
+        //           try {
+        //             const parsed = JSON.parse(data)
+        //             if (parsed.text) {
+        //               fullText += parsed.text
+        //               iframe.contentWindow?.postMessage(
+        //                 {
+        //                   type: 'REQUEST_GENERATION_CHUNK',
+        //                   requestId,
+        //                   chunk: parsed.text,
+        //                   text: fullText,
+        //                 },
+        //                 '*'
+        //               )
+        //             } else if (parsed.image) {
+        //               const imageData = { url: parsed.image, mimeType: parsed.mimeType || 'image/png' }
+        //               images.push(imageData)
+        //               iframe.contentWindow?.postMessage(
+        //                 {
+        //                   type: 'REQUEST_GENERATION_IMAGE',
+        //                   requestId,
+        //                   image: imageData,
+        //                   images: [...images],
+        //                 },
+        //                 '*'
+        //               )
+        //             } else if (parsed.reasoning) {
+        //               iframe.contentWindow?.postMessage(
+        //                 {
+        //                   type: 'REQUEST_GENERATION_REASONING',
+        //                   requestId,
+        //                   reasoning: parsed.reasoning,
+        //                 },
+        //                 '*'
+        //               )
+        //             }
+        //           } catch {
+        //             if (data.trim()) {
+        //               fullText += data
+        //               iframe.contentWindow?.postMessage(
+        //                 {
+        //                   type: 'REQUEST_GENERATION_CHUNK',
+        //                   requestId,
+        //                   chunk: data,
+        //                   text: fullText,
+        //                 },
+        //                 '*'
+        //               )
+        //             }
+        //           }
+        //         }
+        //       }
+        //     }
+
+        //     response = { success: true, text: fullText, images }
+        //   } catch (err) {
+        //     response = { success: false, error: String(err) }
+        //   }
+        //   break
+        // }
       }
     } catch (err) {
       response = { success: false, error: String(err) }
@@ -577,10 +893,7 @@ export function setupStreamForwarding(
 /**
  * Creates a flush function for pending stream events
  */
-export function createFlushPendingEvents(
-  getIframe: () => HTMLIFrameElement | null,
-  streamState: StreamState
-) {
+export function createFlushPendingEvents(getIframe: () => HTMLIFrameElement | null, streamState: StreamState) {
   return (streamId: string) => {
     const pending = streamState.pendingEvents.get(streamId)
     if (!pending || pending.length === 0) return
