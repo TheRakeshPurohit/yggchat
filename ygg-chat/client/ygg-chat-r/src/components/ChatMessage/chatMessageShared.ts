@@ -335,6 +335,30 @@ export const formatToolResultSummary = (content: any): string | null => {
 
 export const normalizeReasoningTextForComparison = (text: string): string => text.replace(/\s+/g, ' ').trim()
 
+export const extractAssistantTextsFromResponsesOutputItems = (items: any[]): string[] => {
+  const extracted: string[] = []
+
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || item.type !== 'message' || item.role !== 'assistant') continue
+    if (!Array.isArray(item.content)) continue
+
+    const text = item.content
+      .map((part: any) => {
+        if (!part || typeof part !== 'object') return ''
+        return typeof part.text === 'string' ? part.text : ''
+      })
+      .filter(Boolean)
+      .join('')
+      .trim()
+
+    if (text) {
+      extracted.push(text)
+    }
+  }
+
+  return extracted
+}
+
 export const extractReasoningTextsFromResponsesOutputItems = (items: any[]): string[] => {
   const extracted: string[] = []
 

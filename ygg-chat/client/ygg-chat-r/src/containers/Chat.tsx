@@ -261,6 +261,7 @@ type ChatInputControllerProps = {
   onAddCurrentIdeContext?: () => boolean
   onClearIdeContexts?: () => void
   selectedIdeContextItems?: Array<{ id: string; label: string }>
+  fallbackFileSearchRoot?: string | null
 }
 
 type AddedIdeContext = {
@@ -494,10 +495,44 @@ const countReasoningEntriesInResponsesOutputItems = (items: unknown): number => 
   return count
 }
 
+const extractAssistantTextsFromResponsesOutputItems = (items: unknown): string[] => {
+  if (!Array.isArray(items)) return []
+
+  const extracted: string[] = []
+
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue
+    const itemRecord = item as Record<string, unknown>
+    if (itemRecord.type !== 'message' || itemRecord.role !== 'assistant' || !Array.isArray(itemRecord.content)) {
+      continue
+    }
+
+    const text = itemRecord.content
+      .map(part => {
+        if (!part || typeof part !== 'object') return ''
+        const partRecord = part as Record<string, unknown>
+        return typeof partRecord.text === 'string' ? partRecord.text : ''
+      })
+      .filter(Boolean)
+      .join('')
+      .trim()
+
+    if (text) extracted.push(text)
+  }
+
+  return extracted
+}
+
 const getResponsesOutputReasoningCount = (block: ContentBlock): number => {
   const blockRecord = block as unknown as Record<string, unknown>
   if (blockRecord.type !== 'responses_output_items') return 0
   return countReasoningEntriesInResponsesOutputItems(blockRecord.items)
+}
+
+const getResponsesOutputAssistantTexts = (block: ContentBlock): string[] => {
+  const blockRecord = block as unknown as Record<string, unknown>
+  if (blockRecord.type !== 'responses_output_items') return []
+  return extractAssistantTextsFromResponsesOutputItems(blockRecord.items)
 }
 
 const isProcessContentBlock = (block: ContentBlock): boolean => {
@@ -582,6 +617,7 @@ const ChatInputController = React.memo(
         onAddCurrentIdeContext,
         onClearIdeContexts,
         selectedIdeContextItems,
+        fallbackFileSearchRoot,
       },
       ref
     ) => {
@@ -682,6 +718,7 @@ const ChatInputController = React.memo(
             onAddCurrentIdeContext={onAddCurrentIdeContext}
             onClearIdeContexts={onClearIdeContexts}
             selectedIdeContextItems={selectedIdeContextItems}
+            fallbackFileSearchRoot={fallbackFileSearchRoot}
             className='!border-0 !focus:border-0 !outline-none !shadow-none focus:!ring-0'
           />
         </div>
@@ -1837,6 +1874,11 @@ function Chat() {
       }
     }
 
+    const hasResponsesOutputItems = (parsed: ParsedMessageData): boolean =>
+      Array.isArray(parsed.contentBlocks)
+        ? parsed.contentBlocks.some(block => (block as unknown as Record<string, unknown>).type === 'responses_output_items')
+        : false
+
     const hasSubstantialTextOrImage = (msg: Message, parsed: ParsedMessageData): boolean => {
       if (
         typeof msg.content === 'string' &&
@@ -1858,7 +1900,9 @@ function Chat() {
           if (block.type === 'image') {
             return Boolean(block.url)
           }
-          return false
+
+          const responseTexts = getResponsesOutputAssistantTexts(block)
+          return responseTexts.some(text => text.trim().length > 0 && !isLikelyProcessAnnotationText(text))
         })
       }
 
@@ -1890,13 +1934,16 @@ function Chat() {
       }
 
       const thinkingBlockCount = parsed.contentBlocks.filter(block => block.type === 'thinking').length
+      if (thinkingBlockCount > 0) {
+        return thinkingBlockCount
+      }
+
       const responsesOutputReasoningCount = parsed.contentBlocks.reduce(
         (count, block) => count + getResponsesOutputReasoningCount(block),
         0
       )
 
-      const total = thinkingBlockCount + responsesOutputReasoningCount
-      if (total > 0) return total
+      if (responsesOutputReasoningCount > 0) return responsesOutputReasoningCount
 
       return typeof msg.thinking_block === 'string' && msg.thinking_block.trim().length > 0 ? 1 : 0
     }
@@ -1985,8 +2032,9 @@ function Chat() {
           const trailingParsed = parsedMessageDataById.get(trailingCandidate.id) ?? EMPTY_PARSED_MESSAGE_DATA
           const trailingHasProcessSignal = hasProcessSignal(trailingCandidate, trailingParsed)
           const trailingHasSubstantialContent = hasSubstantialTextOrImage(trailingCandidate, trailingParsed)
+          const trailingUsesOrderedResponsesItems = hasResponsesOutputItems(trailingParsed)
 
-          if (trailingHasProcessSignal && trailingHasSubstantialContent) {
+          if (trailingHasProcessSignal && trailingHasSubstantialContent && !trailingUsesOrderedResponsesItems) {
             bridgedMessageId = trailingCandidate.id
             toolCount += countToolSignals(trailingParsed)
             reasoningCount += countReasoningSignals(trailingCandidate, trailingParsed)
@@ -6080,6 +6128,7 @@ function Chat() {
                 onAddCurrentIdeContext={addCurrentIdeContextToMessage}
                 onClearIdeContexts={clearIdeContexts}
                 selectedIdeContextItems={addedIdeContextItems}
+                fallbackFileSearchRoot={ccCwd}
               />
             </div>
             {/* Selected file chips moved from InputTextArea */}

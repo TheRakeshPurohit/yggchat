@@ -2695,6 +2695,7 @@ const RightBar: React.FC<RightBarProps> = ({
                     className='w-full resize-none'
                     minRows={2}
                     maxRows={4}
+                    fallbackFileSearchRoot={agentWorkDirectory || currentPath || ccCwd || null}
                   />
                   <div className='flex items-center gap-2'>
                     <Button
@@ -2747,6 +2748,7 @@ const RightBar: React.FC<RightBarProps> = ({
                       maxRows={undefined}
                       fillAvailableHeight={true}
                       autoFocus={false}
+                      fallbackFileSearchRoot={currentPath || ccCwd || null}
                     />
                   </div>
                 )}

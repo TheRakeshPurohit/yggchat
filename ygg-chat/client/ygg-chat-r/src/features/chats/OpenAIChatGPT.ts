@@ -474,11 +474,46 @@ function parseStoredResponseOutputItems(raw: any): any[] {
   return []
 }
 
+function normalizeResponseMessageContent(content: any): Array<{ type: 'output_text'; text: string }> {
+  if (!Array.isArray(content)) return []
+
+  return content
+    .map(part => {
+      if (!part || typeof part !== 'object') return null
+      if (part.type === 'output_text' && typeof part.text === 'string' && part.text.trim().length > 0) {
+        return { type: 'output_text', text: part.text }
+      }
+      if (part.type === 'text' && typeof part.text === 'string' && part.text.trim().length > 0) {
+        return { type: 'output_text', text: part.text }
+      }
+      return null
+    })
+    .filter((part): part is { type: 'output_text'; text: string } => Boolean(part))
+}
+
 function normalizeResponseOutputItemsForReplay(items: any[]): any[] {
   const normalized: any[] = []
 
   for (const item of items || []) {
     if (!item || typeof item !== 'object' || typeof item.type !== 'string') continue
+
+    if (item.type === 'message') {
+      const role = typeof item.role === 'string' ? item.role : 'assistant'
+      const content = normalizeResponseMessageContent(item.content)
+      if (content.length === 0) continue
+
+      const messageItem: any = {
+        type: 'message',
+        role,
+        content,
+      }
+      if (typeof item.id === 'string') messageItem.id = item.id
+      if (typeof item.phase === 'string') messageItem.phase = item.phase
+      if (typeof item.output_index === 'number') messageItem.output_index = item.output_index
+      if (typeof item.outputIndex === 'number') messageItem.output_index = item.outputIndex
+      normalized.push(messageItem)
+      continue
+    }
 
     if (item.type === 'function_call') {
       const callId = typeof item.call_id === 'string' ? item.call_id : typeof item.id === 'string' ? item.id : ''
@@ -490,12 +525,17 @@ function normalizeResponseOutputItemsForReplay(items: any[]): any[] {
             ? JSON.stringify(item.arguments)
             : ''
       if (!callId || !name) continue
-      normalized.push({
+
+      const functionCallItem: any = {
         type: 'function_call',
         call_id: callId,
         name,
         arguments: args,
-      })
+      }
+      if (typeof item.id === 'string') functionCallItem.id = item.id
+      if (typeof item.output_index === 'number') functionCallItem.output_index = item.output_index
+      if (typeof item.outputIndex === 'number') functionCallItem.output_index = item.outputIndex
+      normalized.push(functionCallItem)
       continue
     }
 
@@ -504,6 +544,8 @@ function normalizeResponseOutputItemsForReplay(items: any[]): any[] {
       if (typeof item.id === 'string') reasoningItem.id = item.id
       if (Array.isArray(item.summary)) reasoningItem.summary = item.summary
       if (Array.isArray(item.content)) reasoningItem.content = item.content
+      if (typeof item.output_index === 'number') reasoningItem.output_index = item.output_index
+      if (typeof item.outputIndex === 'number') reasoningItem.output_index = item.outputIndex
       if ((item as any).encrypted_content) reasoningItem.encrypted_content = (item as any).encrypted_content
       normalized.push(reasoningItem)
     }
@@ -564,8 +606,15 @@ function transformMessagesForChatGPT(messages: any[]): any[] {
     } else if (msg.role === 'assistant') {
       const storedResponseItems = extractStoredResponseOutputItemsFromMessage(msg)
       let hasStoredFunctionCalls = false
+      let hasStoredAssistantMessages = false
 
       for (const item of storedResponseItems) {
+        if (item?.type === 'message' && item?.role === 'assistant' && Array.isArray(item?.content) && item.content.length > 0) {
+          hasStoredAssistantMessages = true
+          input.push(item)
+          continue
+        }
+
         if (item?.type === 'reasoning') {
           input.push(item)
           continue
@@ -587,13 +636,15 @@ function transformMessagesForChatGPT(messages: any[]): any[] {
         }
       }
 
-      const content = toOutputTextContent(msg.content || '')
-      if (content.length > 0) {
-        input.push({
-          type: 'message',
-          role: 'assistant',
-          content,
-        })
+      if (!hasStoredAssistantMessages) {
+        const content = toOutputTextContent(msg.content || '')
+        if (content.length > 0) {
+          input.push({
+            type: 'message',
+            role: 'assistant',
+            content,
+          })
+        }
       }
 
       if (!hasStoredFunctionCalls && msg.tool_calls && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
@@ -748,10 +799,11 @@ function buildCodexRequestBody(
   input: any[],
   tools: any[],
   instructions: string,
-  reasoningConfig?: { effort?: string; summary?: string }
+  reasoningConfig?: { effort?: string; summary?: string },
+  thinkEnabled: boolean = true
 ) {
   const normalizedModel = normalizeModel(model)
-  const reasoning = reasoningConfig || getReasoningConfig(model)
+  const reasoning = thinkEnabled ? reasoningConfig || getReasoningConfig(model) : undefined
 
   return {
     model: normalizedModel,
@@ -759,14 +811,16 @@ function buildCodexRequestBody(
     input,
     tools: tools.length > 0 ? tools : undefined,
     tool_choice: tools.length > 0 ? 'auto' : undefined,
+    parallel_tool_calls: tools.length > 0 ? true : undefined,
     // Required for stateless operation with ChatGPT backend
     store: false,
-    include: ['reasoning.encrypted_content'],
-    // Reasoning configuration
-    reasoning: {
-      effort: reasoning.effort || 'medium',
-      summary: reasoning.summary || 'auto',
-    },
+    include: reasoning ? ['reasoning.encrypted_content'] : undefined,
+    reasoning: reasoning
+      ? {
+          effort: reasoning.effort || 'medium',
+          summary: reasoning.summary || 'auto',
+        }
+      : undefined,
     // Stream mode
     stream: true,
   }
@@ -806,7 +860,8 @@ export async function createOpenAIChatGPTStreamingRequest(
     inputWithImages,
     tools,
     payload.systemPrompt || '',
-    payload.reasoningConfig
+    payload.reasoningConfig,
+    payload.think !== false
   )
 
   // Build URL for Codex endpoint
@@ -997,7 +1052,7 @@ export async function createOpenAIChatGPTStreamingRequest(
     return candidates[0].text
   }
 
-  const addOrUpdateResponseToolCall = (itemId: string, item: ChatGPTResponseOutputItem) => {
+  const addOrUpdateResponseToolCall = (itemId: string, item: ChatGPTResponseOutputItem): ToolCall | null => {
     const existing = responseToolCallAccumulators.get(itemId)
     const callId = item.call_id || item.id || itemId
     const name = item.name || existing?.name || ''
@@ -1020,12 +1075,44 @@ export async function createOpenAIChatGPTStreamingRequest(
         seq: responseToolCallSeq++,
       })
     }
+
+    if (!callId || !name) return null
+
+    return {
+      id: callId,
+      name,
+      arguments: parseToolArguments(args),
+      status: 'pending',
+    }
   }
 
   const getResponseOutputItemsForReplay = (): any[] => {
     if (Array.isArray(completedResponseOutputItems) && completedResponseOutputItems.length > 0) {
       return normalizeResponseOutputItemsForReplay(completedResponseOutputItems)
     }
+
+    const fallbackMessages = Array.from(responseOutputItems.values())
+      .filter(item => (!item.type || item.type === 'message') && (!item.role || item.role === 'assistant'))
+      .sort((a, b) => {
+        if (typeof a.outputIndex === 'number' && typeof b.outputIndex === 'number') return a.outputIndex - b.outputIndex
+        if (typeof a.outputIndex === 'number') return -1
+        if (typeof b.outputIndex === 'number') return 1
+        return a.seq - b.seq
+      })
+      .map(item => {
+        const textEntry = responseTextByItem.get(item.id)
+        const text = textEntry?.text || ''
+        if (!text.trim()) return null
+        return {
+          type: 'message',
+          id: item.id,
+          role: item.role || 'assistant',
+          phase: item.phase,
+          output_index: item.outputIndex,
+          content: [{ type: 'output_text', text }],
+        }
+      })
+      .filter(Boolean)
 
     const fallbackFunctionCalls = Array.from(responseToolCallAccumulators.values())
       .sort((a, b) => {
@@ -1039,13 +1126,60 @@ export async function createOpenAIChatGPTStreamingRequest(
         call_id: acc.id,
         name: acc.name,
         arguments: acc.arguments || '',
+        output_index: acc.outputIndex,
       }))
       .filter(item => item.call_id && item.name)
 
-    return normalizeResponseOutputItemsForReplay(fallbackFunctionCalls)
+    return normalizeResponseOutputItemsForReplay([...fallbackMessages, ...fallbackFunctionCalls])
   }
 
-  const buildFinalToolCalls = (): { toolCalls: ToolCall[]; contentBlocks: ContentBlock[] } => {
+  const parseToolArguments = (rawArgs: any): any => {
+    if (typeof rawArgs !== 'string') return rawArgs
+    try {
+      return rawArgs ? JSON.parse(rawArgs) : rawArgs
+    } catch {
+      return rawArgs
+    }
+  }
+
+  const emitToolCallChunk = (toolCall: ToolCall | null) => {
+    if (!toolCall?.id || !toolCall?.name) return
+    onChunk({ type: 'chunk', part: 'tool_call', toolCall })
+  }
+
+  const extractAssistantMessageTextFromReplayItem = (item: any): string => {
+    if (!item || item.type !== 'message' || !Array.isArray(item.content)) return ''
+    return item.content
+      .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
+      .filter(Boolean)
+      .join('')
+  }
+
+  const extractReasoningTextFromReplayItem = (item: any): string => {
+    if (!item || item.type !== 'reasoning') return ''
+
+    const parts: string[] = []
+
+    if (Array.isArray(item.summary)) {
+      for (const part of item.summary) {
+        if (typeof part?.text === 'string' && part.text.trim()) {
+          parts.push(part.text)
+        }
+      }
+    }
+
+    if (Array.isArray(item.content)) {
+      for (const part of item.content) {
+        if (typeof part?.text === 'string' && part.text.trim()) {
+          parts.push(part.text)
+        }
+      }
+    }
+
+    return parts.join('\n\n').trim()
+  }
+
+  const buildLegacyFinalToolCalls = (): { toolCalls: ToolCall[]; contentBlocks: ContentBlock[] } => {
     const finalToolCalls: ToolCall[] = []
     const finalContentBlocks: ContentBlock[] = []
     const seen = new Set<string>()
@@ -1060,14 +1194,7 @@ export async function createOpenAIChatGPTStreamingRequest(
     })
 
     for (const acc of responseEntries) {
-      let parsedArgs: any = acc.arguments
-      try {
-        if (acc.arguments) {
-          parsedArgs = JSON.parse(acc.arguments)
-        }
-      } catch {
-        // Keep as string
-      }
+      const parsedArgs = parseToolArguments(acc.arguments)
 
       if (acc.id && !seen.has(acc.id)) {
         seen.add(acc.id)
@@ -1088,14 +1215,7 @@ export async function createOpenAIChatGPTStreamingRequest(
     }
 
     toolCallAccumulators.forEach((acc, index) => {
-      let parsedArgs: any = acc.arguments
-      try {
-        if (acc.arguments) {
-          parsedArgs = JSON.parse(acc.arguments)
-        }
-      } catch {
-        // Keep as string
-      }
+      const parsedArgs = parseToolArguments(acc.arguments)
 
       if (acc.id && !seen.has(acc.id)) {
         seen.add(acc.id)
@@ -1118,28 +1238,143 @@ export async function createOpenAIChatGPTStreamingRequest(
     return { toolCalls: finalToolCalls, contentBlocks: finalContentBlocks }
   }
 
+  const buildFinalArtifactsFromReplayItems = (replayItems: any[]) => {
+    const toolCalls: ToolCall[] = []
+    const contentBlocks: ContentBlock[] = []
+    const seenToolIds = new Set<string>()
+    const reasoningSegments: string[] = []
+    let nextIndex = 0
+
+    for (const item of replayItems) {
+      if (!item || typeof item !== 'object') continue
+
+      if (item.type === 'message' && item.role === 'assistant') {
+        if (useGPT53StrictTextAssembly && item.phase && item.phase !== 'final_answer') {
+          continue
+        }
+
+        const rawText = extractAssistantMessageTextFromReplayItem(item)
+        const text = useGPT53StrictTextAssembly ? sanitizeGPT53Text(rawText) : rawText
+        if (!text.trim()) continue
+        contentBlocks.push({
+          type: 'text',
+          index: nextIndex++,
+          content: text,
+        })
+        continue
+      }
+
+      if (item.type === 'reasoning') {
+        const reasoningText = extractReasoningTextFromReplayItem(item)
+        if (!reasoningText) continue
+        reasoningSegments.push(reasoningText)
+        contentBlocks.push({
+          type: 'thinking',
+          index: nextIndex++,
+          content: reasoningText,
+        })
+        continue
+      }
+
+      if (item.type === 'function_call') {
+        const callId = typeof item.call_id === 'string' ? item.call_id : typeof item.id === 'string' ? item.id : ''
+        const name = typeof item.name === 'string' ? item.name : ''
+        if (!callId || !name || seenToolIds.has(callId)) continue
+
+        const parsedArgs = parseToolArguments(item.arguments)
+        seenToolIds.add(callId)
+        toolCalls.push({
+          id: callId,
+          name,
+          arguments: parsedArgs,
+          status: 'pending',
+        })
+        contentBlocks.push({
+          type: 'tool_use',
+          index: nextIndex++,
+          id: callId,
+          name,
+          input: parsedArgs,
+        })
+      }
+    }
+
+    const assistantMessages = replayItems
+      .filter(
+        item =>
+          item?.type === 'message' &&
+          item?.role === 'assistant' &&
+          (!useGPT53StrictTextAssembly || !item?.phase || item.phase === 'final_answer')
+      )
+      .map((item: any) => {
+        const rawText = extractAssistantMessageTextFromReplayItem(item)
+        const text = useGPT53StrictTextAssembly ? sanitizeGPT53Text(rawText) : rawText
+        return {
+          text,
+          phase: typeof item?.phase === 'string' ? item.phase : undefined,
+        }
+      })
+      .filter((entry: { text: string }) => entry.text.trim().length > 0)
+
+    const finalAnswerEntry = [...assistantMessages].reverse().find(entry => entry.phase === 'final_answer')
+    const fallbackEntry = [...assistantMessages].reverse().find(entry => entry.phase !== 'commentary')
+    const lastEntry = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null
+
+    return {
+      finalAssistantText: finalAnswerEntry?.text || fallbackEntry?.text || lastEntry?.text || '',
+      finalReasoningText: reasoningSegments.join('\n\n').trim(),
+      toolCalls,
+      contentBlocks,
+    }
+  }
+
   const emitCompleteMessage = (partial: boolean): boolean => {
     if (completionEmitted) return false
 
     if (!assistantMessageId) assistantMessageId = uuidv4()
-    const finalAssistantText = selectFinalAssistantText()
-    const { toolCalls: finalToolCalls, contentBlocks: finalContentBlocks } = buildFinalToolCalls()
-    const replayItems = getResponseOutputItemsForReplay()
 
-    if (finalAssistantText) {
-      finalContentBlocks.unshift({
-        type: 'text',
-        index: 0,
-        content: finalAssistantText,
-      })
+    const replayItems = getResponseOutputItemsForReplay()
+    const replayArtifacts = buildFinalArtifactsFromReplayItems(replayItems)
+    const legacyArtifacts = buildLegacyFinalToolCalls()
+    const finalToolCalls = replayArtifacts.toolCalls.length > 0 ? [...replayArtifacts.toolCalls] : [...legacyArtifacts.toolCalls]
+    const finalContentBlocks =
+      replayArtifacts.contentBlocks.length > 0 ? [...replayArtifacts.contentBlocks] : [...legacyArtifacts.contentBlocks]
+    const seenToolIds = new Set(finalToolCalls.map(toolCall => toolCall.id))
+
+    if (replayArtifacts.contentBlocks.length > 0 && legacyArtifacts.toolCalls.length > 0) {
+      for (const legacyToolCall of legacyArtifacts.toolCalls) {
+        if (!legacyToolCall.id || seenToolIds.has(legacyToolCall.id)) continue
+        seenToolIds.add(legacyToolCall.id)
+        finalToolCalls.push(legacyToolCall)
+        finalContentBlocks.push({
+          type: 'tool_use',
+          index: finalContentBlocks.length,
+          id: legacyToolCall.id,
+          name: legacyToolCall.name,
+          input: legacyToolCall.arguments,
+        })
+      }
     }
 
-    if (assistantReasoning) {
-      finalContentBlocks.unshift({
-        type: 'thinking',
-        index: 0,
-        content: assistantReasoning,
-      })
+    const finalAssistantText = replayArtifacts.finalAssistantText || selectFinalAssistantText()
+    const finalReasoningText = replayArtifacts.finalReasoningText || assistantReasoning
+
+    if (replayArtifacts.contentBlocks.length === 0) {
+      if (finalReasoningText) {
+        finalContentBlocks.unshift({
+          type: 'thinking',
+          index: 0,
+          content: finalReasoningText,
+        })
+      }
+
+      if (finalAssistantText) {
+        finalContentBlocks.unshift({
+          type: 'text',
+          index: 0,
+          content: finalAssistantText,
+        })
+      }
     }
 
     if (replayItems.length > 0) {
@@ -1151,7 +1386,7 @@ export async function createOpenAIChatGPTStreamingRequest(
     }
 
     const hasMeaningfulContent =
-      finalAssistantText.trim().length > 0 || assistantReasoning.trim().length > 0 || finalToolCalls.length > 0
+      finalAssistantText.trim().length > 0 || finalReasoningText.trim().length > 0 || finalToolCalls.length > 0
 
     if (!hasMeaningfulContent) {
       return false
@@ -1168,8 +1403,8 @@ export async function createOpenAIChatGPTStreamingRequest(
       partial,
     })
 
-    if (assistantReasoning) {
-      message.thinking_block = assistantReasoning
+    if (finalReasoningText) {
+      message.thinking_block = finalReasoningText
     }
 
     if (replayItems.length > 0) {
@@ -1293,7 +1528,7 @@ export async function createOpenAIChatGPTStreamingRequest(
           const item = (parsed as any).item as ChatGPTResponseOutputItem | undefined
           mergeOutputItem(item)
           if (item?.type === 'function_call' && item.id) {
-            addOrUpdateResponseToolCall(item.id, item)
+            emitToolCallChunk(addOrUpdateResponseToolCall(item.id, item))
           }
           continue
         }
@@ -1325,28 +1560,10 @@ export async function createOpenAIChatGPTStreamingRequest(
           if (itemId) {
             upsertResponseText(itemId, fullText, outputIndex, true)
           }
-
-          if (itemId && shouldEmitTextForEvent(evt)) {
-            const emitted = emittedTextByItem.get(itemId) || ''
-            if (fullText.startsWith(emitted)) {
-              const tail = fullText.slice(emitted.length)
-              if (tail) {
-                emitTextDelta(tail, itemId)
-              }
-            } else if (!emitted) {
-              emitTextDelta(fullText, itemId)
-            }
-          } else if (!useGPT53StrictTextAssembly && !itemId) {
-            emitTextDelta(fullText)
-          }
           continue
         }
 
-        if (
-          parsed.type === 'response.reasoning.delta' ||
-          parsed.type === 'response.reasoning_text.delta' ||
-          parsed.type === 'response.reasoning_summary_text.delta'
-        ) {
+        if (parsed.type === 'response.reasoning_text.delta' || parsed.type === 'response.reasoning_summary_text.delta') {
           const evt = parsed as any
           const delta = typeof evt.delta === 'string' ? evt.delta : ''
           if (!delta) continue
@@ -1355,52 +1572,20 @@ export async function createOpenAIChatGPTStreamingRequest(
           if (parsed.type === 'response.reasoning_summary_text.delta') {
             const summaryIndex = extractIndex(evt, 'summary_index', 'summaryIndex')
             applyReasoningDelta(`reasoning_summary:${itemId}:${summaryIndex}`, delta)
-          } else if (parsed.type === 'response.reasoning_text.delta') {
+          } else {
             const contentIndex = extractIndex(evt, 'content_index', 'contentIndex')
             applyReasoningDelta(`reasoning_text:${itemId}:${contentIndex}`, delta)
-          } else {
-            // Legacy/nonstandard backend event.
-            applyReasoningDelta(`reasoning_legacy:${itemId}`, delta)
           }
           continue
         }
 
-        if (parsed.type === 'response.reasoning_text.done' || parsed.type === 'response.reasoning_summary_text.done') {
-          const evt = parsed as any
-          const text = typeof evt.text === 'string' ? evt.text : ''
-          if (!text) continue
-
-          const itemId = extractItemId(evt) || 'reasoning'
-          if (parsed.type === 'response.reasoning_summary_text.done') {
-            const summaryIndex = extractIndex(evt, 'summary_index', 'summaryIndex')
-            applyReasoningDone(`reasoning_summary:${itemId}:${summaryIndex}`, text)
-          } else {
-            const contentIndex = extractIndex(evt, 'content_index', 'contentIndex')
-            applyReasoningDone(`reasoning_text:${itemId}:${contentIndex}`, text)
-          }
-          continue
-        }
-
-        if (parsed.type === 'response.reasoning_summary_part.done') {
-          const evt = parsed as any
-          const part = evt.part
-          const text = typeof part?.text === 'string' ? part.text : ''
-          if (!text) continue
-
-          const itemId = extractItemId(evt) || 'reasoning'
-          const summaryIndex = extractIndex(evt, 'summary_index', 'summaryIndex')
-          applyReasoningDone(`reasoning_summary:${itemId}:${summaryIndex}`, text)
-          continue
-        }
-
-        if (parsed.type === 'response.content_part.done') {
-          const evt = parsed as any
-          const part = evt.part
-          if (part?.type === 'reasoning_text' && typeof part.text === 'string' && part.text) {
-            const itemId = extractItemId(evt) || 'reasoning'
-            const contentIndex = extractIndex(evt, 'content_index', 'contentIndex')
-            applyReasoningDone(`reasoning_text:${itemId}:${contentIndex}`, part.text)
-          }
+        if (
+          parsed.type === 'response.reasoning_text.done' ||
+          parsed.type === 'response.reasoning_summary_text.done' ||
+          parsed.type === 'response.reasoning_summary_part.done' ||
+          parsed.type === 'response.content_part.done' ||
+          parsed.type === 'response.reasoning.delta'
+        ) {
           continue
         }
 
@@ -1411,6 +1596,12 @@ export async function createOpenAIChatGPTStreamingRequest(
             const existing = responseToolCallAccumulators.get(itemId)
             if (existing) {
               existing.arguments += delta || ''
+              emitToolCallChunk({
+                id: existing.id,
+                name: existing.name,
+                arguments: parseToolArguments(existing.arguments),
+                status: 'pending',
+              })
             } else {
               responseToolCallAccumulators.set(itemId, {
                 id: itemId,
@@ -1430,6 +1621,12 @@ export async function createOpenAIChatGPTStreamingRequest(
             const existing = responseToolCallAccumulators.get(itemId)
             if (existing) {
               existing.arguments = args || existing.arguments
+              emitToolCallChunk({
+                id: existing.id,
+                name: existing.name,
+                arguments: parseToolArguments(existing.arguments),
+                status: 'pending',
+              })
             } else {
               responseToolCallAccumulators.set(itemId, {
                 id: itemId,
@@ -1446,13 +1643,28 @@ export async function createOpenAIChatGPTStreamingRequest(
           const item = (parsed as any).item as ChatGPTResponseOutputItem | undefined
           mergeOutputItem(item)
           if (item?.type === 'function_call' && item.id) {
-            addOrUpdateResponseToolCall(item.id, item)
+            emitToolCallChunk(addOrUpdateResponseToolCall(item.id, item))
           }
           extractReasoningFromOutputItem(item)
           continue
         }
 
-        if (parsed.type === 'response.done' || parsed.type === 'response.completed') {
+        if (parsed.type === 'response.failed' || parsed.type === 'response.incomplete') {
+          const responseError = (parsed as any)?.response?.error
+          const message =
+            typeof responseError?.message === 'string' && responseError.message.trim().length > 0
+              ? responseError.message
+              : parsed.type === 'response.incomplete'
+                ? 'OpenAI response was incomplete.'
+                : 'OpenAI response failed.'
+          throw new Error(message)
+        }
+
+        if (parsed.type === 'response.done') {
+          continue
+        }
+
+        if (parsed.type === 'response.completed') {
           const responseOutput = (parsed as any)?.response?.output
           if (Array.isArray(responseOutput)) {
             completedResponseOutputItems = responseOutput
@@ -1470,7 +1682,18 @@ export async function createOpenAIChatGPTStreamingRequest(
 
         // Tool calls delta
         if (delta?.tool_calls) {
-          processToolCallDeltas(delta.tool_calls, toolCallAccumulators)
+          const { newToolCalls, updatedIndices } = processToolCallDeltas(delta.tool_calls, toolCallAccumulators)
+          newToolCalls.forEach(toolCall => emitToolCallChunk(toolCall))
+          updatedIndices.forEach(index => {
+            const acc = toolCallAccumulators.get(index)
+            if (!acc?.id || !acc?.name) return
+            emitToolCallChunk({
+              id: acc.id,
+              name: acc.name,
+              arguments: parseToolArguments(acc.arguments),
+              status: 'pending',
+            })
+          })
         }
 
         // Text delta (OpenAI-style)

@@ -395,10 +395,13 @@ export const chatSlice = createSlice({
               stream.toolCalls.push(chunk.toolCall)
             }
 
-            // Only add to events if this tool call ID hasn't been logged yet (deduplication)
-            const eventExists = stream.events.some(e => e.type === 'tool_call' && e.toolCall?.id === chunk.toolCall!.id)
+            const existingEventIndex = stream.events.findIndex(
+              e => e.type === 'tool_call' && e.toolCall?.id === chunk.toolCall!.id
+            )
 
-            if (!eventExists) {
+            if (existingEventIndex >= 0) {
+              stream.events[existingEventIndex].toolCall = chunk.toolCall
+            } else {
               stream.events.push({
                 type: 'tool_call',
                 toolCall: chunk.toolCall,
@@ -454,10 +457,13 @@ export const chatSlice = createSlice({
             stream.toolCalls.push(chunk.toolCall)
           }
 
-          // Only add to events if this tool call ID hasn't been logged yet (deduplication)
-          const eventExists = stream.events.some(e => e.type === 'tool_call' && e.toolCall?.id === chunk.toolCall!.id)
+          const existingEventIndex = stream.events.findIndex(
+            e => e.type === 'tool_call' && e.toolCall?.id === chunk.toolCall!.id
+          )
 
-          if (!eventExists) {
+          if (existingEventIndex >= 0) {
+            stream.events[existingEventIndex].toolCall = chunk.toolCall
+          } else {
             stream.events.push({
               type: 'tool_call',
               toolCall: chunk.toolCall,

@@ -1,10 +1,13 @@
-import React, { useEffect, useId, useRef, useState } from 'react'
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
-import { selectFocusedChatMessageId } from '../../features/chats/chatSelectors'
+import { selectCcCwd, selectFocusedChatMessageId } from '../../features/chats/chatSelectors'
 import { chatSliceActions } from '../../features/chats/chatSlice'
+import { addSelectedFileForChat } from '../../features/ideContext'
 import { selectMentionableFiles, type MentionableFileOption } from '../../features/ideContext/ideContextSelectors'
 import { useIdeContext } from '../../hooks/useIdeContext'
+import { type DirectoryFileEntry, useDirectoryFileSearch, useDirectoryFiles } from '../../hooks/useQueries'
 import type { RootState } from '../../store/store'
+import { readLocalMentionFile } from '../../utils/readLocalMentionFile'
 
 type textAreaState = 'default' | 'error' | 'disabled'
 type textAreaWidth = 'w-1/6' | 'w-1/4' | 'w-1/2' | 'w-3/4' | 'w-3/5' | 'w-5/6' | 'w-full' | 'max-w-3xl'
@@ -26,9 +29,36 @@ interface TextAreaProps {
   autoFocus?: boolean
   showCharCount?: boolean
   fillAvailableHeight?: boolean
+  fallbackFileSearchRoot?: string | null
 }
 
 const allowedMentionChar = /[A-Za-z0-9._\/\-]/
+const normalizeSlashes = (value: string) => value.replace(/\\/g, '/')
+const basename = (value: string) => {
+  const normalized = normalizeSlashes(value)
+  const parts = normalized.split('/').filter(Boolean)
+  return parts[parts.length - 1] || normalized
+}
+const dirname = (value: string) => {
+  const normalized = normalizeSlashes(value)
+  const idx = normalized.lastIndexOf('/')
+  if (idx <= 0) return ''
+  return normalized.slice(0, idx)
+}
+
+const toMentionableOption = (file: DirectoryFileEntry): MentionableFileOption => {
+  const relativePath = file.relativePath || file.name || basename(file.path)
+  const normalizedRelativePath = normalizeSlashes(relativePath)
+  return {
+    kind: file.isDirectory ? 'folder' : 'file',
+    path: file.path,
+    relativePath: normalizedRelativePath,
+    directoryPath: dirname(file.path),
+    relativeDirectoryPath: dirname(normalizedRelativePath),
+    name: file.name || basename(normalizedRelativePath),
+    mention: `@${normalizedRelativePath}`,
+  }
+}
 
 function findActiveMention(value: string, cursorPos: number) {
   const beforeCursor = value.slice(0, cursorPos)
@@ -69,6 +99,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
   autoFocus = false,
   showCharCount = false,
   fillAvailableHeight = false,
+  fallbackFileSearchRoot = null,
   ...rest
 }) => {
   const dispatch = useDispatch()
@@ -76,6 +107,8 @@ export const TextArea: React.FC<TextAreaProps> = ({
   const imageDrafts = useSelector((s: RootState) => s.chat.composition.imageDrafts)
   const mentionableFiles = useSelector(selectMentionableFiles)
   const selectedFilesForChat = useSelector((s: RootState) => s.ideContext.selectedFilesForChat)
+  const extensionConnected = useSelector((s: RootState) => s.ideContext.extensionConnected)
+  const chatCwd = useSelector(selectCcCwd)
   // Local copy of mentionable files to prevent re-selecting the same file locally
   const [localMentionableFiles, setLocalMentionableFiles] = useState(mentionableFiles)
   // Merge in new files from the selector while preserving local removals and excluding already selected files
@@ -83,6 +116,14 @@ export const TextArea: React.FC<TextAreaProps> = ({
     const selectedPaths = new Set(selectedFilesForChat.map(f => f.path))
     setLocalMentionableFiles(mentionableFiles.filter(f => !selectedPaths.has(f.path)))
   }, [mentionableFiles, selectedFilesForChat])
+  const effectiveFallbackFileSearchRoot =
+    (typeof fallbackFileSearchRoot === 'string' && fallbackFileSearchRoot.trim()) ||
+    (typeof chatCwd === 'string' && chatCwd.trim()) ||
+    null
+  const shouldUseLocalFileFallback =
+    import.meta.env.VITE_ENVIRONMENT !== 'web' &&
+    !!effectiveFallbackFileSearchRoot &&
+    (!extensionConnected || mentionableFiles.length === 0)
   const { requestFileContent } = useIdeContext()
   const id = useId()
   const errorId = `${id}-error`
@@ -95,6 +136,37 @@ export const TextArea: React.FC<TextAreaProps> = ({
   const [activeMention, setActiveMention] = useState<{ start: number; term: string } | null>(null)
   const [dropdownDirection, setDropdownDirection] = useState<'up' | 'down'>('up')
   const [dropdownMaxHeight, setDropdownMaxHeight] = useState<number | undefined>(undefined)
+  const activeMentionTerm = activeMention?.term?.trim() || ''
+  const {
+    data: fallbackDirectoryData,
+    isLoading: isFallbackDirectoryLoading,
+    isFetching: isFallbackDirectoryFetching,
+    error: fallbackDirectoryError,
+  } = useDirectoryFiles(shouldUseLocalFileFallback && !activeMentionTerm ? effectiveFallbackFileSearchRoot : null)
+  const {
+    data: fallbackFileSearchData,
+    isLoading: isFallbackSearchLoading,
+    isFetching: isFallbackSearchFetching,
+    error: fallbackFileSearchError,
+  } = useDirectoryFileSearch(
+    shouldUseLocalFileFallback && activeMentionTerm ? effectiveFallbackFileSearchRoot : null,
+    shouldUseLocalFileFallback && activeMentionTerm ? activeMentionTerm : null,
+    true,
+    100
+  )
+  const selectedMentionedPaths = useMemo(() => new Set(selectedFilesForChat.map(file => file.path)), [selectedFilesForChat])
+  const fallbackMentionableFiles = useMemo(() => {
+    const source = activeMentionTerm ? fallbackFileSearchData?.files || [] : fallbackDirectoryData?.files || []
+    return source.map(toMentionableOption).filter(file => !selectedMentionedPaths.has(file.path))
+  }, [activeMentionTerm, fallbackDirectoryData?.files, fallbackFileSearchData?.files, selectedMentionedPaths])
+  const isFallbackMentionLoading = shouldUseLocalFileFallback
+    ? activeMentionTerm
+      ? isFallbackSearchLoading || isFallbackSearchFetching
+      : isFallbackDirectoryLoading || isFallbackDirectoryFetching
+    : false
+  const fallbackMentionError = activeMentionTerm ? fallbackFileSearchError : fallbackDirectoryError
+  const shouldShowFallbackFileListState =
+    shouldUseLocalFileFallback && !!activeMention && (isFallbackMentionLoading || !!fallbackMentionError || filteredFiles.length === 0)
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     if (state === 'disabled') return
@@ -264,41 +336,65 @@ export const TextArea: React.FC<TextAreaProps> = ({
       .catch(err => console.error('Failed to read pasted images', err))
   }
 
-  const handleFileSelection = async (file: MentionableFileOption) => {
+  const handleFileSelection = (file: MentionableFileOption) => {
     if (!activeMention) {
       setShowFileList(false)
       return
     }
 
+    const mention = activeMention
     const mentionToken = file.relativePath || file.name
 
     try {
+      const currentValue = textareaRef.current?.value ?? value
+      const before = currentValue.slice(0, mention.start)
+      const after = currentValue.slice(mention.start + 1 + mention.term.length)
+      const newValue = `${before}@${mentionToken} ${after}`
+      onChange?.(newValue)
+
+      setTimeout(() => {
+        if (textareaRef.current) {
+          const cursorPos = before.length + mentionToken.length + 2 // include @ and trailing space
+          textareaRef.current.focus()
+          textareaRef.current.setSelectionRange(cursorPos, cursorPos)
+        }
+      }, 0)
+
       if (file.kind === 'file') {
-        await requestFileContent(file.path)
         setLocalMentionableFiles(prev => prev.filter(f => f.path !== file.path))
         setFilteredFiles(prev => prev.filter(f => f.path !== file.path))
-      }
 
-      if (textareaRef.current) {
-        const currentValue = textareaRef.current.value
-        const before = currentValue.slice(0, activeMention.start)
-        const after = currentValue.slice(activeMention.start + 1 + activeMention.term.length)
-        const newValue = `${before}@${mentionToken} ${after}`
-        onChange?.(newValue)
-
-        setTimeout(() => {
-          if (textareaRef.current) {
-            const cursorPos = before.length + mentionToken.length + 2 // include @ and trailing space
-            textareaRef.current.focus()
-            textareaRef.current.setSelectionRange(cursorPos, cursorPos)
-          }
-        }, 0)
+        if (shouldUseLocalFileFallback) {
+          void (async () => {
+            try {
+              const contents = await readLocalMentionFile(file.path)
+              dispatch(
+                addSelectedFileForChat({
+                  path: file.path,
+                  relativePath: file.relativePath,
+                  directoryPath: file.directoryPath,
+                  relativeDirectoryPath: file.relativeDirectoryPath,
+                  name: file.name,
+                  contents,
+                  contentLength: contents.length,
+                })
+              )
+            } catch (error) {
+              console.error('Failed to load fallback @mention file contents:', error)
+            }
+          })()
+        } else {
+          void requestFileContent(file.path).catch(error => {
+            console.error('Failed to load IDE @mention file contents:', error)
+          })
+        }
       }
     } catch (error) {
       console.error('Failed to process @mention selection:', error)
     } finally {
       setActiveMention(null)
       setShowFileList(false)
+      setSelectedFileIndex(0)
     }
   }
 
@@ -386,6 +482,15 @@ export const TextArea: React.FC<TextAreaProps> = ({
       return
     }
 
+    if (shouldUseLocalFileFallback) {
+      if (!isFallbackMentionLoading) {
+        setFilteredFiles(fallbackMentionableFiles)
+        setSelectedFileIndex(0)
+      }
+      setShowFileList(true)
+      return
+    }
+
     const term = activeMention.term.toLowerCase()
     const filtered = localMentionableFiles.filter(file => {
       const nameMatches = file.name.toLowerCase().includes(term)
@@ -397,7 +502,13 @@ export const TextArea: React.FC<TextAreaProps> = ({
     setFilteredFiles(filtered)
     setSelectedFileIndex(0)
     setShowFileList(filtered.length > 0)
-  }, [activeMention, localMentionableFiles])
+  }, [
+    activeMention,
+    fallbackMentionableFiles,
+    isFallbackMentionLoading,
+    localMentionableFiles,
+    shouldUseLocalFileFallback,
+  ])
 
   // Compute dropdown placement and size (up or down) based on viewport space
   useEffect(() => {
@@ -487,7 +598,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
 
         {/* Floating file list */}
         <div className='relative'>
-          {showFileList && filteredFiles.length > 0 && (
+          {showFileList && (filteredFiles.length > 0 || shouldShowFallbackFileListState) && (
             <div
               ref={listRef}
               className='absolute z-50 mb-1 w-full max-h-96 overflow-y-auto thin-scrollbar dark:bg-neutral-900 bg-neutral-50 rounded-lg shadow-lg'
@@ -520,6 +631,14 @@ export const TextArea: React.FC<TextAreaProps> = ({
                   </div>
                 </div>
               ))}
+              {shouldUseLocalFileFallback && fallbackMentionError && (
+                <div className='px-3 py-2 text-xs text-red-600 dark:text-red-300'>
+                  {fallbackMentionError instanceof Error ? fallbackMentionError.message : 'Failed to load files'}
+                </div>
+              )}
+              {shouldUseLocalFileFallback && !fallbackMentionError && filteredFiles.length === 0 && (
+                <div className='px-3 py-2 text-xs text-stone-700 dark:text-stone-300'>No matches</div>
+              )}
             </div>
           )}
         </div>

@@ -41,6 +41,7 @@ import {
   COLLAPSED_CONTENT_WORD_LIMIT,
   contentBlocksToEditableText,
   editableTextToContentBlocks,
+  extractAssistantTextsFromResponsesOutputItems,
   extractHtmlFromToolResult,
   extractReasoningTextsFromResponsesOutputItems,
   formatToolResultContent,
@@ -2077,9 +2078,9 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
     const buildStreamRenderItems = (): MessageRenderItem[] => {
       if (!Array.isArray(streamEvents) || streamEvents.length === 0) return []
 
-      // Cosmetic: hide transient streaming-only reasoning aggregate block.
-      // Persisted messages still render reasoning from content blocks.
-      const hideStreamingReasoning = id === 'streaming'
+      // Keep reasoning visible during live streaming so it stays interleaved
+      // with text/tool events as it arrives.
+      const hideStreamingReasoning = false
 
       const items: MessageRenderItem[] = []
       let idx = 0
@@ -2222,11 +2223,106 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       return items
     }
 
+    const parseResponsesToolArgs = (rawArgs: unknown): unknown => {
+      if (typeof rawArgs !== 'string') return rawArgs
+      try {
+        return rawArgs ? JSON.parse(rawArgs) : rawArgs
+      } catch {
+        return rawArgs
+      }
+    }
+
+    const buildResponsesOutputItemsRenderItems = (responseItems: any[], baseIndex: number): MessageRenderItem[] => {
+      const items: MessageRenderItem[] = []
+      let localIndex = 0
+
+      for (const item of responseItems) {
+        if (!item || typeof item !== 'object') {
+          localIndex += 1
+          continue
+        }
+
+        if (item.type === 'message' && item.role === 'assistant') {
+          const messageTexts = extractAssistantTextsFromResponsesOutputItems([item])
+          for (const text of messageTexts) {
+            const textKey = `responses-text-${baseIndex}-${localIndex}`
+            items.push({
+              key: textKey,
+              kind: 'other',
+              ignoreForProcessRunGrouping: isProcessRunSeparatorText(text),
+              node: renderMarkdownNode({
+                key: textKey,
+                markdown: text,
+                className: SHARED_TEXT_MARKDOWN_CLASS,
+                style: textContentStyle,
+              }),
+            })
+            localIndex += 1
+          }
+          continue
+        }
+
+        if (item.type === 'reasoning') {
+          const reasoningTexts = extractReasoningTextsFromResponsesOutputItems([item])
+          for (const reasoningText of reasoningTexts) {
+            const reasoningItem = buildReasoningRenderItem(
+              reasoningText,
+              900000000 + baseIndex * 100 + localIndex,
+              `responses-reasoning-${baseIndex}-${localIndex}`
+            )
+            items.push(reasoningItem)
+            localIndex += 1
+          }
+          continue
+        }
+
+        if (item.type === 'function_call') {
+          const callId = typeof item.call_id === 'string' ? item.call_id : typeof item.id === 'string' ? item.id : ''
+          const name = typeof item.name === 'string' ? item.name : ''
+          if (callId && name) {
+            const toolNode = renderToolCallGroupCard(
+              {
+                id: callId,
+                name,
+                args: parseResponsesToolArgs(item.arguments),
+                results: [],
+                anchorIndex: baseIndex + localIndex,
+              },
+              `responses-tool-${callId}-${baseIndex}-${localIndex}`
+            )
+
+            if (toolNode) {
+              items.push({
+                key: `responses-tool-${callId}-${baseIndex}-${localIndex}`,
+                kind: 'process',
+                processType: 'tool',
+                node: toolNode,
+              })
+            }
+          }
+          localIndex += 1
+          continue
+        }
+
+        localIndex += 1
+      }
+
+      return items
+    }
+
     const buildContentBlockRenderItems = (): MessageRenderItem[] => {
       if (!Array.isArray(contentBlocks) || contentBlocks.length === 0) return []
 
       const items: MessageRenderItem[] = []
       const renderedReasoningSignatures = new Set<string>()
+      const hasExplicitRenderableBlocks = contentBlocks.some(
+        block =>
+          block.type === 'text' ||
+          block.type === 'thinking' ||
+          block.type === 'tool_use' ||
+          block.type === 'image' ||
+          block.type === 'reasoning_details'
+      )
       let idx = 0
 
       while (idx < contentBlocks.length) {
@@ -2321,23 +2417,14 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
 
         if ((block as any).type === 'responses_output_items' && Array.isArray((block as any).items)) {
           const responseBlock = block as any
-          const extractedReasoning = extractReasoningTextsFromResponsesOutputItems(responseBlock.items)
           const baseIndex = typeof responseBlock.index === 'number' ? responseBlock.index : idx
 
-          extractedReasoning.forEach((reasoningText, reasoningOffset) => {
-            const normalized = normalizeReasoningTextForComparison(reasoningText)
-            if (!normalized || renderedReasoningSignatures.has(normalized)) return
+          if (hasExplicitRenderableBlocks) {
+            idx += 1
+            continue
+          }
 
-            renderedReasoningSignatures.add(normalized)
-            items.push(
-              buildReasoningRenderItem(
-                reasoningText,
-                900000000 + baseIndex * 100 + reasoningOffset,
-                `responses-reasoning-${baseIndex}-${idx}-${reasoningOffset}`
-              )
-            )
-          })
-
+          items.push(...buildResponsesOutputItemsRenderItems(responseBlock.items, baseIndex))
           idx += 1
           continue
         }

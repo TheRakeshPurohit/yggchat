@@ -549,15 +549,17 @@ const maybePersistAutoConversationTitle = async ({
   parentId,
   content,
   contextLabel,
-}: {
+  skip,
+  }: {
   dispatch: any
   conversationId: ConversationId
   storageMode?: 'cloud' | 'local'
   parentId: MessageId | null | undefined
   content: string | null | undefined
   contextLabel: string
-}): Promise<void> => {
-  if (parentId != null) return
+  skip?: boolean
+  }): Promise<void> => {
+  if (skip || parentId != null) return
 
   const title = buildAutoConversationTitle(content)
   if (!title) return
@@ -3362,6 +3364,7 @@ const executionMode = 'client'
                       )
                     messageId = assistantMsg.id
                     currentTurnHistory.push(assistantMsg)
+                    dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'reset' } }))
                   }
                 },
                 signal: controller.signal,
@@ -3653,6 +3656,7 @@ const executionMode = 'client'
                     messageId = chunk.message.id
                     currentTurnContent = ''
                     currentTurnHistory.push(chunk.message)
+                    dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'reset' } }))
                   }
                 },
                 signal: controller.signal,
@@ -3876,9 +3880,10 @@ const executionMode = 'client'
                       .catch(err =>
                         console.error('[sendMessage][openai-chatgpt] Failed to sync assistant message:', err)
                       )
-                    messageId = chunk.message.id
-                    currentTurnContent = ''
-                    currentTurnHistory.push(chunk.message)
+                      messageId = chunk.message.id
+                      currentTurnContent = ''
+                      currentTurnHistory.push(chunk.message)
+                      dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'reset' } }))
                   }
                 },
                 signal: controller.signal,
@@ -5104,6 +5109,7 @@ const executionMode = 'client' // Prefer client execution for tools
               parentId: newUserMessage.parent_id,
               content: newContent,
               contextLabel: 'editMessageWithBranching',
+              skip: true,
             })
             activeParentId = newUserMessage.id
           }
@@ -5389,6 +5395,7 @@ const executionMode = 'client' // Prefer client execution for tools
               parentId: newUserMessage.parent_id,
               content: newContent,
               contextLabel: 'editMessageWithBranching',
+              skip: true,
             })
             activeParentId = newUserMessage.id
           }
@@ -5475,8 +5482,9 @@ const executionMode = 'client' // Prefer client execution for tools
                     .catch(err =>
                       console.error('[editMessageWithBranching][openai-chatgpt] Failed to sync assistant message:', err)
                     )
-                  messageId = assistantMsg.id
-                  currentTurnHistory.push(assistantMsg)
+                    messageId = assistantMsg.id
+                    currentTurnHistory.push(assistantMsg)
+                    dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'reset' } }))
                 }
               },
               signal: controller.signal,
@@ -5775,6 +5783,7 @@ const executionMode = 'client' // Prefer client execution for tools
                     parentId: chunk.message.parent_id ?? activeParentId ?? null,
                     content: chunk.message?.content_plain_text || chunk.message?.content || newContent,
                     contextLabel: 'editMessageWithBranching',
+              skip: true,
                   })
 
                   // Live-update: ensure the new branched user message shows all intended artifacts immediately
@@ -6336,6 +6345,7 @@ const executionMode = 'client'
               parentId: newUserMessage.parent_id,
               content: content,
               contextLabel: 'sendMessageToBranch',
+              skip: true,
             })
             currentParentId = newUserMessage.id
           }
@@ -6607,6 +6617,7 @@ const executionMode = 'client'
               parentId: newUserMessage.parent_id,
               content: content,
               contextLabel: 'sendMessageToBranch',
+              skip: true,
             })
             currentParentId = newUserMessage.id
           }
@@ -6685,8 +6696,9 @@ const executionMode = 'client'
                     .catch(err =>
                       console.error('[sendMessageToBranch][openai-chatgpt] Failed to sync assistant message:', err)
                     )
-                  messageId = assistantMsg.id
-                  currentTurnHistory.push(assistantMsg)
+                    messageId = assistantMsg.id
+                    currentTurnHistory.push(assistantMsg)
+                    dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'reset' } }))
                 }
               },
               signal: controller.signal,
@@ -6933,6 +6945,7 @@ const executionMode = 'client'
                     parentId: chunk.message.parent_id ?? currentParentId ?? null,
                     content: chunk.message?.content_plain_text || chunk.message?.content || content,
                     contextLabel: 'sendMessageToBranch',
+              skip: true,
                   })
                 }
 
@@ -9042,6 +9055,7 @@ export const sendCCBranch = createAsyncThunk<
                   parentId: normalizedUserMessage.parent_id,
                   content: normalizedUserMessage.content_plain_text || normalizedUserMessage.content || message,
                   contextLabel: 'sendCCBranch',
+                  skip: true,
                 })
               } else if (chunk.type === 'chunk') {
                 // Real-time streaming chunk (delta) - display incrementally
