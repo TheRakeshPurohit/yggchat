@@ -85,7 +85,7 @@ export const createProject = createAsyncThunk<Project, CreateProjectPayload, { e
     const { auth } = extra
     const { storageMode, ...restPayload } = payload
 
-    const effectiveStorageMode = isElectronCommunityMode ? 'local' : (storageMode || 'cloud')
+    const effectiveStorageMode = isElectronCommunityMode() ? 'local' : (storageMode || 'cloud')
 
     // Route to local or cloud API
     if (shouldUseLocalApi(effectiveStorageMode, environment)) {

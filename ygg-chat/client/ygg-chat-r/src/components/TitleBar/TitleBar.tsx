@@ -127,7 +127,7 @@ export const TitleBar = () => {
       const lanMobileUrl = buildRemoteMobileUrl(lanOrigin)
       const fallbackOrigin = await getLocalServerOrigin()
       const fallbackMobileUrl = buildRemoteMobileUrl(fallbackOrigin)
-      const url = configuredMobileUrl || lanMobileUrl || fallbackMobileUrl
+      const url = lanMobileUrl || configuredMobileUrl || fallbackMobileUrl
 
       if (!url) {
         throw new Error('Unable to resolve remote server URL')

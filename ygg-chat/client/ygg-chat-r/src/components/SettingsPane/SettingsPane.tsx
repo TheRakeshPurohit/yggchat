@@ -49,6 +49,40 @@ type ThemeManagerReadResult = {
   theme?: CustomChatTheme
 }
 
+type ManagedHookListItem = {
+  id: string
+  event: 'UserPromptSubmit' | 'PreToolUse' | 'PostToolUse' | 'PostToolUseFailure' | 'Stop'
+  command: string
+  timeoutMs?: number
+  matcher?: string | string[]
+  enabled: boolean
+  sourceFile: string
+  sourceFileName: string
+  entryIndex: number
+  handlerIndex: number
+  handlerLocation: 'entry' | 'hooks'
+}
+
+type HooksListResult = {
+  success?: boolean
+  error?: string
+  hooks?: ManagedHookListItem[]
+}
+
+type HookToggleResult = {
+  success?: boolean
+  error?: string
+  hook?: ManagedHookListItem
+}
+
+const HOOK_EVENT_ORDER: ManagedHookListItem['event'][] = [
+  'UserPromptSubmit',
+  'PreToolUse',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'Stop',
+]
+
 const TEXT_FILE_EXTENSIONS = [
   '.txt',
   '.md',
@@ -125,6 +159,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
   const settingsPaneBodyBackgroundColor = customThemeEnabled
     ? getThemeModeColor(customTheme.colors.settingsPaneBodyBg, isDarkMode)
     : undefined
+  const isWebMode = import.meta.env.VITE_ENVIRONMENT === 'web'
 
   const [attachmentTarget, setAttachmentTarget] = useState<'system' | 'context'>('system')
   const attachmentInputRef = useRef<HTMLInputElement>(null)
@@ -141,6 +176,11 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
   // Skills section state
   const [skillsExpanded, setSkillsExpanded] = useState(false)
   const [skillUrl, setSkillUrl] = useState('')
+  const [hooksExpanded, setHooksExpanded] = useState(false)
+  const [managedHooks, setManagedHooks] = useState<ManagedHookListItem[]>([])
+  const [hooksLoading, setHooksLoading] = useState(false)
+  const [updatingHooks, setUpdatingHooks] = useState<Set<string>>(new Set())
+  const [hookActionStatus, setHookActionStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const [skillInstallStatus, setSkillInstallStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [skillInstallMessage, setSkillInstallMessage] = useState('')
   const [installedSkills, setInstalledSkills] = useState<
@@ -334,6 +374,66 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
     }
   }, [])
 
+  const fetchManagedHooks = useCallback(async () => {
+    setHooksLoading(true)
+    try {
+      const data = await localApi.get<HooksListResult>('/hooks')
+      if (data.success) {
+        setManagedHooks(data.hooks || [])
+        setHookActionStatus(null)
+      } else {
+        setManagedHooks([])
+        setHookActionStatus({ type: 'error', message: data.error || 'Failed to load hooks' })
+      }
+    } catch (error) {
+      setManagedHooks([])
+      setHookActionStatus({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Failed to load hooks',
+      })
+    } finally {
+      setHooksLoading(false)
+    }
+  }, [])
+
+  const handleToggleHook = useCallback(async (hook: ManagedHookListItem) => {
+    const nextEnabled = !hook.enabled
+    setUpdatingHooks(prev => new Set(prev).add(hook.id))
+
+    try {
+      const data = await localApi.post<HookToggleResult>('/hooks/toggle', {
+        sourceFile: hook.sourceFile,
+        event: hook.event,
+        entryIndex: hook.entryIndex,
+        handlerIndex: hook.handlerIndex,
+        handlerLocation: hook.handlerLocation,
+        enabled: nextEnabled,
+      })
+
+      if (data.success && data.hook) {
+        setManagedHooks(prev => prev.map(item => (item.id === hook.id ? data.hook! : item)))
+        setHookActionStatus({
+          type: 'success',
+          message: `${nextEnabled ? 'Enabled' : 'Disabled'} hook for ${hook.event}`,
+        })
+      } else {
+        setHookActionStatus({ type: 'error', message: data.error || 'Failed to update hook' })
+      }
+    } catch (error) {
+      setHookActionStatus({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Failed to update hook',
+      })
+    } finally {
+      setUpdatingHooks(prev => {
+        const next = new Set(prev)
+        next.delete(hook.id)
+        return next
+      })
+      setTimeout(() => setHookActionStatus(null), 3000)
+    }
+  }, [])
+
   // Fetch installed skills
   const fetchInstalledSkills = useCallback(async () => {
     setSkillsLoading(true)
@@ -351,6 +451,12 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
       setSkillsLoading(false)
     }
   }, [])
+
+  useEffect(() => {
+    if (hooksExpanded && !isWebMode) {
+      fetchManagedHooks()
+    }
+  }, [hooksExpanded, fetchManagedHooks, isWebMode])
 
   // Fetch skills when section is expanded
   useEffect(() => {
@@ -890,6 +996,11 @@ ${block}`
 
   if (!open) return null
 
+  const hooksByEvent = HOOK_EVENT_ORDER.map(event => ({
+    event,
+    hooks: managedHooks.filter(hook => hook.event === event),
+  })).filter(group => group.hooks.length > 0)
+
   return (
     <div className='fixed inset-0 z-400 flex items-center justify-center'>
       {/* Overlay */}
@@ -1275,6 +1386,116 @@ ${block}`
             <div>
               <ToolsSettings />
             </div>
+
+            {!isWebMode && (
+              <div className='space-y-2'>
+                <button
+                  type='button'
+                  onClick={() => setHooksExpanded(!hooksExpanded)}
+                  className='flex items-center justify-between w-full text-left'
+                >
+                  <span className='text-[16px] font-medium text-stone-700 dark:text-stone-200'>Hooks</span>
+                  <i
+                    className={`bx bx-chevron-down text-xl text-neutral-500 dark:text-neutral-400 transition-transform duration-200 ${hooksExpanded ? 'rotate-180' : ''}`}
+                  />
+                </button>
+
+                {hooksExpanded && (
+                  <div className='space-y-4 pl-1 pt-2'>
+                    <div className='flex items-center justify-between gap-3'>
+                      <p className='text-sm text-neutral-600 dark:text-neutral-400'>
+                        Enable or disable individual managed hooks from your .ygg settings files.
+                      </p>
+                      <button
+                        type='button'
+                        onClick={fetchManagedHooks}
+                        disabled={hooksLoading}
+                        className='px-2.5 py-1.5 rounded-md text-xs border border-neutral-300 dark:border-neutral-600 text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-700 disabled:opacity-50'
+                      >
+                        {hooksLoading ? 'Refreshing…' : 'Refresh'}
+                      </button>
+                    </div>
+
+                    {hookActionStatus && (
+                      <div
+                        className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg ${
+                          hookActionStatus.type === 'success'
+                            ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
+                            : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400'
+                        }`}
+                      >
+                        <i
+                          className={`bx ${hookActionStatus.type === 'success' ? 'bx-check-circle' : 'bx-error-circle'} text-base`}
+                        ></i>
+                        {hookActionStatus.message}
+                      </div>
+                    )}
+
+                    {hooksLoading ? (
+                      <div className='flex items-center gap-2 text-sm text-neutral-500 dark:text-neutral-400'>
+                        <i className='bx bx-loader-alt animate-spin'></i>
+                        Loading hooks...
+                      </div>
+                    ) : managedHooks.length === 0 ? (
+                      <p className='text-sm text-neutral-500 dark:text-neutral-400'>
+                        No managed hooks found in settings.json or settings.local.json.
+                      </p>
+                    ) : (
+                      <div className='space-y-4'>
+                        {hooksByEvent.map(group => (
+                          <div key={group.event} className='space-y-2'>
+                            <h4 className='text-sm font-medium text-stone-700 dark:text-stone-200'>{group.event}</h4>
+                            <div className='space-y-2'>
+                              {group.hooks.map(hook => (
+                                <div
+                                  key={hook.id}
+                                  className='flex items-center justify-between p-3 rounded-lg bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700 gap-3'
+                                >
+                                  <div className='flex-1 min-w-0'>
+                                    <div className='flex items-center gap-2 flex-wrap'>
+                                      <span className='font-medium text-sm text-neutral-900 dark:text-neutral-100 break-all'>
+                                        {hook.command}
+                                      </span>
+                                      <span
+                                        className={`text-xs px-1.5 py-0.5 rounded ${
+                                          hook.enabled
+                                            ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
+                                            : 'bg-neutral-200 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400'
+                                        }`}
+                                      >
+                                        {hook.enabled ? 'Enabled' : 'Disabled'}
+                                      </span>
+                                    </div>
+                                    <p className='text-xs text-neutral-500 dark:text-neutral-400 mt-1 break-all'>
+                                      {hook.sourceFileName}
+                                      {hook.matcher
+                                        ? ` · Matcher: ${Array.isArray(hook.matcher) ? hook.matcher.join(', ') : hook.matcher}`
+                                        : ''}
+                                      {typeof hook.timeoutMs === 'number' ? ` · Timeout: ${hook.timeoutMs}ms` : ''}
+                                    </p>
+                                  </div>
+                                  <button
+                                    type='button'
+                                    onClick={() => handleToggleHook(hook)}
+                                    disabled={updatingHooks.has(hook.id)}
+                                    className='p-1.5 rounded hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors disabled:opacity-50'
+                                    title={hook.enabled ? 'Disable hook' : 'Enable hook'}
+                                  >
+                                    <i
+                                      className={`bx ${hook.enabled ? 'bx-toggle-right text-green-500' : 'bx-toggle-left text-neutral-400'} text-xl`}
+                                    ></i>
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Skills Section */}
             <div className='space-y-2'>

@@ -1,6 +1,8 @@
 import { spawn } from 'child_process'
+import { createHash } from 'crypto'
 import {
   HermesAcpClient,
+  type HermesAcpMcpServer,
   type HermesBridgeEvent,
   type HermesPermissionRequest,
   type HermesResponse,
@@ -8,6 +10,7 @@ import {
   type OnHermesPermissionRequest,
   type OnHermesResponse,
   type OnHermesStreamingChunk,
+  getHermesLauncherDiagnostics,
   resolveAcpLauncher,
 } from './hermesAcpClient.js'
 
@@ -35,19 +38,74 @@ export function setHermesSession(conversationId: string, cwd: string, sessionId:
   sessions.set(createSessionKey(conversationId, cwd), sessionId)
 }
 
-function normalizeHermesModel(model?: string): string | undefined {
+export function normalizeHermesModel(model?: string): string | undefined {
   if (!model) return undefined
 
   const raw = model.trim()
   if (!raw) return undefined
 
+  const normalizedKey = raw.toLowerCase().replace(/[_\s]+/g, ' ').trim()
+
   const aliases: Record<string, string> = {
-    'gpt-5.1 codex mini': 'openai/gpt-5-mini',
+    'gpt-5.4': 'gpt-5.4',
+    'gpt-5.4 mini': 'gpt-5.4-mini',
+    'gpt-5.3 codex': 'gpt-5.3-codex',
+    'gpt-5.3 codex spark': 'gpt-5.3-codex-spark',
+    'gpt-5.2': 'gpt-5.2',
+    'gpt-5.2 codex': 'gpt-5.2-codex',
+    'gpt-5.1 codex max': 'gpt-5.1-codex-max',
+    'gpt-5.1 codex mini': 'gpt-5.1-codex-mini',
     'gpt-5-mini': 'openai/gpt-5-mini',
     'openai/gpt-5.1-codex-mini': 'openai/gpt-5-mini',
   }
 
-  return aliases[raw.toLowerCase()] || raw
+  return aliases[normalizedKey] || raw
+}
+
+function readTrimmedEnv(name: string): string | undefined {
+  const value = process.env[name]?.trim()
+  return value ? value : undefined
+}
+
+export function buildHermesYggMcpServerName(conversationId: string, cwd: string): string {
+  const digest = createHash('sha256')
+    .update(`${conversationId}\n${cwd}`)
+    .digest('hex')
+    .slice(0, 10)
+
+  return `ygg-${digest}`
+}
+
+export function resolveHermesAcpMcpServers(
+  conversationId: string,
+  cwd: string,
+  launchMode: 'native' | 'wsl'
+): HermesAcpMcpServer[] {
+  const authToken = readTrimmedEnv('YGG_HERMES_MCP_AUTH_TOKEN')
+  const localServerUrl = readTrimmedEnv('YGG_LOCAL_SERVER_URL')
+  const localServerLanUrl = readTrimmedEnv('YGG_LOCAL_SERVER_LAN_URL')
+
+  if (!authToken) return []
+
+  const preferredBaseUrl = launchMode === 'wsl' ? localServerLanUrl || localServerUrl : localServerUrl || localServerLanUrl
+  if (!preferredBaseUrl) return []
+
+  const endpointUrl = new URL('/api/mcp/ygg', preferredBaseUrl).toString()
+
+  return [
+    {
+      name: buildHermesYggMcpServerName(conversationId, cwd),
+      transport: 'http',
+      type: 'http',
+      enabled: true,
+      url: endpointUrl,
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        'X-Ygg-Hermes-Conversation-Id': conversationId,
+        'X-Ygg-Hermes-Cwd': cwd,
+      },
+    },
+  ]
 }
 
 function extractSessionId(event: HermesBridgeEvent): string | undefined {
@@ -115,6 +173,17 @@ export async function executeHermesAgent(
   const existingSessionId = sessionId || (!forkSession ? getHermesSession(conversationId, cwd) : undefined)
   const normalizedModel = normalizeHermesModel(model)
   const launcher = resolveAcpLauncher()
+  const launcherDiagnostics = getHermesLauncherDiagnostics(cwd)
+  const mcpServers = resolveHermesAcpMcpServers(conversationId, cwd, launcher.launchMode)
+
+  console.info('[HermesAgent] Launching Hermes ACP', {
+    ...launcherDiagnostics,
+    mcpServers: mcpServers.map(server => ({
+      name: server.name,
+      transport: server.transport || server.type || (server.url ? 'http' : 'stdio'),
+      url: server.url ?? null,
+    })),
+  })
 
   const proc = spawn(launcher.command, launcher.args, {
     cwd: launcher.spawnCwd,
@@ -135,12 +204,22 @@ export async function executeHermesAgent(
 
   try {
     const initializeResult = await client.initialize()
+    console.info('[HermesAgent] Hermes ACP initialized', {
+      requestedLaunchMode: launcher.requestedLaunchMode,
+      effectiveLaunchMode: launcher.launchMode,
+      launchSource: launcher.launchSource,
+      agentInfo: initializeResult?.agentInfo ?? initializeResult?.agent_info ?? null,
+      sessionCapabilities:
+        initializeResult?.agentCapabilities?.sessionCapabilities ??
+        initializeResult?.agent_capabilities?.session_capabilities ??
+        null,
+    })
     await client.maybeAuthenticate(initializeResult)
 
     let activeSessionId = existingSessionId
 
     if (activeSessionId && forkSession) {
-      activeSessionId = await client.forkSession(activeSessionId, cwd)
+      activeSessionId = await client.forkSession(activeSessionId, cwd, mcpServers)
       latestSessionId = activeSessionId
       await emitAndTrackSession(
         {
@@ -154,7 +233,7 @@ export async function executeHermesAgent(
         onResponse
       )
     } else if (activeSessionId) {
-      await client.loadSession(activeSessionId, cwd)
+      await client.loadSession(activeSessionId, cwd, mcpServers)
       latestSessionId = activeSessionId
       await emitAndTrackSession(
         {
@@ -167,7 +246,7 @@ export async function executeHermesAgent(
         onResponse
       )
     } else {
-      activeSessionId = await client.newSession(cwd)
+      activeSessionId = await client.newSession(cwd, mcpServers)
       latestSessionId = activeSessionId
       await emitAndTrackSession(
         {

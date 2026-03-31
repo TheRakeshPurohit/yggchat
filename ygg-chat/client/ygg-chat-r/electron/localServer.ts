@@ -13,10 +13,12 @@ import type { AddressInfo } from 'net'
 import path from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import { WebSocket, WebSocketServer } from 'ws'
+import { BUILTIN_TOOL_DEFINITIONS } from '../../../shared/builtinToolDefinitions.js'
 import { isManagedToolPath } from './utils/managedToolPaths.js'
 
 // Tool imports
 import { registerHeadlessServerRoutes } from './headlessServer/index.js'
+import { listManagedHooks, setManagedHookEnabled } from './hooks/hookManager.js'
 import { runHookRequest } from './hooks/hookRunner.js'
 import { registerLocalOperationsRoutes } from './localOperations.js'
 import { createToolsStatements, initializeToolsSchema, pruneOldTools, registerToolsRoutes } from './localToolsRoutes.js'
@@ -714,6 +716,316 @@ function initializeBuiltInToolRegistry() {
   })
 
   console.log(`[LocalServer] Initialized ${builtInTools.size} built-in tools`)
+}
+
+type LocalToolExecutionOptions = {
+  rootPath?: string
+  operationMode?: 'plan' | 'execute'
+  conversationId?: string | null
+  messageId?: string | null
+  streamId?: string | null
+}
+
+type HermesYggMcpToolDefinition = {
+  name: string
+  description?: string
+  inputSchema: Record<string, any>
+  _meta?: Record<string, any>
+}
+
+type HermesYggMcpContentBlock = {
+  type: 'text' | 'image' | 'resource'
+  text?: string
+  data?: string
+  mimeType?: string
+  resource?: {
+    uri: string
+    mimeType?: string
+    text?: string
+  }
+}
+
+const HERMES_YGG_MCP_PROTOCOL_VERSION = '2025-11-25'
+const HERMES_YGG_MCP_SESSION_ID = 'ygg-hermes-tools'
+const HERMES_YGG_EXPOSED_BUILTIN_TOOL_NAMES = new Set([
+  'todo_list',
+  'fetch_notes',
+  'read_file',
+  'read_file_continuation',
+  'read_files',
+  'create_file',
+  'edit_file',
+  'delete_file',
+  'directory',
+  'glob',
+  'ripgrep',
+  'brave_search',
+  'browse_web',
+  'bash',
+  'html_renderer',
+  'theme_manager',
+  'custom_tool_manager',
+  'mcp_manager',
+  'skill_manager',
+])
+
+const HERMES_YGG_EXPOSED_BUILTIN_TOOLS: HermesYggMcpToolDefinition[] = BUILTIN_TOOL_DEFINITIONS.filter(tool =>
+  HERMES_YGG_EXPOSED_BUILTIN_TOOL_NAMES.has(tool.name)
+).map(tool => ({
+  name: tool.name,
+  description: tool.description,
+  inputSchema: tool.inputSchema,
+}))
+
+function getHermesYggMcpAuthToken(): string | null {
+  const token = process.env.YGG_HERMES_MCP_AUTH_TOKEN?.trim()
+  return token || null
+}
+
+function getHermesYggRequestRootPath(rawHeader: unknown): string | undefined {
+  return typeof rawHeader === 'string' && rawHeader.trim() ? rawHeader.trim() : undefined
+}
+
+async function executeLocalToolByName(
+  toolName: string,
+  args: any,
+  toolOptions: LocalToolExecutionOptions = {}
+): Promise<ToolResult> {
+  const normalizedToolName = typeof toolName === 'string' ? toolName.trim() : toolName
+  const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
+
+  let result: ToolResult
+
+  const builtInHandler = builtInTools.get(normalizedToolName)
+  if (builtInHandler) {
+    if (shouldUseUtilityRuntimeForTool(normalizedToolName)) {
+      try {
+        result = await utilityToolRuntimeHost.executeTool(normalizedToolName, parsedArgs, toolOptions)
+      } catch (utilityError) {
+        if (isUtilityRuntimeFallbackDisabled()) {
+          throw utilityError
+        }
+        console.warn(
+          `[LocalServer] Utility runtime failed for ${normalizedToolName}; falling back to local execution:`,
+          utilityError
+        )
+        result = await builtInHandler(parsedArgs, toolOptions)
+      }
+    } else {
+      result = await builtInHandler(parsedArgs, toolOptions)
+    }
+  } else if (typeof normalizedToolName === 'string' && normalizedToolName.startsWith('mcp__')) {
+    if (!mcpManager) {
+      result = { success: false, error: 'MCP manager not initialized' }
+    } else {
+      try {
+        const mcpResult = await mcpManager.callTool(normalizedToolName, parsedArgs)
+        const textContent = mcpResult.content
+          .filter(c => c.type === 'text')
+          .map(c => c.text)
+          .join('\n')
+        result = {
+          success: !mcpResult.isError,
+          content: mcpResult.content,
+          text: textContent,
+          error: mcpResult.isError ? textContent : undefined,
+        }
+      } catch (mcpError) {
+        console.error('[LocalServer] MCP tool error:', mcpError)
+        result = { success: false, error: mcpError instanceof Error ? mcpError.message : String(mcpError) }
+      }
+    }
+  } else if (customToolRegistry.hasCustomTool(normalizedToolName)) {
+    if (shouldUseUtilityRuntimeForCustomTool(normalizedToolName)) {
+      try {
+        result = await utilityToolRuntimeHost.executeTool(normalizedToolName, parsedArgs, toolOptions)
+      } catch (utilityError) {
+        if (isUtilityRuntimeFallbackDisabled()) {
+          throw utilityError
+        }
+        console.warn(
+          `[LocalServer] Utility runtime failed for custom tool ${normalizedToolName}; falling back to local execution:`,
+          utilityError
+        )
+        result = await customToolRegistry.executeTool(normalizedToolName, parsedArgs, {
+          rootPath: toolOptions.rootPath,
+          operationMode: toolOptions.operationMode,
+          conversationId: toolOptions.conversationId ?? null,
+          messageId: toolOptions.messageId ?? null,
+          streamId: toolOptions.streamId ?? null,
+          cwd: toolOptions.rootPath,
+        })
+      }
+    } else {
+      result = await customToolRegistry.executeTool(normalizedToolName, parsedArgs, {
+        rootPath: toolOptions.rootPath,
+        operationMode: toolOptions.operationMode,
+        conversationId: toolOptions.conversationId ?? null,
+        messageId: toolOptions.messageId ?? null,
+        streamId: toolOptions.streamId ?? null,
+        cwd: toolOptions.rootPath,
+      })
+    }
+  } else {
+    console.warn(`[LocalServer] Unknown tool: ${normalizedToolName}`)
+    result = { success: false, error: `Unknown tool: ${normalizedToolName}` }
+  }
+
+  return result
+}
+
+function toHermesYggMcpToolDefinitionFromMcpTool(tool: any): HermesYggMcpToolDefinition | null {
+  const visibility = tool?._meta?.ui?.visibility
+  if (Array.isArray(visibility) && !visibility.includes('model')) {
+    return null
+  }
+
+  const name = typeof tool?.qualifiedName === 'string' ? tool.qualifiedName : typeof tool?.name === 'string' ? tool.name : null
+  if (!name) return null
+
+  return {
+    name,
+    description: typeof tool?.description === 'string' ? tool.description : undefined,
+    inputSchema:
+      tool?.inputSchema && typeof tool.inputSchema === 'object'
+        ? tool.inputSchema
+        : { type: 'object', properties: {} },
+    _meta: tool?._meta && typeof tool._meta === 'object' ? tool._meta : undefined,
+  }
+}
+
+function listHermesYggMcpTools(): HermesYggMcpToolDefinition[] {
+  const tools: HermesYggMcpToolDefinition[] = [...HERMES_YGG_EXPOSED_BUILTIN_TOOLS]
+
+  try {
+    const customTools = customToolRegistry
+      .getDefinitions()
+      .filter(def => def.enabled)
+      .map(def => ({
+        name: def.name,
+        description: def.description,
+        inputSchema: def.inputSchema,
+      }))
+    tools.push(...customTools)
+  } catch {
+    // Ignore custom-tool discovery failures in MCP listing.
+  }
+
+  try {
+    const mcpTools = mcpManager
+      .getAllTools()
+      .map(toHermesYggMcpToolDefinitionFromMcpTool)
+      .filter((tool): tool is HermesYggMcpToolDefinition => !!tool)
+    tools.push(...mcpTools)
+  } catch {
+    // Ignore upstream MCP listing failures in MCP listing.
+  }
+
+  const deduped = new Map<string, HermesYggMcpToolDefinition>()
+  for (const tool of tools) {
+    if (!tool?.name) continue
+    if (!deduped.has(tool.name)) {
+      deduped.set(tool.name, tool)
+    }
+  }
+
+  return Array.from(deduped.values())
+}
+
+function stringifyHermesYggMcpText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value == null) return ''
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+function toHermesYggMcpContent(result: any): HermesYggMcpContentBlock[] {
+  if (Array.isArray(result?.content)) {
+    const contentBlocks = result.content
+      .map((block: any): HermesYggMcpContentBlock | null => {
+        if (!block || typeof block !== 'object') {
+          const text = stringifyHermesYggMcpText(block)
+          return text ? { type: 'text', text } : null
+        }
+
+        if (block.type === 'text' && typeof block.text === 'string') {
+          return { type: 'text', text: block.text }
+        }
+
+        if (block.type === 'image' && typeof block.data === 'string') {
+          return { type: 'image', data: block.data, mimeType: typeof block.mimeType === 'string' ? block.mimeType : undefined }
+        }
+
+        if (block.type === 'resource' && block.resource && typeof block.resource.uri === 'string') {
+          return {
+            type: 'resource',
+            resource: {
+              uri: block.resource.uri,
+              mimeType: typeof block.resource.mimeType === 'string' ? block.resource.mimeType : undefined,
+              text: typeof block.resource.text === 'string' ? block.resource.text : undefined,
+            },
+          }
+        }
+
+        const text = stringifyHermesYggMcpText(block)
+        return text ? { type: 'text', text } : null
+      })
+      .filter((block): block is HermesYggMcpContentBlock => !!block)
+
+    if (contentBlocks.length > 0) {
+      return contentBlocks
+    }
+  }
+
+  const fallbackText =
+    (typeof result?.text === 'string' && result.text) ||
+    (typeof result?.error === 'string' && result.error) ||
+    stringifyHermesYggMcpText(result)
+
+  return [{ type: 'text', text: fallbackText || 'Tool completed with no output.' }]
+}
+
+function toHermesYggMcpToolCallResult(result: any): { content: HermesYggMcpContentBlock[]; isError?: boolean } {
+  return {
+    content: toHermesYggMcpContent(result),
+    isError: result?.success === false || result?.isError === true,
+  }
+}
+
+function setHermesYggMcpResponseHeaders(res: any): void {
+  res.setHeader('mcp-protocol-version', HERMES_YGG_MCP_PROTOCOL_VERSION)
+  res.setHeader('mcp-session-id', HERMES_YGG_MCP_SESSION_ID)
+}
+
+function sendHermesYggMcpJsonResult(res: any, id: unknown, result: any, statusCode = 200): void {
+  setHermesYggMcpResponseHeaders(res)
+  if (id === undefined || id === null) {
+    res.status(202).end()
+    return
+  }
+  res.status(statusCode).json({ jsonrpc: '2.0', id, result })
+}
+
+function sendHermesYggMcpJsonError(
+  res: any,
+  id: unknown,
+  code: number,
+  message: string,
+  statusCode = 200
+): void {
+  setHermesYggMcpResponseHeaders(res)
+  if (id === undefined || id === null) {
+    res.status(statusCode).json({ error: message })
+    return
+  }
+  res.status(statusCode).json({
+    jsonrpc: '2.0',
+    id,
+    error: { code, message },
+  })
 }
 
 function registerCustomToolsWithOrchestrator(): number {
@@ -3524,6 +3836,40 @@ function setupServer() {
     }
   })
 
+  app.get('/api/hooks', async (_req, res) => {
+    try {
+      const hooks = await listManagedHooks()
+      res.json({ success: true, hooks })
+    } catch (error) {
+      console.error('[LocalServer] Hook list error:', error)
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })
+
+  app.post('/api/hooks/toggle', async (req, res) => {
+    try {
+      const { sourceFile, event, entryIndex, handlerIndex, handlerLocation, enabled } = req.body || {}
+      const hook = await setManagedHookEnabled({
+        sourceFile,
+        event,
+        entryIndex,
+        handlerIndex,
+        handlerLocation,
+        enabled,
+      })
+      res.json({ success: true, hook })
+    } catch (error) {
+      console.error('[LocalServer] Hook toggle error:', error)
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })
+
   app.post('/api/hooks/run', async (req, res) => {
     try {
       const result = await runHookRequest(req.body || {})
@@ -3648,6 +3994,95 @@ function setupServer() {
       const msg = error instanceof Error ? error.message : String(error)
       res.json({ result: { success: false, error: msg } })
     }
+  })
+
+  // Ygg-provided MCP endpoint for Hermes ACP sessions
+  app.post('/api/mcp/ygg', async (req, res) => {
+    const id = req.body?.id
+    const method = typeof req.body?.method === 'string' ? req.body.method : undefined
+    const authToken = getHermesYggMcpAuthToken()
+    const authorizationHeader = typeof req.get('authorization') === 'string' ? req.get('authorization') : ''
+
+    if (!authToken || authorizationHeader !== `Bearer ${authToken}`) {
+      sendHermesYggMcpJsonError(res, id, -32001, 'Unauthorized MCP request', 401)
+      return
+    }
+
+    if (!req.body || req.body.jsonrpc !== '2.0' || !method) {
+      sendHermesYggMcpJsonError(res, id, -32600, 'Invalid JSON-RPC request', 400)
+      return
+    }
+
+    if (method === 'notifications/initialized') {
+      sendHermesYggMcpJsonResult(res, id, {})
+      return
+    }
+
+    if (method === 'initialize') {
+      sendHermesYggMcpJsonResult(res, id, {
+        protocolVersion: HERMES_YGG_MCP_PROTOCOL_VERSION,
+        capabilities: {
+          tools: { listChanged: false },
+          resources: {},
+          prompts: {},
+        },
+        serverInfo: {
+          name: 'ygg-chat',
+          title: 'Ygg Chat Local Tools',
+          version: '1.0.0',
+        },
+      })
+      return
+    }
+
+    if (method === 'tools/list') {
+      sendHermesYggMcpJsonResult(res, id, {
+        tools: listHermesYggMcpTools(),
+      })
+      return
+    }
+
+    if (method === 'resources/list') {
+      sendHermesYggMcpJsonResult(res, id, { resources: [] })
+      return
+    }
+
+    if (method === 'prompts/list') {
+      sendHermesYggMcpJsonResult(res, id, { prompts: [] })
+      return
+    }
+
+    if (method === 'tools/call') {
+      const toolName = req.body?.params?.name
+      if (!toolName || typeof toolName !== 'string') {
+        sendHermesYggMcpJsonError(res, id, -32602, 'tools/call requires a string params.name', 400)
+        return
+      }
+
+      try {
+        const toolResult = await executeLocalToolByName(toolName, req.body?.params?.arguments ?? {}, {
+          rootPath: getHermesYggRequestRootPath(req.get('x-ygg-hermes-cwd')),
+          operationMode: 'execute',
+          conversationId:
+            typeof req.get('x-ygg-hermes-conversation-id') === 'string' && req.get('x-ygg-hermes-conversation-id')!.trim()
+              ? req.get('x-ygg-hermes-conversation-id')!.trim()
+              : null,
+          messageId: null,
+          streamId: null,
+        })
+
+        sendHermesYggMcpJsonResult(res, id, toHermesYggMcpToolCallResult(toolResult))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        sendHermesYggMcpJsonResult(res, id, {
+          content: [{ type: 'text', text: message }],
+          isError: true,
+        })
+      }
+      return
+    }
+
+    sendHermesYggMcpJsonError(res, id, -32601, `Unsupported MCP method: ${method}`, 404)
   })
 
   // Custom Tools API Endpoints

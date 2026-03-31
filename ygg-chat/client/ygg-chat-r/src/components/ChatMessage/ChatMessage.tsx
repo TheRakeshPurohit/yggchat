@@ -111,6 +111,7 @@ interface ChatMessageProps {
   customThemeEnabled?: boolean
   isDarkMode?: boolean
   onEditingStateChange?: (id: string, isEditing: boolean, mode: 'edit' | 'branch' | null) => void
+  onLayoutChange?: () => void
 }
 
 interface MessageActionsProps {
@@ -478,6 +479,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
     customThemeEnabled: customThemeEnabledProp,
     isDarkMode: isDarkModeProp,
     onEditingStateChange,
+    onLayoutChange,
   }) => {
     const dispatch = useAppDispatch()
     const isMobile = useIsMobile()
@@ -536,6 +538,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
     const [explainInputFixedPosition, setExplainInputFixedPosition] = useState<{ x: number; y: number } | null>(null)
     const [mcpLoadState, setMcpLoadState] = useState<Record<string, boolean>>({})
     const [mcpReloadTokens, setMcpReloadTokens] = useState<Record<string, number>>({})
+    const isStreamingRender = id === 'streaming' || (Array.isArray(streamEvents) && streamEvents.length > 0)
+    const expandContainerStyle = isStreamingRender ? ({ transition: 'none' } as React.CSSProperties) : undefined
+    const handleExpandTransitionEnd = useCallback(() => {
+      onLayoutChange?.()
+    }, [onLayoutChange])
     // Get message data from Redux store
     const messageData = useSelector((state: RootState) =>
       state.chat.conversation.messages.find(m => String(m.id) === String(id))
@@ -1351,6 +1358,23 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       })
     }
 
+    useEffect(() => {
+      if (!onLayoutChange) return
+
+      onLayoutChange()
+      if (typeof window === 'undefined') return
+
+      const rafId = window.requestAnimationFrame(() => onLayoutChange())
+      const timeoutA = window.setTimeout(() => onLayoutChange(), 140)
+      const timeoutB = window.setTimeout(() => onLayoutChange(), 320)
+
+      return () => {
+        window.cancelAnimationFrame(rafId)
+        window.clearTimeout(timeoutA)
+        window.clearTimeout(timeoutB)
+      }
+    }, [expandedBlocks, onLayoutChange, showThinking])
+
     // Extract path-like parameters from tool arguments
     const extractPathParam = (args: any): string | null => {
       if (!args || typeof args !== 'object') return null
@@ -1790,7 +1814,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
           </div>
 
           {/* Expandable content */}
-          <div className={`tool-expand-container ${isExpanded ? 'open' : ''}`}>
+          <div
+            className={`tool-expand-container ${isExpanded ? 'open' : ''}`}
+            style={expandContainerStyle}
+            onTransitionEnd={handleExpandTransitionEnd}
+          >
             <div className='tool-expand-content pt-3'>
               {/* Tool inputs */}
               {!hasHtmlOutput && group.args && Object.keys(group.args).length > 0 && (
@@ -1916,7 +1944,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
               </svg>
             </button>
 
-            <div className={`tool-expand-container ${isExpanded ? 'open' : ''}`}>
+            <div
+            className={`tool-expand-container ${isExpanded ? 'open' : ''}`}
+            style={expandContainerStyle}
+            onTransitionEnd={handleExpandTransitionEnd}
+          >
               <div className='tool-expand-content pt-2'>
                 {renderMarkdownNode({
                   key: `${key}-reasoning-content`,
@@ -2011,7 +2043,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                   <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M9 5l7 7-7 7' />
                 </svg>
               </button>
-              <div className={`tool-expand-container ${isExpanded ? 'open' : ''}`}>
+              <div
+            className={`tool-expand-container ${isExpanded ? 'open' : ''}`}
+            style={expandContainerStyle}
+            onTransitionEnd={handleExpandTransitionEnd}
+          >
                 <div className='tool-expand-content pt-2'>{runItems.map(item => item.node)}</div>
               </div>
             </div>
@@ -2025,6 +2061,18 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
 
       return rendered
     }
+
+    const wrapStreamProcessNode = (key: string, node: React.ReactNode): React.ReactNode => (
+      <motion.div
+        key={`anim-${key}`}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.12, ease: 'linear' }}
+        style={{ willChange: 'opacity' }}
+      >
+        {node}
+      </motion.div>
+    )
 
     const buildStreamRenderItems = (): MessageRenderItem[] => {
       if (!Array.isArray(streamEvents) || streamEvents.length === 0) return []
@@ -2053,7 +2101,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 key: `stream-tool-${groupedTool.id}-${idx}`,
                 kind: 'process',
                 processType: 'tool',
-                node: toolNode,
+                node: wrapStreamProcessNode(`stream-tool-${groupedTool.id}-${idx}`, toolNode),
               })
             }
           }
@@ -2119,7 +2167,13 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
             }
           }
 
-          items.push(buildReasoningRenderItem(accumulatedReasoning, idx, `reasoning-${idx}`))
+          {
+            const reasoningItem = buildReasoningRenderItem(accumulatedReasoning, idx, `reasoning-${idx}`)
+            items.push({
+              ...reasoningItem,
+              node: wrapStreamProcessNode(reasoningItem.key, reasoningItem.node),
+            })
+          }
           idx = nextIdx
           continue
         }
@@ -2142,7 +2196,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
               key: `stream-fallback-tool-${toolCall.id}-${idx}`,
               kind: 'process',
               processType: 'tool',
-              node: fallbackNode,
+              node: wrapStreamProcessNode(`stream-fallback-tool-${toolCall.id}-${idx}`, fallbackNode),
             })
           }
           idx += 1
@@ -2418,7 +2472,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 </button>
 
                 {/* Expandable content */}
-                <div className={`tool-expand-container ${showThinking ? 'open' : ''}`}>
+                <div
+                  className={`tool-expand-container ${showThinking ? 'open' : ''}`}
+                  style={expandContainerStyle}
+                  onTransitionEnd={handleExpandTransitionEnd}
+                >
                   <div className='tool-expand-content pt-2'>
                     {renderMarkdownNode({
                       key: `legacy-reasoning-${id}`,

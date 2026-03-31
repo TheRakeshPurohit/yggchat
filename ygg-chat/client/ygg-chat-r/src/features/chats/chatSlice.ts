@@ -271,6 +271,10 @@ export const chatSlice = createSlice({
         state.composition.sending = true
         state.composition.input.content = ''
       }
+
+      if (streamType === 'primary' || streamType === 'branch') {
+        state.composition.imageDrafts = []
+      }
     },
 
     sendingCompleted: (state, action: PayloadAction<{ streamId: string } | undefined>) => {

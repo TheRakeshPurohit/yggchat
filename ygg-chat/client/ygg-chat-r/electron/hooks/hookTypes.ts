@@ -62,6 +62,7 @@ export interface NormalizedHookHandler {
   timeoutMs?: number
   matcher?: string | string[]
   workingDirectory?: string
+  enabled?: boolean
 }
 
 export interface NormalizedHookEntry {

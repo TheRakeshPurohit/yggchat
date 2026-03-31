@@ -1650,6 +1650,7 @@ function Chat() {
   const lastFocusedScrollIdRef = useRef<MessageId | null>(null)
   // Track the most visible message ID for Heimdall highlighting
   const [visibleMessageId, setVisibleMessageId] = useState<MessageId | null>(null)
+  const [showScrollToBottomButton, setShowScrollToBottomButton] = useState(false)
   const updateVisibleMessageRef = useRef<(() => void) | null>(null)
   // Ref for input area to measure its height dynamically
   const inputAreaRef = useRef<HTMLDivElement>(null)
@@ -2139,7 +2140,10 @@ function Chat() {
     Boolean(streamState.thinkingBuffer) ||
     streamState.toolCalls.length > 0 ||
     streamState.events.length > 0
-  const showStreamingMessage = showGenerationLoadingAnimation || hasStreamingMessageContent
+  const isStreamingMessageAlreadyRendered =
+    streamState.messageId != null && messageRowIndexByMessageId.has(String(streamState.messageId))
+  const showStreamingMessage =
+    !isStreamingMessageAlreadyRendered && (showGenerationLoadingAnimation || hasStreamingMessageContent)
 
   const virtualRows = useMemo<VirtualRenderRow[]>(() => {
     const rows: VirtualRenderRow[] = messageRenderRows.map((row, index) => ({
@@ -2320,12 +2324,60 @@ function Chat() {
   ])
 
   // Consider the user to be "at the bottom" if within this many pixels
-  const NEAR_BOTTOM_PX = 48
+  const NEAR_BOTTOM_PX = 600
   const isNearBottom = (el: HTMLElement, threshold = NEAR_BOTTOM_PX) => {
     // Distance remaining to bottom within the scroll container
     const remaining = el.scrollHeight - el.scrollTop - el.clientHeight
     return remaining <= threshold
   }
+
+  const updateScrollToBottomButtonVisibility = useCallback(() => {
+    const el = messagesContainerRef.current
+    if (!el || virtualRows.length === 0) {
+      setShowScrollToBottomButton(false)
+      return
+    }
+
+    setShowScrollToBottomButton(!isNearBottom(el, NEAR_BOTTOM_PX))
+  }, [virtualRows.length])
+
+  // Helper: scroll to bottom immediately using the sentinel first, with follow-up passes
+  // to account for virtualized row measurement and late layout changes in long branches.
+  const scrollToBottomNow = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const performScroll = (scrollBehavior: ScrollBehavior) => {
+      const sentinel = bottomRef.current
+      if (sentinel && typeof sentinel.scrollIntoView === 'function') {
+        sentinel.scrollIntoView({ block: 'end', inline: 'nearest', behavior: scrollBehavior })
+        return
+      }
+
+      const container = messagesContainerRef.current
+      if (container) {
+        container.scrollTo({ top: container.scrollHeight, behavior: scrollBehavior })
+      }
+    }
+
+    performScroll(behavior)
+
+    if (typeof window === 'undefined') return
+
+    let attempts = 0
+    const maxAttempts = 4
+
+    const settleToBottom = () => {
+      const container = messagesContainerRef.current
+      if (!container) return
+      if (isNearBottom(container, NEAR_BOTTOM_PX) || attempts >= maxAttempts) return
+
+      attempts += 1
+      performScroll('auto')
+      window.requestAnimationFrame(settleToBottom)
+    }
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(settleToBottom)
+    })
+  }, [])
 
   // Helper: scroll to show latest message at top of viewport (for normal mode)
   // const scrollToShowLatestAtTop = useCallback((behavior: ScrollBehavior = 'smooth') => {
@@ -3310,67 +3362,6 @@ function Chat() {
   // Query invalidation is now handled directly in sendMessage and editMessageWithBranching success handlers
   // This prevents aggressive refetching and duplicate API requests
 
-  // Coalesced scroll-to-bottom using double rAF to wait for DOM/layout to settle
-  const scheduleScrollToBottom = useCallback((behavior: ScrollBehavior) => {
-    const container = messagesContainerRef.current
-    if (!container) return
-    const doScroll = () => {
-      const c = messagesContainerRef.current
-      if (!c) return
-      c.scrollTo({ top: c.scrollHeight, behavior })
-    }
-    if (typeof window !== 'undefined' && 'requestAnimationFrame' in window) {
-      if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
-      scrollRafRef.current = requestAnimationFrame(() => requestAnimationFrame(doScroll))
-    } else {
-      doScroll()
-    }
-  }, [])
-
-  // Auto-scroll to bottom when messages update, with refined behavior:
-  // - Only enabled when Hermes mode is active
-  // - While streaming: keep pinned unless user scrolled away. If user returns near bottom, re-enable pinning.
-  // - After streaming completes: only auto-scroll when there is no explicit selection path
-  useEffect(() => {
-    const container = messagesContainerRef.current
-    if (!container) return
-
-    // Only enable auto-scroll when in Hermes mode
-    if (!hermesMode) return
-
-    // During streaming, keep pinned unless the user opted out by scrolling away.
-    // If they scroll back near bottom, re-enable pinning and scroll.
-    if (streamState.active) {
-      if (!userScrolledDuringStreamRef.current) {
-        // Use instant scroll during streaming to avoid smooth-scroll queuing/jitter
-        scheduleScrollToBottom('auto')
-      } else {
-        const nearBottom = isNearBottom(container, NEAR_BOTTOM_PX)
-        if (nearBottom) {
-          userScrolledDuringStreamRef.current = false
-          scheduleScrollToBottom('auto')
-        }
-      }
-      return
-    }
-
-    // After streaming completes, only auto-scroll when there is no explicit selection path
-    const noExplicitPath = !selectedPath || selectedPath.length === 0
-    if (noExplicitPath) {
-      // Smooth scroll when not streaming
-      scheduleScrollToBottom('smooth')
-    }
-  }, [
-    displayMessages,
-    streamState.buffer,
-    streamState.thinkingBuffer,
-    streamState.toolCalls,
-    streamState.active,
-    streamState.finished,
-    selectedPath,
-    scheduleScrollToBottom,
-    hermesMode,
-  ])
 
   // Cleanup any pending rAF on unmount
   useEffect(() => {
@@ -3411,6 +3402,48 @@ function Chat() {
       }
     }
   }, [streamState.finished])
+
+  useEffect(() => {
+    const el = messagesContainerRef.current
+    if (!el) return
+
+    const updateVisibility = () => updateScrollToBottomButtonVisibility()
+    updateVisibility()
+
+    el.addEventListener('scroll', updateVisibility, { passive: true })
+
+    const resizeObserver = new ResizeObserver(() => {
+      updateVisibility()
+    })
+    resizeObserver.observe(el)
+
+    const sentinel = bottomRef.current
+    if (sentinel) {
+      resizeObserver.observe(sentinel)
+    }
+
+    return () => {
+      el.removeEventListener('scroll', updateVisibility)
+      resizeObserver.disconnect()
+    }
+  }, [currentConversationId, updateScrollToBottomButtonVisibility])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const rafId = window.requestAnimationFrame(() => {
+      updateScrollToBottomButtonVisibility()
+    })
+    return () => window.cancelAnimationFrame(rafId)
+  }, [
+    currentConversationId,
+    displayMessages.length,
+    streamState.active,
+    streamState.buffer,
+    streamState.thinkingBuffer,
+    streamState.toolCalls.length,
+    updateScrollToBottomButtonVisibility,
+    virtualRows.length,
+  ])
 
   // Scroll to show new message at top when stream starts (normal mode only)
   // DISABLED: Auto-scroll temporarily disabled
@@ -3913,19 +3946,6 @@ function Chat() {
 
     return (hasLocalInput || isRetrigger) && isNotSending && hasModel
   }, [hasLocalInput, isCurrentConversationCompacting, streamState.active, selectedModel, displayMessages])
-
-  // Helper: scroll to bottom immediately using the sentinel or container fallback
-  const scrollToBottomNow = useCallback((behavior: ScrollBehavior = 'auto') => {
-    const container = messagesContainerRef.current
-    if (container) {
-      container.scrollTo({ top: container.scrollHeight, behavior })
-      return
-    }
-    const sentinel = bottomRef.current
-    if (sentinel && typeof sentinel.scrollIntoView === 'function') {
-      sentinel.scrollIntoView({ block: 'end', inline: 'nearest', behavior })
-    }
-  }, [])
 
   const handleSend = useCallback(
     (value: number) => {
@@ -5859,24 +5879,7 @@ function Chat() {
               )}
             </React.Profiler>
 
-            {/* {streamState.active && (
-              <div className='pb-4 px-3 flex justify-end'>
-                <video
-                  src={getAssetPath('video/loadingoutput.webm')}
-                  autoPlay
-                  loop
-                  muted
-                  playsInline
-                  className='h-6 xl:h-8 w-auto rounded-full overflow-hidden'
-                  style={{ imageRendering: 'auto' }}
-                />
-              </div>
-            )} */}
-            {/* {streamState.active && (
-              <div className=' pb-4 px-3 text-stone-800 dark:text-stone-200 flex justify-end'>
-                <i className='bx bx-loader-alt text-2xl animate-spin' style={{ animationDuration: '1s' }}></i>
-              </div>
-            )} */}
+            
             {/* Bottom sentinel and padding for scrolling past last message */}
             <div ref={bottomRef} data-bottom-sentinel='true' style={{ height: Math.max(100, containerHeight - 300) }} />
           </div>
@@ -5888,6 +5891,19 @@ function Chat() {
           style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}
         >
           {/* Controls row (above) */}
+
+          {showScrollToBottomButton && virtualRows.length > 0 && (
+            <Button
+              variant='outline2'
+              size='medium'
+              className='absolute -top-12 right-5 z-20 !rounded-full !p-2 shadow-[0_12px_32px_-12px_rgba(0,0,0,0.45)] backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:bg-black/5 dark:hover:bg-white/5'
+              aria-label='Scroll to latest messages'
+              title='Scroll to bottom'
+              onClick={() => scrollToBottomNow('auto')}
+            >
+              <i className='bx bx-down-arrow-alt text-lg' aria-hidden='true'></i>
+            </Button>
+          )}
 
           {/* Textarea (bottom, grows upward because wrapper is bottom-pinned) */}
           <div

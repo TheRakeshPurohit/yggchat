@@ -1,7 +1,7 @@
 {
   "name": "graviton",
   "private": true,
-  "version": "0.1.83",
+  "version": "0.1.84",
   "type": "module",
   "main": "electron/main.mjs",
   "overrides": {},
@@ -41,7 +41,7 @@
     "@tanstack/react-query": "^5.90.2",
     "@tanstack/react-query-devtools": "^5.90.2",
     "@tanstack/react-query-persist-client": "^5.90.2",
-    "@tanstack/react-virtual": "^3.13.18",
+    "@tanstack/react-virtual": "^3.13.23",
     "@types/three": "^0.182.0",
     "@vercel/analytics": "^1.6.1",
     "@xyflow/react": "^12.8.2",

@@ -2799,6 +2799,12 @@ export const sendMessage = createAsyncThunk<
 
     // Generate or use provided stream ID
     const streamId = providedStreamId ?? generateStreamId('primary')
+    const preSendState = getState() as RootState
+    const preSendDrafts = preSendState.chat.composition.imageDrafts || []
+    const preSendAttachmentsBase64 = preSendDrafts.length
+      ? preSendDrafts.map(d => ({ dataUrl: d.dataUrl, name: d.name, type: d.type, size: d.size }))
+      : null
+    const preSendSelectedFilesForChat = preSendState.ideContext.selectedFilesForChat || []
 
     dispatch(
       chatSliceActions.sendingStarted({
@@ -2851,11 +2857,8 @@ export const sendMessage = createAsyncThunk<
       const openRouterTemperature = resolveOpenRouterTemperature(providerSlug)
       const isLmStudio = providerSlug === 'lmstudio'
       const isOpenAIChatGPT = providerSlug === 'openaichatgpt' || providerSlug === 'openai(chatgpt)'
-      // Gather any image drafts (base64) to send along with the message. Nullable when empty.
-      const drafts = state.chat.composition.imageDrafts || []
-      const attachmentsBase64 = drafts.length
-        ? drafts.map(d => ({ dataUrl: d.dataUrl, name: d.name, type: d.type, size: d.size }))
-        : null
+      // Gather any image drafts (base64) captured before send start so UI can clear immediately.
+      const attachmentsBase64 = preSendAttachmentsBase64
 
       // Combine system prompts in order: user default > project > conversation
       const selectedProject = selectSelectedProject(state)
@@ -2884,8 +2887,8 @@ export const sendMessage = createAsyncThunk<
         projectContext && conversationContextSource
           ? `${projectContext}\n\n${conversationContextSource}`
           : projectContext || conversationContextSource || null
-// Get selected files for chat from IDE context
-const selectedFilesForChat = state.ideContext.selectedFilesForChat || []
+// Get selected files for chat captured before send start so UI can clear immediately
+const selectedFilesForChat = preSendSelectedFilesForChat
 
 const conversationMeta = state.conversations.items.find(c => c.id === conversationId)
 // Use React Query cache as fallback for storage mode detection (handles local conversations not yet in Redux)
@@ -2990,8 +2993,8 @@ const executionMode = 'client'
           }
 
           // Append draft artifacts immediately for UI parity
-          if (drafts.length > 0) {
-            const artifactDataUrls = drafts.map(d => d.dataUrl)
+          if (preSendDrafts.length > 0) {
+            const artifactDataUrls = preSendDrafts.map(d => d.dataUrl)
             dispatch(
               chatSliceActions.messageArtifactsAppended({
                 messageId: newUserMessage.id,
@@ -4186,9 +4189,9 @@ const executionMode = 'client'
 
                   // Clear optimistic message immediately when real user message confirmed
                   dispatch(chatSliceActions.optimisticMessageCleared())
-                  // Live-update: append current image drafts to this new user message's artifacts
-                  if (drafts.length > 0) {
-                    const artifactDataUrls = drafts.map(d => d.dataUrl)
+                  // Live-update: append pre-send image drafts to this new user message's artifacts
+                  if (preSendDrafts.length > 0) {
+                    const artifactDataUrls = preSendDrafts.map(d => d.dataUrl)
                     dispatch(
                       chatSliceActions.messageArtifactsAppended({
                         messageId: chunk.message.id,
@@ -4731,8 +4734,13 @@ export const editMessageWithBranching = createAsyncThunk<
     // Generate or use provided stream ID
     const streamId = providedStreamId ?? generateStreamId('branch')
 
+    // Snapshot composition state before send start so UI can clear immediately.
+    const preSendState = getState() as RootState
+    const preSendDrafts = preSendState.chat.composition.imageDrafts || []
+    const preSendSelectedFilesForChat = preSendState.ideContext.selectedFilesForChat || []
+
     // Get state early to find parent message ID for lineage
-    const state = getState() as RootState
+    const state = preSendState
     const messagesCache = extra.queryClient?.getQueryData<{ messages: Message[]; tree: any }>([
       'conversations',
       conversationId,
@@ -4819,8 +4827,8 @@ export const editMessageWithBranching = createAsyncThunk<
           ? `${projectContext}\n\n${conversationContextSource}`
           : projectContext || conversationContextSource || null
 
-      // Gather image drafts (new images being added)
-      const drafts = state.chat.composition.imageDrafts || []
+      // Gather image drafts (new images being added) captured before send start.
+      const drafts = preSendDrafts
       const draftDataUrls = drafts.map(d => d.dataUrl)
 
       // Build attachments: prioritize React Query cached artifacts, then Redux, plus new drafts
@@ -4995,7 +5003,7 @@ export const editMessageWithBranching = createAsyncThunk<
         }
       }
 
-const selectedFilesForChat = state.ideContext.selectedFilesForChat || []
+const selectedFilesForChat = preSendSelectedFilesForChat
 
 const conversationMeta = state.conversations.items.find(c => c.id === conversationId)
 // Use React Query cache as fallback for storage mode detection (handles local conversations not yet in Redux)
@@ -6146,6 +6154,12 @@ export const sendMessageToBranch = createAsyncThunk<
 
     // Generate or use provided stream ID
     const streamId = providedStreamId ?? generateStreamId('branch')
+    const preSendState = getState() as RootState
+    const preSendDrafts = preSendState.chat.composition.imageDrafts || []
+    const preSendAttachmentsBase64 = preSendDrafts.length
+      ? preSendDrafts.map(d => ({ dataUrl: d.dataUrl, name: d.name, type: d.type, size: d.size }))
+      : null
+    const preSendSelectedFilesForChat = preSendState.ideContext.selectedFilesForChat || []
 
     dispatch(
       chatSliceActions.sendingStarted({
@@ -6185,10 +6199,7 @@ export const sendMessageToBranch = createAsyncThunk<
       const openRouterTemperature = resolveOpenRouterTemperature(providerSlug)
       const isLmStudio = providerSlug === 'lmstudio'
       const isOpenAIChatGPT = providerSlug === 'openaichatgpt' || providerSlug === 'openai(chatgpt)'
-      const drafts = state.chat.composition.imageDrafts || []
-      const attachmentsBase64 = drafts.length
-        ? drafts.map(d => ({ dataUrl: d.dataUrl, name: d.name, type: d.type, size: d.size }))
-        : null
+      const attachmentsBase64 = preSendAttachmentsBase64
 
       // Retrieve project and conversation context to send with branch message
       const selectedProject = selectSelectedProject(state)
@@ -6198,8 +6209,8 @@ export const sendMessageToBranch = createAsyncThunk<
         projectContext && conversationContextSource
           ? `${projectContext}\n\n${conversationContextSource}`
           : projectContext || conversationContextSource || null
-// Get selected files for chat from IDE context
-const selectedFilesForChat = state.ideContext.selectedFilesForChat || []
+// Get selected files for chat captured before send start so UI can clear immediately
+const selectedFilesForChat = preSendSelectedFilesForChat
 
 const conversationMeta = state.conversations.items.find(c => c.id === conversationId)
 // Use React Query cache as fallback for storage mode detection (handles local conversations not yet in Redux)
@@ -6576,8 +6587,8 @@ const executionMode = 'client'
             }
 
             // Live-update artifacts so images appear immediately in the branch message
-            if (drafts.length > 0) {
-              const artifactDataUrls = drafts.map(d => d.dataUrl)
+            if (preSendDrafts.length > 0) {
+              const artifactDataUrls = preSendDrafts.map(d => d.dataUrl)
               dispatch(
                 chatSliceActions.messageArtifactsAppended({
                   messageId: newUserMessage.id,

@@ -1,7 +1,14 @@
 import { EventEmitter } from 'events'
 import { PassThrough } from 'stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { HermesAcpClient } from '../hermesAcpClient.js'
+import {
+  HermesAcpClient,
+  getHermesLauncherDiagnostics,
+  normalizeHermesAcpCwd,
+  resolveAcpLauncher,
+  resolveEffectiveHermesLaunchMode,
+  resolveRequestedHermesLaunchMode,
+} from '../hermesAcpClient.js'
 
 type JsonMessage = Record<string, any>
 
@@ -51,6 +58,7 @@ async function waitForCondition(predicate: () => boolean, timeoutMs = 1000): Pro
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
 })
 
 describe('HermesAcpClient', () => {
@@ -300,5 +308,115 @@ describe('HermesAcpClient', () => {
 
     expect(outbound.some(message => message.method === 'session/cancel')).toBe(true)
     expect(proc.kill).toHaveBeenCalled()
+  })
+
+  it('uses WSL launcher and normalizes cwd when HERMES_LAUNCH_MODE=wsl on Windows', async () => {
+    const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    vi.stubEnv('HERMES_LAUNCH_MODE', 'wsl')
+    vi.stubEnv('HERMES_WSL_DISTRO', 'Ubuntu-24.04')
+
+    expect(resolveRequestedHermesLaunchMode()).toBe('wsl')
+    expect(resolveEffectiveHermesLaunchMode()).toBe('wsl')
+
+    const launcher = resolveAcpLauncher()
+    expect(launcher).toEqual({
+      command: 'wsl.exe',
+      args: ['-d', 'Ubuntu-24.04', '-e', 'bash', '-lc', 'hermes acp'],
+      spawnCwd: process.cwd(),
+      requestedLaunchMode: 'wsl',
+      launchMode: 'wsl',
+      launchSource: 'wsl',
+    })
+
+    expect(getHermesLauncherDiagnostics('D:\\workspace\\project')).toEqual({
+      requestedLaunchMode: 'wsl',
+      effectiveLaunchMode: 'wsl',
+      launchSource: 'wsl',
+      command: 'wsl.exe',
+      args: ['-d', 'Ubuntu-24.04', '-e', 'bash', '-lc', 'hermes acp'],
+      spawnCwd: process.cwd(),
+      normalizedCwd: '/mnt/d/workspace/project',
+    })
+    expect(normalizeHermesAcpCwd('D:\\workspace\\project')).toBe('/mnt/d/workspace/project')
+    expect(normalizeHermesAcpCwd('/home/tester/project')).toBe('/home/tester/project')
+
+    platformSpy.mockRestore()
+    vi.unstubAllEnvs()
+  })
+
+  it('prefers explicit native launch mode over legacy HERMES_USE_WSL on Windows', async () => {
+    const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    vi.stubEnv('HERMES_LAUNCH_MODE', 'native')
+    vi.stubEnv('HERMES_USE_WSL', 'true')
+
+    expect(resolveRequestedHermesLaunchMode()).toBe('native')
+    expect(resolveEffectiveHermesLaunchMode()).toBe('native')
+    expect(resolveAcpLauncher()).toMatchObject({
+      requestedLaunchMode: 'native',
+      launchMode: 'native',
+    })
+    expect(normalizeHermesAcpCwd('D:\\workspace\\project')).toBe('D:\\workspace\\project')
+
+    platformSpy.mockRestore()
+    vi.unstubAllEnvs()
+  })
+
+  it('sends WSL-normalized cwd values in session lifecycle requests', async () => {
+    const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    vi.stubEnv('HERMES_LAUNCH_MODE', 'wsl')
+
+    const proc = createFakeChildProcess()
+    const outbound: JsonMessage[] = []
+
+    watchJsonLines(proc.stdin, message => {
+      outbound.push(message)
+
+      if (message.method === 'session/new') {
+        proc.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { sessionId: 'session-1' } })}\n`)
+        return
+      }
+
+      if (message.method === 'session/load') {
+        proc.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} })}\n`)
+        return
+      }
+
+      if (message.method === 'session/fork') {
+        proc.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { sessionId: 'session-2' } })}\n`)
+      }
+    })
+
+    const client = new HermesAcpClient(proc as any, {
+      cwd: 'D:/workspace',
+    })
+
+    await client.newSession('D:\\workspace\\project')
+    await client.loadSession('session-1', 'D:\\workspace\\project')
+    await client.forkSession('session-1', 'D:\\workspace\\project')
+
+    expect(outbound).toEqual([
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'session/new',
+        params: { cwd: '/mnt/d/workspace/project', mcpServers: [] },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/load',
+        params: { cwd: '/mnt/d/workspace/project', sessionId: 'session-1', mcpServers: [] },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'session/fork',
+        params: { cwd: '/mnt/d/workspace/project', sessionId: 'session-1', mcpServers: [] },
+      },
+    ])
+
+    client.close()
+    platformSpy.mockRestore()
+    vi.unstubAllEnvs()
   })
 })

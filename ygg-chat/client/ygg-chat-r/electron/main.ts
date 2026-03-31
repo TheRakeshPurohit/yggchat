@@ -2,6 +2,7 @@ import Conf from 'conf'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell, Tray } from 'electron'
 import autoUpdaterPkg from 'electron-updater'
 import fs from 'fs'
+import { randomBytes } from 'crypto'
 import os from 'os'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -47,6 +48,10 @@ const LOCAL_SERVER_ADVERTISE_HOST =
   (LOCAL_SERVER_HOST === '0.0.0.0' ? '127.0.0.1' : LOCAL_SERVER_HOST)
 const LOCAL_SERVER_LAN_ADVERTISE_HOST = process.env.YGG_LOCAL_SERVER_LAN_ADVERTISE_HOST?.trim() || ''
 const LOCAL_SERVER_ALLOW_EPHEMERAL_PORT = true
+
+if (!process.env.YGG_HERMES_MCP_AUTH_TOKEN?.trim()) {
+  process.env.YGG_HERMES_MCP_AUTH_TOKEN = randomBytes(32).toString('hex')
+}
 
 function isPrivateIpv4(address: string): boolean {
   if (address.startsWith('10.')) return true
@@ -105,6 +110,7 @@ function getClientErrorLogPath(): string {
 }
 
 const TRUTHY_ENV_VALUES = new Set(['1', 'true', 'yes', 'on'])
+const HERMES_RUNTIME_SETTINGS_STORAGE_KEY = 'ygg_hermes_runtime_settings'
 
 function isTruthyEnv(value: string | undefined): boolean {
   if (!value) return false
@@ -246,7 +252,6 @@ function deleteFromStore(key: string): boolean {
     return false
   }
 }
-
 function clearStore(): boolean {
   if (!storeInitialized) {
     console.warn('[Electron] Store not yet initialized')
@@ -262,13 +267,48 @@ function clearStore(): boolean {
       return true
     }
   } catch (error) {
-    console.error('[Electron] Error clearing store:', error)
+    console.error('[Electron] Error clearing storage:', error)
     memoryStore.clear()
     return false
   }
 }
 
+function applyHermesRuntimeSettingsToEnv(rawSettings: any): void {
+  const launchMode =
+    rawSettings?.launchMode === 'native' || rawSettings?.launchMode === 'wsl' || rawSettings?.launchMode === 'auto'
+      ? rawSettings.launchMode
+      : 'auto'
+  const wslDistro = typeof rawSettings?.wslDistro === 'string' ? rawSettings.wslDistro.trim() : ''
+
+  process.env.HERMES_LAUNCH_MODE = launchMode
+
+  if (wslDistro) {
+    process.env.HERMES_WSL_DISTRO = wslDistro
+  } else {
+    delete process.env.HERMES_WSL_DISTRO
+  }
+
+  if (launchMode === 'wsl') {
+    process.env.HERMES_USE_WSL = 'true'
+  } else {
+    delete process.env.HERMES_USE_WSL
+  }
+}
+
+function syncHermesRuntimeSettingsFromStore(): void {
+  try {
+    const storedSettings = getFromStore(HERMES_RUNTIME_SETTINGS_STORAGE_KEY)
+    if (!storedSettings || typeof storedSettings !== 'object') {
+      return
+    }
+    applyHermesRuntimeSettingsToEnv(storedSettings)
+  } catch (error) {
+    console.error('[Electron] Failed to sync Hermes runtime settings from storage:', error)
+  }
+}
+
 // Helper to get icon path
+
 function getIconPath(_isDark?: boolean) {
   const logoFile = 'taskbar-logo.png'
   return app.isPackaged
@@ -658,6 +698,7 @@ function handleOAuthCallback(url: string) {
 app.whenReady().then(async () => {
   try {
     await initializeStore()
+    syncHermesRuntimeSettingsFromStore()
     process.env.YGG_APP_USER_DATA = app.getPath('userData')
     const managedHooksDirectory = await ensureManagedHooksInitialized()
     console.log(`[Electron] Managed hooks directory ready at: ${managedHooksDirectory}`)
@@ -691,6 +732,13 @@ app.whenReady().then(async () => {
       const detectedLanHost = LOCAL_SERVER_ALLOW_REMOTE ? detectPreferredLanIpv4() : null
       localServerLanUrl = detectedLanHost ? `http://${detectedLanHost}:${localServerInfo.port}` : null
       localServerError = null
+      process.env.YGG_LOCAL_SERVER_PORT = String(localServerInfo.port)
+      process.env.YGG_LOCAL_SERVER_URL = localServerUrl
+      if (localServerLanUrl) {
+        process.env.YGG_LOCAL_SERVER_LAN_URL = localServerLanUrl
+      } else {
+        delete process.env.YGG_LOCAL_SERVER_LAN_URL
+      }
       console.log(
         `[Electron] Local sync server started on ${localServerInfo.url} (renderer endpoint: ${localServerUrl}, lan endpoint: ${localServerLanUrl || 'n/a'})`
       )
@@ -701,6 +749,9 @@ app.whenReady().then(async () => {
       localServerPort = null
       localServerUrl = null
       localServerLanUrl = null
+      delete process.env.YGG_LOCAL_SERVER_PORT
+      delete process.env.YGG_LOCAL_SERVER_URL
+      delete process.env.YGG_LOCAL_SERVER_LAN_URL
       localServerError =
         localServerStartError instanceof Error
           ? localServerStartError.message
@@ -731,6 +782,9 @@ app.on('window-all-closed', () => {
     localServerPort = null
     localServerUrl = null
     localServerLanUrl = null
+    delete process.env.YGG_LOCAL_SERVER_PORT
+    delete process.env.YGG_LOCAL_SERVER_URL
+    delete process.env.YGG_LOCAL_SERVER_LAN_URL
     localServerError = null
   }
 
@@ -754,6 +808,9 @@ app.on('before-quit', () => {
     localServerPort = null
     localServerUrl = null
     localServerLanUrl = null
+    delete process.env.YGG_LOCAL_SERVER_PORT
+    delete process.env.YGG_LOCAL_SERVER_URL
+    delete process.env.YGG_LOCAL_SERVER_LAN_URL
     localServerError = null
   }
 
@@ -810,10 +867,16 @@ ipcMain.handle('storage:set', async (_event, key: string, value: any) => {
     if (value === null || value === undefined) {
       // Delete key if value is null/undefined
       const success = deleteFromStore(key)
+      if (key === HERMES_RUNTIME_SETTINGS_STORAGE_KEY) {
+        applyHermesRuntimeSettingsToEnv(null)
+      }
       // console.log('[Electron IPC] Deleted key from storage')
       return { success }
     } else {
       const success = setInStore(key, value)
+      if (key === HERMES_RUNTIME_SETTINGS_STORAGE_KEY) {
+        applyHermesRuntimeSettingsToEnv(value)
+      }
       // console.log('[Electron IPC] Stored successfully')
       return { success }
     }
@@ -834,6 +897,7 @@ ipcMain.handle('storage:clear', async () => {
 
   try {
     const success = clearStore()
+    applyHermesRuntimeSettingsToEnv(null)
     return { success }
   } catch (error) {
     console.error('[Electron IPC] Failed to clear storage:', error)

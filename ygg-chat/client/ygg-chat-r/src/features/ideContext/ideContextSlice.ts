@@ -205,6 +205,13 @@ const ideContextSlice = createSlice({
     },
   },
   extraReducers: builder => {
+    builder.addCase(chatSliceActions.sendingStarted, (state, action) => {
+      const streamType = action.payload?.streamType ?? 'primary'
+      if (streamType === 'primary' || streamType === 'branch') {
+        state.selectedFilesForChat = []
+        state.lastUpdated = new Date().toISOString()
+      }
+    })
     builder.addCase(chatSliceActions.sendingCompleted, state => {
       state.selectedFilesForChat = []
       state.lastUpdated = new Date().toISOString()

@@ -18,7 +18,11 @@ import {
 import { isCommunityMode, LOCAL_AUTH_USER_ID } from '../config/runtimeMode'
 import { chatSliceActions, selectProviderState } from '../features/chats'
 import { fetchCustomTools, fetchTools, updateToolEnabled } from '../features/chats/chatActions'
-import { clearTokens as clearOpenAITokens, isOpenAIAuthenticated } from '../features/chats/openaiOAuth'
+import {
+  clearTokens as clearOpenAITokens,
+  isOpenAIAuthenticated,
+  saveTokens,
+} from '../features/chats/openaiOAuth'
 import { getAllTools } from '../features/chats/toolDefinitions'
 import {
   AGENT_SETTINGS_CHANGE_EVENT,
@@ -52,6 +56,14 @@ import {
   saveUploadedLocalFont,
   validateGoogleFontUrl,
 } from '../helpers/fontSettingsStorage'
+import {
+  HERMES_RUNTIME_SETTINGS_CHANGE_EVENT,
+  HERMES_RUNTIME_SETTINGS_STORAGE_KEY,
+  HermesLaunchModeSetting,
+  HermesRuntimeSettings,
+  loadHermesRuntimeSettings,
+  saveHermesRuntimeSettings,
+} from '../helpers/hermesRuntimeSettingsStorage'
 import {
   loadProviderSettings,
   MAX_OPENROUTER_TEMPERATURE,
@@ -216,6 +228,10 @@ const Settings: React.FC = () => {
     () => loadProviderSettings().compactionSystemPrompt
   )
   const [compactionSystemPromptTouched, setCompactionSystemPromptTouched] = useState(false)
+  const [openaiLoginModalOpen, setOpenaiLoginModalOpen] = useState(false)
+  const [openaiAuthFlow, setOpenaiAuthFlow] = useState<{ url: string; verifier: string; state: string } | null>(null)
+  const [openaiAuthError, setOpenaiAuthError] = useState<string | null>(null)
+  const [openaiAuthLoading, setOpenaiAuthLoading] = useState(false)
   const [toolExecutionSettings, setToolExecutionSettings] = useState<ToolExecutionSettings>(() =>
     loadToolExecutionSettings()
   )
@@ -249,6 +265,10 @@ const Settings: React.FC = () => {
   const [agentSettingsLoading, setAgentSettingsLoading] = useState(true)
   const [agentSettingsSaving, setAgentSettingsSaving] = useState(false)
   const [subagentSettings, setSubagentSettings] = useState<SubagentToolSettings>(() => loadSubagentToolSettings())
+  const [hermesRuntimeSettings, setHermesRuntimeSettings] = useState<HermesRuntimeSettings>(() =>
+    loadHermesRuntimeSettings()
+  )
+  const [electronPlatform, setElectronPlatform] = useState<string>('')
   const { data: openRouterModelsData } = useModels('OpenRouter')
   const compactionProviderForModels = providerSettings.compactionProvider || providers.currentProvider || 'OpenRouter'
   const { data: compactionModelsData } = useModels(compactionProviderForModels)
@@ -262,6 +282,7 @@ const Settings: React.FC = () => {
     typeof agentSettings.model === 'string' && agentSettings.model.trim().length > 0
       ? agentSettings.model.trim()
       : 'openai/gpt-5.1-codex-mini'
+  const isWindowsElectron = electronPlatform === 'win32'
 
   const readBraveApiKeyFromSecureStore = async (): Promise<string | null> => {
     const braveSecretsApi = window.electronAPI?.secrets?.braveSearch
@@ -301,6 +322,38 @@ const Settings: React.FC = () => {
   useEffect(() => {
     fetchGoogleDriveStatus()
   }, [accessToken])
+
+  useEffect(() => {
+    if (import.meta.env.VITE_ENVIRONMENT !== 'electron') return
+
+    let active = true
+
+    window.electronAPI?.platformInfo
+      ?.get()
+      .then(info => {
+        if (active) {
+          setElectronPlatform(info.platform)
+        }
+      })
+      .catch(error => {
+        console.error('Failed to detect Electron platform in Settings:', error)
+      })
+
+    window.electronAPI?.storage
+      ?.get(HERMES_RUNTIME_SETTINGS_STORAGE_KEY)
+      .then(stored => {
+        if (!active || !stored || typeof stored !== 'object') return
+        const saved = saveHermesRuntimeSettings(stored as HermesRuntimeSettings)
+        setHermesRuntimeSettings(saved)
+      })
+      .catch(error => {
+        console.error('Failed to hydrate Hermes runtime settings from Electron storage:', error)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [])
 
   useEffect(() => {
     if (import.meta.env.VITE_ENVIRONMENT !== 'electron') return
@@ -366,6 +419,16 @@ const Settings: React.FC = () => {
     window.addEventListener(SUBAGENT_TOOL_SETTINGS_CHANGE_EVENT, handleSubagentSettingsChange as EventListener)
     return () =>
       window.removeEventListener(SUBAGENT_TOOL_SETTINGS_CHANGE_EVENT, handleSubagentSettingsChange as EventListener)
+  }, [])
+
+  useEffect(() => {
+    const handleHermesRuntimeSettingsChange = (e: CustomEvent<HermesRuntimeSettings>) => {
+      setHermesRuntimeSettings(e.detail)
+    }
+
+    window.addEventListener(HERMES_RUNTIME_SETTINGS_CHANGE_EVENT, handleHermesRuntimeSettingsChange as EventListener)
+    return () =>
+      window.removeEventListener(HERMES_RUNTIME_SETTINGS_CHANGE_EVENT, handleHermesRuntimeSettingsChange as EventListener)
   }, [])
 
   useEffect(() => {
@@ -549,12 +612,102 @@ const Settings: React.FC = () => {
     showStatus({ type: 'success', text: 'Compaction system prompt updated.' })
   }
 
+  const closeOpenaiLoginModal = () => {
+    setOpenaiLoginModalOpen(false)
+    setOpenaiAuthFlow(null)
+    setOpenaiAuthError(null)
+    setOpenaiAuthLoading(false)
+  }
+
+  const handleOpenAIChatGPTSignIn = async () => {
+    try {
+      const data = await localApi.post<{ success?: boolean; authUrl?: string; state?: string; error?: string }>(
+        '/openai/auth/start'
+      )
+      if (data.success && data.authUrl && data.state) {
+        setOpenaiAuthFlow({ url: data.authUrl, verifier: '', state: data.state })
+        setOpenaiAuthError(null)
+        setOpenaiLoginModalOpen(true)
+        return
+      }
+
+      throw new Error(data.error || 'Failed to start OAuth flow')
+    } catch (error) {
+      console.error('Failed to create OpenAI auth flow:', error)
+      showStatus({
+        type: 'error',
+        text: 'Failed to start ChatGPT sign-in. Make sure the app is running in Electron mode.',
+      })
+    }
+  }
+
+  const handleOpenaiLogin = async () => {
+    if (!openaiAuthFlow) return
+
+    if (window.electronAPI?.auth?.openExternal) {
+      try {
+        await window.electronAPI.auth.openExternal(openaiAuthFlow.url)
+      } catch (error) {
+        console.error('Failed to open browser:', error)
+        setOpenaiAuthError('Failed to open browser. Please copy the URL manually.')
+      }
+    } else {
+      window.open(openaiAuthFlow.url, '_blank')
+    }
+  }
+
+  const handleOpenaiAuthCallback = async () => {
+    if (!openaiAuthFlow) return
+
+    setOpenaiAuthLoading(true)
+    setOpenaiAuthError(null)
+
+    try {
+      const data = await localApi.post<{
+        pending?: boolean
+        success?: boolean
+        error?: string
+        accessToken?: string
+        refreshToken?: string
+        expiresAt?: number
+        accountId?: string
+      }>('/openai/auth/complete', { state: openaiAuthFlow.state })
+
+      if (data.pending) {
+        setOpenaiAuthError('Please complete the sign-in in your browser first, then click this button again.')
+        setOpenaiAuthLoading(false)
+        return
+      }
+
+      if (!data.success) {
+        setOpenaiAuthError(data.error || 'Authentication failed. Please try again.')
+        setOpenaiAuthLoading(false)
+        return
+      }
+
+      saveTokens({
+        accessToken: data.accessToken,
+        refreshToken: data.refreshToken,
+        expiresAt: data.expiresAt,
+        accountId: data.accountId,
+      })
+
+      closeOpenaiLoginModal()
+      showStatus({ type: 'success', text: 'Signed in to OpenAI ChatGPT.' })
+    } catch (error) {
+      console.error('OpenAI auth callback error:', error)
+      setOpenaiAuthError('Authentication failed. Please try again.')
+    } finally {
+      setOpenaiAuthLoading(false)
+    }
+  }
+
   const handleOpenAIChatGPTSignOut = () => {
     clearOpenAITokens()
     if (providers.currentProvider === 'OpenAI (ChatGPT)') {
       dispatch(chatSliceActions.providerSelected('OpenRouter'))
     }
-    showStatus({ type: 'success', text: 'Signed out of OpenAI ChatGPT. You can sign in again from Chat.' })
+    showStatus({ type: 'success', text: 'Signed out of OpenAI ChatGPT.' })
   }
 
   const handleSaveBraveApiKey = async () => {
@@ -746,6 +899,44 @@ const Settings: React.FC = () => {
     saveSubagentToolSettings(nextSettings)
     setSubagentSettings(nextSettings)
     showStatus({ type: 'success', text: successText })
+  }
+
+  const persistHermesRuntimeSettings = (nextSettings: HermesRuntimeSettings, successText: string) => {
+    const saved = saveHermesRuntimeSettings(nextSettings)
+    setHermesRuntimeSettings(saved)
+    showStatus({ type: 'success', text: successText })
+  }
+
+  const handleHermesLaunchModeChange = (value: string) => {
+    const nextLaunchMode: HermesLaunchModeSetting = value === 'native' || value === 'wsl' ? value : 'auto'
+    persistHermesRuntimeSettings(
+      {
+        ...hermesRuntimeSettings,
+        launchMode: nextLaunchMode,
+      },
+      nextLaunchMode === 'wsl'
+        ? 'Hermes will launch through WSL for new sessions.'
+        : nextLaunchMode === 'native'
+          ? 'Hermes will launch natively for new sessions.'
+          : 'Hermes runtime launch mode set to auto.'
+    )
+  }
+
+  const handleHermesWslDistroChange = (value: string) => {
+    const saved = saveHermesRuntimeSettings({
+      ...hermesRuntimeSettings,
+      wslDistro: value,
+    })
+    setHermesRuntimeSettings(saved)
+  }
+
+  const handleHermesWslDistroBlur = () => {
+    const trimmed = hermesRuntimeSettings.wslDistro.trim()
+    if (trimmed) {
+      showStatus({ type: 'success', text: `Hermes WSL distro set to ${trimmed}.` })
+    } else {
+      showStatus({ type: 'info', text: 'Hermes WSL distro cleared. Default WSL distro will be used.' })
+    }
   }
 
   const handleSubagentOrchestratorToggle = () => {
@@ -2030,8 +2221,7 @@ const Settings: React.FC = () => {
                 <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>OpenAI ChatGPT Account</p>
                   <p className='text-sm text-stone-500 dark:text-stone-400'>
-                    Sign out to clear local ChatGPT OAuth tokens. You can sign in again from Chat when selecting OpenAI
-                    (ChatGPT).
+                    Sign in or out to manage local ChatGPT OAuth tokens used by the OpenAI (ChatGPT) provider.
                   </p>
                 </div>
                 <div className='flex flex-wrap items-center gap-3'>
@@ -2047,12 +2237,84 @@ const Settings: React.FC = () => {
                   <Button
                     variant='outline2'
                     size='small'
+                    onClick={handleOpenAIChatGPTSignIn}
+                    disabled={isOpenAIAuthenticated()}
+                  >
+                    Sign in to ChatGPT
+                  </Button>
+                  <Button
+                    variant='outline2'
+                    size='small'
                     onClick={handleOpenAIChatGPTSignOut}
                     disabled={!isOpenAIAuthenticated()}
                   >
                     Sign out of ChatGPT
                   </Button>
                 </div>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
+          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+            <div className='flex flex-col gap-1'>
+              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Hermes Runtime</h2>
+              <p className='text-sm text-stone-500 dark:text-stone-200'>
+                Choose how Ygg launches Hermes ACP for Hermes-backed chats. Changes apply to new Hermes runs.
+              </p>
+            </div>
+
+            <div className='mt-4 flex flex-col gap-4'>
+              <div className='flex flex-col gap-2'>
+                <div>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Launch Mode</p>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    Auto uses the native launcher by default. Use WSL only when Ygg is on Windows and Hermes is installed inside WSL.
+                  </p>
+                </div>
+                <Select
+                  value={hermesRuntimeSettings.launchMode}
+                  onChange={handleHermesLaunchModeChange}
+                  options={[
+                    { value: 'auto', label: 'Auto (recommended)' },
+                    { value: 'native', label: 'Native' },
+                    ...((isWindowsElectron || hermesRuntimeSettings.launchMode === 'wsl')
+                      ? [{ value: 'wsl', label: 'WSL' }]
+                      : []),
+                  ]}
+                  className='max-w-xs'
+                />
+              </div>
+
+              {isWindowsElectron && hermesRuntimeSettings.launchMode === 'wsl' && (
+                <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+                  <div>
+                    <p className='text-base font-medium text-stone-900 dark:text-stone-100'>WSL Distribution</p>
+                    <p className='text-sm text-stone-500 dark:text-stone-400'>
+                      Optional. Leave blank to use your default WSL distro.
+                    </p>
+                  </div>
+                  <input
+                    type='text'
+                    value={hermesRuntimeSettings.wslDistro}
+                    onChange={event => handleHermesWslDistroChange(event.target.value)}
+                    onBlur={handleHermesWslDistroBlur}
+                    placeholder='e.g. Ubuntu-24.04'
+                    className='max-w-md rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                  />
+                </div>
+              )}
+
+              <div className='rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-xs text-stone-600 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-300'>
+                <p>
+                  Current setting: <code>{hermesRuntimeSettings.launchMode}</code>
+                  {isWindowsElectron && hermesRuntimeSettings.launchMode === 'wsl'
+                    ? hermesRuntimeSettings.wslDistro
+                      ? ` via distro ${hermesRuntimeSettings.wslDistro}`
+                      : ' via default WSL distro'
+                    : ''}
+                </p>
               </div>
             </div>
           </section>
@@ -3117,6 +3379,65 @@ const Settings: React.FC = () => {
             )}
           </div>
         </section>
+
+        {openaiLoginModalOpen && (
+          <div
+            className='fixed inset-0 z-[100] flex items-center justify-center bg-black/50 px-4'
+            onClick={closeOpenaiLoginModal}
+          >
+            <div
+              className='w-full max-w-md rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-900'
+              onClick={e => e.stopPropagation()}
+            >
+              <h3 className='mb-2 text-[20px] font-semibold text-stone-900 dark:text-stone-100'>Sign in to OpenAI</h3>
+              <p className='mb-4 text-[14px] text-stone-600 dark:text-stone-300'>
+                Use your ChatGPT Plus or Pro subscription to access GPT-4o and GPT-5 models locally.
+              </p>
+
+              <div className='space-y-4'>
+                {openaiAuthError && (
+                  <div className='flex items-center gap-2 rounded-lg bg-red-50 p-3 dark:bg-red-900/20'>
+                    <i className='bx bx-error-circle text-xl text-red-600 dark:text-red-400'></i>
+                    <span className='text-sm text-red-700 dark:text-red-300'>{openaiAuthError}</span>
+                  </div>
+                )}
+
+                <div className='space-y-3'>
+                  <div className='text-sm text-stone-700 dark:text-stone-300'>
+                    <strong>Step 1:</strong> Click below to sign in with your OpenAI account in your browser.
+                  </div>
+                  <Button
+                    variant='outline2'
+                    className='w-full border-neutral-700 bg-neutral-800 text-white hover:bg-neutral-900 active:scale-98'
+                    onClick={handleOpenaiLogin}
+                  >
+                    Open Browser to Sign In
+                  </Button>
+                </div>
+
+                <div className='space-y-3'>
+                  <div className='text-sm text-stone-700 dark:text-stone-300'>
+                    <strong>Step 2:</strong> After finishing in your browser, click below to complete sign-in.
+                  </div>
+                  <Button
+                    variant='outline2'
+                    className='w-full border-emerald-700 bg-emerald-600 text-white hover:bg-emerald-700 active:scale-98'
+                    onClick={handleOpenaiAuthCallback}
+                    disabled={openaiAuthLoading}
+                  >
+                    {openaiAuthLoading ? 'Completing Sign In...' : 'Complete Sign In'}
+                  </Button>
+                </div>
+
+                <div className='flex justify-end gap-2'>
+                  <Button variant='outline2' onClick={closeOpenaiLoginModal}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

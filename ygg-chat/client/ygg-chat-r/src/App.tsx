@@ -16,7 +16,7 @@ import {
   Chat,
   ConversationPage,
   FAQPage,
-  Homepage,
+  HomepageRedirect,
   LandingPage,
   LoggingPage,
   Login,
@@ -203,7 +203,7 @@ function AnimatedRoutes() {
           path='/homepage'
           element={
             <ProtectedRoute>
-              <Homepage />
+              <HomepageRedirect />
             </ProtectedRoute>
           }
         />

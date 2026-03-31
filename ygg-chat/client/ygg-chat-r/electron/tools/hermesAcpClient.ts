@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { existsSync } from 'fs'
 import path from 'path'
+import { toWslPath } from '../utils/wslBridge.js'
 
 export interface HermesBridgeEvent {
   type: string
@@ -31,10 +32,17 @@ export interface HermesStreamChunk {
 export type OnHermesResponse = (response: HermesResponse) => void | Promise<void>
 export type OnHermesStreamingChunk = (chunk: HermesStreamChunk) => void | Promise<void>
 
+export type HermesLaunchMode = 'auto' | 'native' | 'wsl'
+export type HermesResolvedLaunchMode = 'native' | 'wsl'
+export type HermesLauncherSource = 'wsl' | 'repo_python' | 'configured_bin' | 'path'
+
 export type BridgeLauncher = {
   command: string
   args: string[]
   spawnCwd: string
+  requestedLaunchMode: HermesLaunchMode
+  launchMode: HermesResolvedLaunchMode
+  launchSource: HermesLauncherSource
 }
 
 type JsonRpcMessage = {
@@ -91,6 +99,25 @@ export type HermesPermissionRequest = {
 export type OnHermesPermissionRequest = (
   request: HermesPermissionRequest
 ) => Promise<HermesPermissionDecision> | HermesPermissionDecision
+
+export type HermesAcpMcpServer = {
+  name: string
+  transport?: 'stdio' | 'http'
+  type?: 'stdio' | 'http'
+  enabled?: boolean
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  timeout?: number
+  connect_timeout?: number
+  tools?: {
+    include?: string[]
+    exclude?: string[]
+  }
+  sampling?: Record<string, any>
+}
 
 type HermesAcpClientOptions = {
   cwd: string
@@ -283,7 +310,37 @@ async function emitResponse(
   })
 }
 
-export function resolveAcpLauncher(): BridgeLauncher {
+function parseBooleanishEnv(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
+}
+
+export function resolveRequestedHermesLaunchMode(): HermesLaunchMode {
+  const explicitMode = process.env.HERMES_LAUNCH_MODE?.trim().toLowerCase()
+  if (explicitMode === 'auto' || explicitMode === 'native' || explicitMode === 'wsl') {
+    return explicitMode
+  }
+
+  if (explicitMode) {
+    console.warn(`[HermesACP] Unsupported HERMES_LAUNCH_MODE '${explicitMode}', falling back to auto`)
+  }
+
+  if (process.platform === 'win32' && parseBooleanishEnv(process.env.HERMES_USE_WSL)) {
+    return 'wsl'
+  }
+
+  return 'auto'
+}
+
+export function resolveEffectiveHermesLaunchMode(): HermesResolvedLaunchMode {
+  const requestedMode = resolveRequestedHermesLaunchMode()
+  if (requestedMode === 'wsl' && process.platform === 'win32') {
+    return 'wsl'
+  }
+  return 'native'
+}
+
+function resolveNativeAcpLauncher(requestedLaunchMode: HermesLaunchMode): BridgeLauncher {
   const configuredRoot = process.env.HERMES_AGENT_ROOT?.trim()
   const defaultRoot = process.platform === 'win32' ? 'D:\\hermes-agent' : '/opt/hermes-agent'
   const hermesRoot = configuredRoot || defaultRoot
@@ -307,6 +364,9 @@ export function resolveAcpLauncher(): BridgeLauncher {
       command: pythonPath,
       args: [mainScript, 'acp'],
       spawnCwd,
+      requestedLaunchMode,
+      launchMode: 'native',
+      launchSource: 'repo_python',
     }
   }
 
@@ -316,6 +376,9 @@ export function resolveAcpLauncher(): BridgeLauncher {
       command: configuredHermes,
       args: ['acp'],
       spawnCwd,
+      requestedLaunchMode,
+      launchMode: 'native',
+      launchSource: 'configured_bin',
     }
   }
 
@@ -323,6 +386,69 @@ export function resolveAcpLauncher(): BridgeLauncher {
     command: 'hermes',
     args: ['acp'],
     spawnCwd,
+    requestedLaunchMode,
+    launchMode: 'native',
+    launchSource: 'path',
+  }
+}
+
+function resolveWslAcpLauncher(requestedLaunchMode: HermesLaunchMode): BridgeLauncher {
+  const configuredDistro = process.env.HERMES_WSL_DISTRO?.trim()
+  const args = [
+    ...(configuredDistro ? ['-d', configuredDistro] : []),
+    '-e',
+    'bash',
+    '-lc',
+    'hermes acp',
+  ]
+
+  return {
+    command: 'wsl.exe',
+    args,
+    spawnCwd: process.cwd(),
+    requestedLaunchMode,
+    launchMode: 'wsl',
+    launchSource: 'wsl',
+  }
+}
+
+export function normalizeHermesAcpCwd(cwd: string): string {
+  if (resolveEffectiveHermesLaunchMode() !== 'wsl') return cwd
+  return toWslPath(cwd)
+}
+
+export function resolveAcpLauncher(): BridgeLauncher {
+  const requestedLaunchMode = resolveRequestedHermesLaunchMode()
+
+  if (requestedLaunchMode === 'wsl') {
+    if (process.platform !== 'win32') {
+      console.warn('[HermesACP] HERMES_LAUNCH_MODE=wsl is only supported on Windows; falling back to native launcher')
+      return resolveNativeAcpLauncher(requestedLaunchMode)
+    }
+    return resolveWslAcpLauncher(requestedLaunchMode)
+  }
+
+  return resolveNativeAcpLauncher(requestedLaunchMode)
+}
+
+export function getHermesLauncherDiagnostics(cwd?: string): {
+  requestedLaunchMode: HermesLaunchMode
+  effectiveLaunchMode: HermesResolvedLaunchMode
+  launchSource: HermesLauncherSource
+  command: string
+  args: string[]
+  spawnCwd: string
+  normalizedCwd?: string
+} {
+  const launcher = resolveAcpLauncher()
+  return {
+    requestedLaunchMode: launcher.requestedLaunchMode,
+    effectiveLaunchMode: launcher.launchMode,
+    launchSource: launcher.launchSource,
+    command: launcher.command,
+    args: [...launcher.args],
+    spawnCwd: launcher.spawnCwd,
+    normalizedCwd: typeof cwd === 'string' ? normalizeHermesAcpCwd(cwd) : undefined,
   }
 }
 
@@ -726,8 +852,9 @@ export class HermesAcpClient {
     await this.request('authenticate', { methodId: firstMethod.id })
   }
 
-  async newSession(cwd: string): Promise<string> {
-    const result = await this.request('session/new', { cwd, mcpServers: [] })
+  async newSession(cwd: string, mcpServers: HermesAcpMcpServer[] = []): Promise<string> {
+    const normalizedCwd = normalizeHermesAcpCwd(cwd)
+    const result = await this.request('session/new', { cwd: normalizedCwd, mcpServers })
     const sessionId = normalizeSessionId(result?.sessionId ?? result?.session_id)
     if (!sessionId) {
       throw new Error('Hermes ACP did not return a sessionId for session/new')
@@ -735,15 +862,17 @@ export class HermesAcpClient {
     return sessionId
   }
 
-  async loadSession(sessionId: string, cwd: string): Promise<void> {
-    const result = await this.request('session/load', { cwd, sessionId, mcpServers: [] })
+  async loadSession(sessionId: string, cwd: string, mcpServers: HermesAcpMcpServer[] = []): Promise<void> {
+    const normalizedCwd = normalizeHermesAcpCwd(cwd)
+    const result = await this.request('session/load', { cwd: normalizedCwd, sessionId, mcpServers })
     if (result == null) {
       throw new Error(`Hermes ACP could not load session ${sessionId}`)
     }
   }
 
-  async forkSession(sessionId: string, cwd: string): Promise<string> {
-    const result = await this.request('session/fork', { cwd, sessionId, mcpServers: [] })
+  async forkSession(sessionId: string, cwd: string, mcpServers: HermesAcpMcpServer[] = []): Promise<string> {
+    const normalizedCwd = normalizeHermesAcpCwd(cwd)
+    const result = await this.request('session/fork', { cwd: normalizedCwd, sessionId, mcpServers })
     const forkedSessionId = normalizeSessionId(result?.sessionId ?? result?.session_id)
     if (!forkedSessionId) {
       throw new Error(`Hermes ACP did not return a sessionId for fork of ${sessionId}`)

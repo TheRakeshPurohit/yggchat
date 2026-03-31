@@ -92,13 +92,18 @@ function matchesHookMatcher(event: HookEventName, matcher: string | string[] | u
   return candidates.some(pattern => matchesSinglePattern(pattern, toolName))
 }
 
-function normalizeHandler(rawHandler: unknown, fallbackMatcher: string | string[] | undefined): NormalizedHookHandler[] {
+function normalizeHandler(
+  rawHandler: unknown,
+  fallbackMatcher: string | string[] | undefined,
+  fallbackEnabled = true
+): NormalizedHookHandler[] {
   if (!isRecord(rawHandler)) return []
 
+  const isEnabled = fallbackEnabled && rawHandler.enabled !== false
   const nestedHandlers = Array.isArray(rawHandler.hooks) ? rawHandler.hooks : null
   const nestedMatcher = rawHandler.matcher as string | string[] | undefined
   if (nestedHandlers) {
-    return nestedHandlers.flatMap(handler => normalizeHandler(handler, nestedMatcher ?? fallbackMatcher))
+    return nestedHandlers.flatMap(handler => normalizeHandler(handler, nestedMatcher ?? fallbackMatcher, isEnabled))
   }
 
   const command = toTrimmedString(rawHandler.command)
@@ -114,6 +119,7 @@ function normalizeHandler(rawHandler: unknown, fallbackMatcher: string | string[
       command,
       timeoutMs,
       matcher,
+      enabled: isEnabled,
     },
   ]
 }
@@ -126,7 +132,7 @@ function normalizeEventEntries(rawValue: unknown, source: string): NormalizedHoo
     .map(rawEntry => {
       if (!isRecord(rawEntry)) return null
       const entryMatcher = rawEntry.matcher as string | string[] | undefined
-      const handlers = normalizeHandler(rawEntry, entryMatcher).map(handler => ({
+      const handlers = normalizeHandler(rawEntry, entryMatcher, rawEntry.enabled !== false).map(handler => ({
         ...handler,
         workingDirectory,
       }))
@@ -426,7 +432,7 @@ export async function runHookRequest(req: HookRunRequest): Promise<HookRunResult
   const entries = await loadHookEntriesForEvent(req.event, req.cwd)
   const matchingHandlers = entries.flatMap(entry => {
     if (!matchesHookMatcher(req.event, entry.matcher, req)) return []
-    return entry.handlers.filter(handler => matchesHookMatcher(req.event, handler.matcher, req))
+    return entry.handlers.filter(handler => handler.enabled !== false && matchesHookMatcher(req.event, handler.matcher, req))
   })
 
   let result: HookRunResult = {
