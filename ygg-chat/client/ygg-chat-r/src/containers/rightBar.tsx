@@ -213,6 +213,9 @@ const RightBar: React.FC<RightBarProps> = ({
   const isCollapsed = useSelector((state: RootState) => state.ui.rightBarCollapsed)
   const rightBarWidth = useSelector((state: RootState) => state.ui.rightBarWidth)
   const extensionConnected = useSelector((state: RootState) => state.ideContext.extensionConnected)
+  const hasConnectedIdeExtensions = useSelector((state: RootState) =>
+    state.ideContext.extensions.some(extension => extension.isConnected)
+  )
   const isDarkMode = useHtmlDarkMode()
   const [openFileEditors, setOpenFileEditors] = useState<FileEditorState[]>([])
   const [openGitDiffTabs, setOpenGitDiffTabs] = useState<GitDiffTabState[]>([])
@@ -1170,10 +1173,32 @@ const RightBar: React.FC<RightBarProps> = ({
 
   const handleMonacoSelectionChange = useCallback(
     (selection: SelectionInfo | null) => {
-      if (extensionConnected) return
+      console.log('[MonacoIdeSelection][RightBar] selection callback', {
+        extensionConnected,
+        hasConnectedIdeExtensions,
+        hasSelection: Boolean(selection?.selectedText?.trim()),
+        filePath: selection?.filePath ?? null,
+        relativePath: selection?.relativePath ?? null,
+        startLine: selection?.startLine ?? null,
+        endLine: selection?.endLine ?? null,
+        preview: selection?.selectedText?.slice(0, 120) ?? null,
+      })
+
+      if (extensionConnected || hasConnectedIdeExtensions) {
+        console.log('[MonacoIdeSelection][RightBar] blocked dispatch because IDE extension is considered connected', {
+          extensionConnected,
+          hasConnectedIdeExtensions,
+        })
+        return
+      }
+
+      console.log('[MonacoIdeSelection][RightBar] dispatch setCurrentSelection', {
+        hasSelection: Boolean(selection),
+        filePath: selection?.filePath ?? null,
+      })
       dispatch(setCurrentSelection(selection))
     },
-    [dispatch, extensionConnected]
+    [dispatch, extensionConnected, hasConnectedIdeExtensions]
   )
 
   const appendTerminalHistory = useCallback((existingHistory: string, nextChunk: string) => {
@@ -3186,7 +3211,11 @@ const RightBar: React.FC<RightBarProps> = ({
                             <Button
                               variant='outline2'
                               size='small'
-                              onClick={() => void openFileEditor(selectedGitStatusFile.path)}
+                              onClick={() =>
+                                void openFileEditor(selectedGitStatusFile.path, {
+                                  relativePath: selectedGitStatusFile.relativePath,
+                                })
+                              }
                             >
                               Open file
                             </Button>

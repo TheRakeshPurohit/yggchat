@@ -94,7 +94,7 @@ export const MonacoFileEditorPane: React.FC<MonacoFileEditorPaneProps> = ({
   onSelectionChange,
 }) => {
   const editorRef = useRef<MonacoEditor.editor.IStandaloneCodeEditor | null>(null)
-  const selectionListenerRef = useRef<MonacoEditor.IDisposable | null>(null)
+  const selectionListenersRef = useRef<MonacoEditor.IDisposable[]>([])
   const saveStateRef = useRef({ loading, isSaving, isDirty, onSave })
   const selectionStateRef = useRef({ filePath, relativePath, onSelectionChange })
   const language = useMemo(() => detectLanguage(filePath), [filePath])
@@ -107,9 +107,20 @@ export const MonacoFileEditorPane: React.FC<MonacoFileEditorPaneProps> = ({
       onSelectionChange: currentOnSelectionChange,
     } = selectionStateRef.current
 
-    if (!currentOnSelectionChange) return
+    if (!currentOnSelectionChange) {
+      console.log('[MonacoIdeSelection][Pane] skip emit: no onSelectionChange handler', {
+        filePath: currentFilePath,
+        relativePath: currentRelativePath,
+      })
+      return
+    }
 
     if (!currentEditor || !currentFilePath) {
+      console.log('[MonacoIdeSelection][Pane] emit null: missing editor or filePath', {
+        hasEditor: Boolean(currentEditor),
+        filePath: currentFilePath,
+        relativePath: currentRelativePath,
+      })
       currentOnSelectionChange(null)
       return
     }
@@ -117,18 +128,41 @@ export const MonacoFileEditorPane: React.FC<MonacoFileEditorPaneProps> = ({
     const model = currentEditor.getModel()
     const selection = currentEditor.getSelection()
 
-    if (!model || !selection || selection.isEmpty()) {
+    if (!model || !selection) {
+      console.log('[MonacoIdeSelection][Pane] emit null: missing model or selection', {
+        hasModel: Boolean(model),
+        hasSelection: Boolean(selection),
+        filePath: currentFilePath,
+      })
+      currentOnSelectionChange(null)
+      return
+    }
+
+    if (selection.isEmpty()) {
+      console.log('[MonacoIdeSelection][Pane] emit null: empty selection', {
+        filePath: currentFilePath,
+        startLine: selection.startLineNumber,
+        endLine: selection.endLineNumber,
+        startColumn: selection.startColumn,
+        endColumn: selection.endColumn,
+      })
       currentOnSelectionChange(null)
       return
     }
 
     const selectedText = model.getValueInRange(selection)
     if (!selectedText.trim()) {
+      console.log('[MonacoIdeSelection][Pane] emit null: whitespace-only selection', {
+        filePath: currentFilePath,
+        length: selectedText.length,
+        startLine: selection.startLineNumber,
+        endLine: selection.endLineNumber,
+      })
       currentOnSelectionChange(null)
       return
     }
 
-    currentOnSelectionChange({
+    const payload: SelectionInfo = {
       filePath: currentFilePath,
       relativePath: currentRelativePath?.trim() || currentFilePath.split(/[\\/]/).pop() || currentFilePath,
       selectedText,
@@ -137,7 +171,20 @@ export const MonacoFileEditorPane: React.FC<MonacoFileEditorPaneProps> = ({
       startChar: selection.startColumn,
       endChar: selection.endColumn,
       timestamp: new Date().toISOString(),
+    }
+
+    console.log('[MonacoIdeSelection][Pane] emit selection', {
+      filePath: payload.filePath,
+      relativePath: payload.relativePath,
+      startLine: payload.startLine,
+      endLine: payload.endLine,
+      startChar: payload.startChar,
+      endChar: payload.endChar,
+      length: payload.selectedText.length,
+      preview: payload.selectedText.slice(0, 120),
     })
+
+    currentOnSelectionChange(payload)
   }, [])
 
   useEffect(() => {
@@ -161,8 +208,8 @@ export const MonacoFileEditorPane: React.FC<MonacoFileEditorPaneProps> = ({
 
   useEffect(() => {
     return () => {
-      selectionListenerRef.current?.dispose()
-      selectionListenerRef.current = null
+      selectionListenersRef.current.forEach(listener => listener.dispose())
+      selectionListenersRef.current = []
       selectionStateRef.current.onSelectionChange?.(null)
     }
   }, [])
@@ -264,10 +311,40 @@ export const MonacoFileEditorPane: React.FC<MonacoFileEditorPaneProps> = ({
           height='100%'
           onMount={(editor, monaco) => {
             editorRef.current = editor
-            selectionListenerRef.current?.dispose()
-            selectionListenerRef.current = editor.onDidChangeCursorSelection(() => {
-              emitCurrentSelection(editor)
+            console.log('[MonacoIdeSelection][Pane] mounted', {
+              filePath,
+              relativePath,
+              language,
             })
+            selectionListenersRef.current.forEach(listener => listener.dispose())
+            selectionListenersRef.current = [
+              editor.onDidChangeCursorSelection(event => {
+                console.log('[MonacoIdeSelection][Pane] onDidChangeCursorSelection', {
+                  filePath,
+                  selectionEmpty: event.selection.isEmpty(),
+                  startLine: event.selection.startLineNumber,
+                  endLine: event.selection.endLineNumber,
+                  startColumn: event.selection.startColumn,
+                  endColumn: event.selection.endColumn,
+                })
+                emitCurrentSelection(editor)
+              }),
+              editor.onMouseUp(() => {
+                console.log('[MonacoIdeSelection][Pane] onMouseUp', { filePath })
+                window.requestAnimationFrame(() => {
+                  emitCurrentSelection(editor)
+                })
+              }),
+              editor.onKeyUp(event => {
+                console.log('[MonacoIdeSelection][Pane] onKeyUp', {
+                  filePath,
+                  keyCode: event.keyCode,
+                })
+                window.requestAnimationFrame(() => {
+                  emitCurrentSelection(editor)
+                })
+              }),
+            ]
             editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
               const currentSaveState = saveStateRef.current
               if (!currentSaveState.loading && !currentSaveState.isSaving && currentSaveState.isDirty) {

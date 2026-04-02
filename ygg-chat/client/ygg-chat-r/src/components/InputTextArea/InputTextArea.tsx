@@ -244,6 +244,19 @@ export const InputTextArea: React.FC<TextAreaProps> = ({
   const { theme: customTheme, enabled: customThemeEnabled } = useCustomChatTheme()
   const isDarkMode = useHtmlDarkMode()
 
+  useEffect(() => {
+    console.log('[MonacoIdeSelection][InputTextArea] currentSelection changed', {
+      extensionConnected,
+      hasIdeContextSelection,
+      filePath: currentSelection?.filePath ?? null,
+      relativePath: currentSelection?.relativePath ?? null,
+      startLine: currentSelection?.startLine ?? null,
+      endLine: currentSelection?.endLine ?? null,
+      length: currentSelection?.selectedText?.length ?? 0,
+      preview: currentSelection?.selectedText?.slice(0, 120) ?? null,
+    })
+  }, [currentSelection, extensionConnected, hasIdeContextSelection])
+
   const handleAddContextClick = () => {
     if (!onAddCurrentIdeContext || !hasIdeContextSelection) return
     const wasAdded = onAddCurrentIdeContext()

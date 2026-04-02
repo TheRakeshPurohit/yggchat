@@ -212,7 +212,17 @@ export function useIdeContext(): UseIdeContextReturn {
             case 'extensions_overview': {
               const overview = message.data?.extensions || []
               if (Array.isArray(overview)) {
+                console.log('[MonacoIdeSelection][useIdeContext] extensions_overview', {
+                  total: overview.length,
+                  connectedIds: overview
+                    .filter((extension: { id?: string; isConnected?: boolean } | null | undefined) => extension?.isConnected)
+                    .map((extension: { id?: string }) => extension.id || '(unknown)'),
+                })
                 globalDispatch(setExtensions(overview))
+                if (!overview.some((extension: { isConnected?: boolean } | null | undefined) => extension?.isConnected)) {
+                  console.log('[MonacoIdeSelection][useIdeContext] no connected extensions; forcing extensionConnected=false')
+                  globalDispatch(setExtensionStatus(false))
+                }
               }
               break
             }
@@ -233,14 +243,34 @@ export function useIdeContext(): UseIdeContextReturn {
                 contextRequestTimeoutsGlobal.clear()
               }
 
-              // Check if this is a real extension response or empty server response
+              // Check if this is a real extension response or the local server's empty fallback response.
+              // The empty fallback shape still includes a truthy workspace object:
+              // { workspace: { name: null, rootPath: null }, openFiles: [], allFiles: [], ... }
+              // so we must inspect the workspace contents instead of the object itself.
               const projectState = message.data
+              const workspaceInfo = projectState?.workspace
+              const hasWorkspaceIdentity =
+                typeof workspaceInfo === 'string'
+                  ? workspaceInfo.trim().length > 0
+                  : Boolean(workspaceInfo?.name || workspaceInfo?.rootPath)
               const isRealExtensionResponse = Boolean(
                 projectState &&
-                (projectState.workspace ||
+                (hasWorkspaceIdentity ||
                   (projectState.allFiles && projectState.allFiles.length > 0) ||
-                  (projectState.openFiles && projectState.openFiles.length > 0))
+                  (projectState.openFiles && projectState.openFiles.length > 0) ||
+                  projectState.activeFile ||
+                  projectState.currentSelection)
               )
+
+              console.log('[MonacoIdeSelection][useIdeContext] context_response/project_state_update evaluated extension status', {
+                messageType: message.type,
+                hasWorkspaceIdentity,
+                allFiles: Array.isArray(projectState?.allFiles) ? projectState.allFiles.length : null,
+                openFiles: Array.isArray(projectState?.openFiles) ? projectState.openFiles.length : null,
+                hasActiveFile: Boolean(projectState?.activeFile),
+                hasCurrentSelection: Boolean(projectState?.currentSelection?.selectedText?.trim?.()),
+                isRealExtensionResponse,
+              })
 
               globalDispatch(setExtensionStatus(isRealExtensionResponse))
 
