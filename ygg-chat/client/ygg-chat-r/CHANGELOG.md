@@ -12,6 +12,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+## [0.1.85] - 2026-04-04
+
+### Added
+
+- Added native GitNexus custom-tool integration and GitNexus-first agent workflow guidance.
+
+### Changed
+
+- Removed the default gfish video background and changed the app default to a transparent solid background.
+- Updated Electron runtime and taskbar icon usage to the graviton-dark assets.
+
+### Fixed
+
+- Fixed local-mode project and conversation creation by ensuring the local user exists before foreign-key-constrained inserts.
+
 ## [0.1.84] - 2026-04-01
 
 ### Added

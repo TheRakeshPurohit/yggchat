@@ -3,7 +3,6 @@ import {
   BackgroundColorSettings,
   BackgroundMode,
   CustomVideoEntry,
-  DEFAULT_LIGHT_VIDEO,
   getActiveTextColorMode,
   loadActiveCustomVideo,
   loadActiveCustomVideoId,
@@ -125,25 +124,15 @@ const VideoBackground: React.FC = () => {
     }
   }, [activeVideoMeta, backgroundMode, isDarkTheme])
 
-  const sourceForMode = (
-    customUrl: string | null,
-    custom: CustomVideoEntry | null,
-    fallback: { path: string; type: 'video/webm' | 'video/mp4' }
-  ) => {
-    if (custom && customUrl) {
-      return { src: customUrl, type: custom.mimeType }
-    }
-    return { src: fallback.path, type: fallback.type }
-  }
-
-  const lightSource = sourceForMode(activeVideoUrl, activeVideoMeta, DEFAULT_LIGHT_VIDEO)
   const colorBackgroundColor = customThemeEnabled
     ? getThemeModeColor(customTheme.colors.appBackgroundColor, isDarkTheme)
     : isDarkTheme
       ? backgroundColors.dark
       : backgroundColors.light
 
-  if (backgroundMode === 'color') {
+  const hasActiveCustomVideo = backgroundMode === 'video' && Boolean(activeVideoMeta && activeVideoUrl)
+
+  if (!hasActiveCustomVideo) {
     return (
       <div
         key={colorBackgroundColor}
@@ -156,14 +145,14 @@ const VideoBackground: React.FC = () => {
 
   return (
     <video
-      key={lightSource.src}
+      key={activeVideoUrl}
       autoPlay
       loop
       muted
       className='fixed inset-0 w-full h-full blur-[0px] dark:blur-[1px] 2xl:dark:blur-[1px] 2xl:dark:blur-[1px] object-cover pointer-events-none -z-10'
       aria-hidden='true'
     >
-      <source src={lightSource.src} type={lightSource.type} />
+      <source src={activeVideoUrl ?? undefined} type={activeVideoMeta?.mimeType} />
     </video>
   )
 }

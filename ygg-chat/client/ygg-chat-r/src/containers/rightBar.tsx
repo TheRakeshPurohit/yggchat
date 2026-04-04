@@ -26,6 +26,10 @@ import {
   saveTerminalDockState,
   type TerminalDockPreferences,
 } from '../helpers/terminalDockStorage'
+import {
+  OPEN_WORKSPACE_MUTATION_DIFFS_EVENT,
+  type OpenWorkspaceMutationDiffsDetail,
+} from '../helpers/workspaceMutationDiffBridge'
 import { useAuth } from '../hooks/useAuth'
 import { clearGlobalAgentOptimisticMessage, setGlobalAgentOptimisticMessage } from '../hooks/useGlobalAgentCache'
 import {
@@ -94,6 +98,12 @@ type GitDiffTabState = {
   conflicted: boolean
 }
 
+type WorkspaceMutationDiffRequest = {
+  filePaths: string[]
+  basePath: string | null
+  focusPath: string | null
+}
+
 type TerminalDockState = {
   id: string
   sessionId: string | null
@@ -142,6 +152,172 @@ const getGitDiffDockTabId = (
   stagedView: boolean
 ): string =>
   `git-diff:${file.untracked ? 'untracked' : file.conflicted ? 'conflicted' : stagedView ? 'staged' : 'unstaged'}:${file.relativePath}`
+
+const normalizePathForCompare = (value: string | null | undefined): string =>
+  String(value || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+/g, '/')
+    .replace(/\/+$/, '')
+    .toLowerCase()
+
+const normalizeRelativeGitPath = (value: string | null | undefined): string =>
+  String(value || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/')
+    .replace(/\/+$/, '')
+
+const isLikelyAbsolutePath = (value: string | null | undefined): boolean => /^(?:[a-zA-Z]:[\\/]|\\\\|\/)/.test(String(value || '').trim())
+
+const getDefaultGitDiffStagedView = (
+  file: Pick<GitStatusFile, 'staged' | 'unstaged' | 'untracked' | 'conflicted'>
+): boolean => !file.untracked && !file.conflicted && file.staged && !file.unstaged
+
+const buildGitDiffDockTabState = (params: {
+  path: string
+  relativePath: string
+  displayPath: string
+  staged: boolean
+  untracked: boolean
+  conflicted: boolean
+}): GitDiffTabState => ({
+  id: getGitDiffDockTabId(params, params.staged),
+  path: params.path,
+  relativePath: params.relativePath,
+  displayPath: params.displayPath,
+  staged: params.staged,
+  untracked: params.untracked,
+  conflicted: params.conflicted,
+})
+
+const inferGitRepoRootFromStatusFiles = (statusFiles: GitStatusFile[]): string | null => {
+  for (const file of statusFiles) {
+    const normalizedAbsolutePath = String(file.path || '')
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/\/+$/, '')
+    const normalizedRelativePath = normalizeRelativeGitPath(file.relativePath)
+
+    if (!normalizedAbsolutePath || !normalizedRelativePath) continue
+
+    const absoluteLower = normalizedAbsolutePath.toLowerCase()
+    const relativeLower = normalizedRelativePath.toLowerCase()
+    const suffix = `/${relativeLower}`
+
+    if (!absoluteLower.endsWith(suffix)) continue
+
+    return normalizedAbsolutePath.slice(0, normalizedAbsolutePath.length - normalizedRelativePath.length - 1)
+  }
+
+  return null
+}
+
+const resolveWorkspaceMutationDiffTabs = (
+  request: WorkspaceMutationDiffRequest,
+  statusFiles: GitStatusFile[]
+): GitDiffTabState[] => {
+  const absoluteStatusMap = new Map<string, GitStatusFile>()
+  const relativeStatusMap = new Map<string, GitStatusFile>()
+
+  for (const file of statusFiles) {
+    const absoluteKey = normalizePathForCompare(file.path)
+    if (absoluteKey && !absoluteStatusMap.has(absoluteKey)) {
+      absoluteStatusMap.set(absoluteKey, file)
+    }
+
+    const relativeKeys = [normalizeRelativeGitPath(file.relativePath), normalizeRelativeGitPath(file.displayPath)]
+    for (const key of relativeKeys) {
+      const normalizedKey = key.toLowerCase()
+      if (normalizedKey && !relativeStatusMap.has(normalizedKey)) {
+        relativeStatusMap.set(normalizedKey, file)
+      }
+    }
+  }
+
+  const normalizedBasePath = String(request.basePath || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+  const normalizedBasePathLower = normalizedBasePath.toLowerCase()
+  const inferredRepoRoot = inferGitRepoRootFromStatusFiles(statusFiles)
+  const inferredRepoRootLower = inferredRepoRoot?.toLowerCase() || ''
+  const tabs: GitDiffTabState[] = []
+  const seenTabIds = new Set<string>()
+
+  for (const rawFilePath of request.filePaths) {
+    const trimmedFilePath = String(rawFilePath || '').trim()
+    if (!trimmedFilePath) continue
+
+    const matchedStatusFile =
+      absoluteStatusMap.get(normalizePathForCompare(trimmedFilePath)) ||
+      relativeStatusMap.get(normalizeRelativeGitPath(trimmedFilePath).toLowerCase())
+
+    if (matchedStatusFile) {
+      const nextTab = buildGitDiffDockTabState({
+        path: matchedStatusFile.path,
+        relativePath: matchedStatusFile.relativePath,
+        displayPath: matchedStatusFile.displayPath,
+        staged: getDefaultGitDiffStagedView(matchedStatusFile),
+        untracked: matchedStatusFile.untracked,
+        conflicted: matchedStatusFile.conflicted,
+      })
+
+      if (!seenTabIds.has(nextTab.id)) {
+        seenTabIds.add(nextTab.id)
+        tabs.push(nextTab)
+      }
+      continue
+    }
+
+    const normalizedOriginalPath = trimmedFilePath.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/+$/, '')
+    const normalizedOriginalLower = normalizedOriginalPath.toLowerCase()
+
+    let relativePath = ''
+    if (!isLikelyAbsolutePath(trimmedFilePath)) {
+      relativePath = normalizeRelativeGitPath(trimmedFilePath)
+    } else if (
+      inferredRepoRoot &&
+      normalizedOriginalLower.startsWith(`${inferredRepoRootLower}/`) &&
+      normalizedOriginalPath.length > inferredRepoRoot.length + 1
+    ) {
+      relativePath = normalizedOriginalPath.slice(inferredRepoRoot.length + 1)
+    } else if (
+      normalizedBasePath &&
+      normalizedOriginalLower.startsWith(`${normalizedBasePathLower}/`) &&
+      normalizedOriginalPath.length > normalizedBasePath.length + 1
+    ) {
+      relativePath = normalizedOriginalPath.slice(normalizedBasePath.length + 1)
+    }
+
+    const normalizedRelativePath = normalizeRelativeGitPath(relativePath)
+    if (!normalizedRelativePath) continue
+
+    const absolutePathForTab = isLikelyAbsolutePath(trimmedFilePath)
+      ? trimmedFilePath
+      : normalizedBasePath
+        ? `${normalizedBasePath}/${normalizedRelativePath}`
+        : ''
+
+    const nextTab = buildGitDiffDockTabState({
+      path: absolutePathForTab,
+      relativePath: normalizedRelativePath,
+      displayPath: normalizedRelativePath,
+      staged: false,
+      untracked: false,
+      conflicted: false,
+    })
+
+    if (!seenTabIds.has(nextTab.id)) {
+      seenTabIds.add(nextTab.id)
+      tabs.push(nextTab)
+    }
+  }
+
+  return tabs
+}
 
 const ALL_WEEKDAYS: number[] = [0, 1, 2, 3, 4, 5, 6]
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -498,6 +674,8 @@ const RightBar: React.FC<RightBarProps> = ({
     staged: boolean
     untracked: boolean
   } | null>(null)
+  const [pendingWorkspaceMutationDiffRequest, setPendingWorkspaceMutationDiffRequest] =
+    useState<WorkspaceMutationDiffRequest | null>(null)
   const [gitActionFeedback, setGitActionFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(
     null
   )
@@ -1429,23 +1607,116 @@ const RightBar: React.FC<RightBarProps> = ({
 
   const openGitDiffTab = useCallback(
     (file: GitStatusFile, stagedView: boolean) => {
-      const tabId = getGitDiffDockTabId(file, stagedView)
-      const nextTab: GitDiffTabState = {
-        id: tabId,
+      const nextTab = buildGitDiffDockTabState({
         path: file.path,
         relativePath: file.relativePath,
         displayPath: file.displayPath,
         staged: !file.untracked && stagedView,
         untracked: file.untracked,
         conflicted: file.conflicted,
-      }
+      })
 
       dispatch(uiActions.rightBarExpanded())
-      setOpenGitDiffTabs(prev => (prev.some(tab => tab.id === tabId) ? prev : [...prev, nextTab]))
-      setActiveDockTabId(tabId)
+      setOpenGitDiffTabs(prev => (prev.some(tab => tab.id === nextTab.id) ? prev : [...prev, nextTab]))
+      setActiveDockTabId(nextTab.id)
     },
     [dispatch]
   )
+
+  useEffect(() => {
+    const handleOpenWorkspaceMutationDiffs = (event: CustomEvent<OpenWorkspaceMutationDiffsDetail>) => {
+      if (isWeb) return
+
+      const filePaths = Array.isArray(event.detail?.filePaths)
+        ? event.detail.filePaths.map(path => String(path || '').trim()).filter(Boolean)
+        : []
+      if (filePaths.length === 0) return
+
+      const nextBasePath =
+        typeof event.detail?.basePath === 'string' && event.detail.basePath.trim().length > 0
+          ? event.detail.basePath.trim()
+          : null
+
+      if (nextBasePath && nextBasePath !== currentPath) {
+        setCurrentPath(nextBasePath)
+        setPathHistory([])
+        setFileSearchQuery('')
+        setDebouncedFileSearchQuery('')
+      }
+
+      setGitActionFeedback(null)
+      setActiveTab('git')
+      dispatch(uiActions.rightBarExpanded())
+      setPendingWorkspaceMutationDiffRequest({
+        filePaths,
+        basePath: nextBasePath,
+        focusPath:
+          typeof event.detail?.focusPath === 'string' && event.detail.focusPath.trim().length > 0
+            ? event.detail.focusPath.trim()
+            : filePaths[0] || null,
+      })
+    }
+
+    window.addEventListener(OPEN_WORKSPACE_MUTATION_DIFFS_EVENT, handleOpenWorkspaceMutationDiffs as EventListener)
+    return () => {
+      window.removeEventListener(OPEN_WORKSPACE_MUTATION_DIFFS_EVENT, handleOpenWorkspaceMutationDiffs as EventListener)
+    }
+  }, [currentPath, dispatch, isWeb])
+
+  useEffect(() => {
+    if (!pendingWorkspaceMutationDiffRequest) return
+    if (isWeb || isCollapsed || activeTab !== 'git') return
+    if (isLoadingGitOverview || isFetchingGitOverview) return
+
+    const tabsToOpen = resolveWorkspaceMutationDiffTabs(
+      pendingWorkspaceMutationDiffRequest,
+      gitOverviewData?.status.all || []
+    )
+
+    if (tabsToOpen.length === 0) {
+      setGitActionFeedback({
+        type: 'error',
+        message: 'No Git diffs were available for the branch-modified files.',
+      })
+      setPendingWorkspaceMutationDiffRequest(null)
+      return
+    }
+
+    const focusKey = pendingWorkspaceMutationDiffRequest.focusPath
+      ? normalizePathForCompare(pendingWorkspaceMutationDiffRequest.focusPath)
+      : ''
+    const focusRelativeKey = pendingWorkspaceMutationDiffRequest.focusPath
+      ? normalizeRelativeGitPath(pendingWorkspaceMutationDiffRequest.focusPath).toLowerCase()
+      : ''
+    const focusedTab =
+      tabsToOpen.find(
+        tab =>
+          normalizePathForCompare(tab.path) === focusKey ||
+          normalizeRelativeGitPath(tab.relativePath).toLowerCase() === focusRelativeKey ||
+          normalizeRelativeGitPath(tab.displayPath).toLowerCase() === focusRelativeKey
+      ) || tabsToOpen[0]
+
+    setOpenGitDiffTabs(prev => {
+      const nextTabs = [...prev]
+      const existingTabIds = new Set(prev.map(tab => tab.id))
+      for (const tab of tabsToOpen) {
+        if (existingTabIds.has(tab.id)) continue
+        existingTabIds.add(tab.id)
+        nextTabs.push(tab)
+      }
+      return nextTabs
+    })
+    setActiveDockTabId(focusedTab.id)
+    setPendingWorkspaceMutationDiffRequest(null)
+  }, [
+    activeTab,
+    gitOverviewData?.status.all,
+    isCollapsed,
+    isFetchingGitOverview,
+    isLoadingGitOverview,
+    isWeb,
+    pendingWorkspaceMutationDiffRequest,
+  ])
 
   const getTerminalLaunchCwd = useCallback(() => (currentPath || ccCwd || '').trim(), [ccCwd, currentPath])
 

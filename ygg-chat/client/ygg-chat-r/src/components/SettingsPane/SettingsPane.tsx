@@ -644,7 +644,10 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
       try {
         const parsed = JSON.parse(headersText)
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          setMcpActionStatus({ type: 'error', message: 'Headers must be a JSON object, e.g. {"Authorization":"Bearer ..."}' })
+          setMcpActionStatus({
+            type: 'error',
+            message: 'Headers must be a JSON object, e.g. {"Authorization":"Bearer ..."}',
+          })
           return
         }
 
@@ -1317,69 +1320,151 @@ ${block}`
 
             {/* Custom Theme Section */}
             <div className='space-y-2'>
-              <ThemeManager />
-
-              <div className='rounded-lg border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800/30 p-3 space-y-2'>
+              <div className='overflow-hidden rounded-xl border border-neutral-200/90 dark:border-neutral-700/90 bg-white/70 dark:bg-neutral-900/20 shadow-sm'>
                 <button
                   type='button'
                   onClick={() => setSavedThemesExpanded(prev => !prev)}
-                  className='w-full flex items-center justify-between text-left'
+                  className='group flex w-full items-start justify-between gap-3 px-3 py-3 text-left transition-colors hover:bg-neutral-50/90 dark:hover:bg-neutral-800/40'
                 >
-                  <span className='text-sm font-medium text-stone-700 dark:text-stone-200'>Saved custom themes</span>
+                  <div className='flex min-w-0 items-start gap-3'>
+                    <div className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300'>
+                      <i className='bx bx-palette text-lg' />
+                    </div>
+                    <div className='min-w-0'>
+                      <p className='text-sm font-medium text-stone-700 dark:text-stone-200'>Saved custom themes</p>
+                      <p className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-400'>
+                        Browse and apply theme files from{' '}
+                        <code className='rounded bg-neutral-200/70 px-1 py-0.5 font-mono text-[11px] text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300'>
+                          .ygg/custom-themes
+                        </code>
+                        .
+                      </p>
+                    </div>
+                  </div>
                   <i
-                    className={`bx bx-chevron-down text-lg text-neutral-500 dark:text-neutral-400 transition-transform ${savedThemesExpanded ? 'rotate-180' : ''}`}
+                    className={`bx bx-chevron-down mt-2 shrink-0 text-2xl text-neutral-500 dark:text-neutral-400 transition-transform duration-200 ${savedThemesExpanded ? 'rotate-180' : ''}`}
                   />
                 </button>
 
                 {savedThemesExpanded && (
-                  <div className='space-y-2'>
-                    <div className='flex justify-end'>
+                  <div className='space-y-3 border-t border-neutral-200/80 px-4 py-3 dark:border-neutral-700/80'>
+                    <div className='flex flex-wrap items-center justify-between gap-3 rounded-xl border border-neutral-200 bg-neutral-50/80 px-3 py-3 dark:border-neutral-700 dark:bg-neutral-900/30'>
+                      <div className='min-w-0'>
+                        <div className='flex flex-wrap items-center gap-2'>
+                          <p className='text-sm font-medium text-stone-700 dark:text-stone-200'>Enable custom theme</p>
+                          <span className='rounded-full bg-neutral-200/80 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400'>
+                            {customTheme.name || 'Current theme'}
+                          </span>
+                        </div>
+                        <p className='mt-1 text-xs text-neutral-500 dark:text-neutral-400'>
+                          Apply your current edited or selected theme across chat and Heimdall.
+                        </p>
+                      </div>
+                      <button
+                        type='button'
+                        onClick={() => setCustomChatThemeEnabled(!customThemeEnabled)}
+                        className='p-1.5 rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors'
+                        title={customThemeEnabled ? 'Disable custom theme' : 'Enable custom theme'}
+                        aria-pressed={customThemeEnabled}
+                      >
+                        <i
+                          className={`bx ${customThemeEnabled ? 'bx-toggle-right text-green-500' : 'bx-toggle-left text-neutral-400'} text-2xl`}
+                        />
+                      </button>
+                    </div>
+
+                    <div className='flex flex-wrap items-center justify-between gap-3'>
+                      <p className='text-xs text-neutral-500 dark:text-neutral-400'>
+                        {savedThemesLoading && savedThemes.length === 0
+                          ? 'Loading saved themes…'
+                          : `${savedThemes.length} saved theme${savedThemes.length === 1 ? '' : 's'} available`}
+                      </p>
                       <button
                         type='button'
                         onClick={fetchSavedThemes}
                         disabled={savedThemesLoading}
-                        className='px-2.5 py-1.5 rounded-md text-xs border border-neutral-300 dark:border-neutral-600 text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-700 disabled:opacity-50'
+                        className='inline-flex items-center gap-1.5 rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-xs font-medium text-neutral-700 shadow-sm transition-colors hover:bg-neutral-50 disabled:opacity-50 dark:border-neutral-600 dark:bg-neutral-800/80 dark:text-neutral-200 dark:hover:bg-neutral-700'
                       >
+                        <i
+                          className={`bx ${savedThemesLoading ? 'bx-loader-alt animate-spin' : 'bx-refresh'} text-sm`}
+                        />
                         {savedThemesLoading ? 'Refreshing…' : 'Refresh'}
                       </button>
                     </div>
 
                     {savedThemesError && (
-                      <p className='text-xs text-rose-600 dark:text-rose-400'>{savedThemesError}</p>
+                      <div className='rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300'>
+                        {savedThemesError}
+                      </div>
                     )}
 
-                    {!savedThemesLoading && savedThemes.length === 0 && !savedThemesError && (
-                      <p className='text-xs text-neutral-500 dark:text-neutral-400'>
-                        No saved theme JSON files found in .ygg/custom-themes.
-                      </p>
-                    )}
-
-                    <div className='max-h-52 overflow-y-auto space-y-2 pr-1'>
-                      {savedThemes.map(themeItem => (
-                        <div
-                          key={themeItem.id}
-                          className='flex items-center justify-between gap-2 rounded-md border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900/40 px-2.5 py-2'
-                        >
-                          <div className='min-w-0'>
-                            <p className='text-sm text-neutral-800 dark:text-neutral-100 truncate'>{themeItem.name}</p>
-                            <p className='text-[11px] text-neutral-500 dark:text-neutral-400 truncate'>
-                              {themeItem.fileName} · {new Date(themeItem.modifiedAt).toLocaleString()}
-                            </p>
-                          </div>
-                          <button
-                            type='button'
-                            onClick={() => handleApplySavedTheme(themeItem.id)}
-                            disabled={applyingThemeId === themeItem.id}
-                            className='shrink-0 px-2.5 py-1.5 rounded-md text-xs bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50'
-                          >
-                            {applyingThemeId === themeItem.id ? 'Applying…' : 'Apply'}
-                          </button>
+                    {savedThemesLoading && savedThemes.length === 0 && !savedThemesError ? (
+                      <div className='flex items-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-3 text-sm text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900/30 dark:text-neutral-400'>
+                        <i className='bx bx-loader-alt animate-spin text-base' />
+                        Loading saved themes...
+                      </div>
+                    ) : savedThemes.length === 0 && !savedThemesError ? (
+                      <div className='rounded-xl border border-dashed border-neutral-300 bg-neutral-50/80 px-4 py-6 text-center dark:border-neutral-700 dark:bg-neutral-900/30'>
+                        <div className='mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-neutral-200/80 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400'>
+                          <i className='bx bx-folder-open text-lg' />
                         </div>
-                      ))}
-                    </div>
+                        <p className='text-sm font-medium text-neutral-700 dark:text-neutral-200'>
+                          No saved themes yet
+                        </p>
+                        <p className='mt-1 text-xs text-neutral-500 dark:text-neutral-400'>
+                          Theme JSON files saved to .ygg/custom-themes will appear here.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className='max-h-60 overflow-y-auto rounded-xl border border-neutral-200 bg-neutral-50/70 pr-1 dark:border-neutral-700 dark:bg-neutral-950/30'>
+                        <div className='divide-y divide-neutral-200 dark:divide-neutral-800'>
+                          {savedThemes.map(themeItem => (
+                            <div
+                              key={themeItem.id}
+                              className='flex flex-col gap-3 px-3 py-3 transition-colors hover:bg-white/90 dark:hover:bg-neutral-900/50 sm:flex-row sm:items-center sm:justify-between'
+                            >
+                              <div className='min-w-0 flex-1'>
+                                <div className='flex items-start gap-3'>
+                                  <div className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-neutral-200 bg-white text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900/80 dark:text-neutral-300'>
+                                    <i className='bx bx-file-blank text-lg' />
+                                  </div>
+                                  <div className='min-w-0 flex-1'>
+                                    <div className='flex flex-wrap items-center gap-2'>
+                                      <p className='truncate text-sm font-medium text-neutral-900 dark:text-neutral-100'>
+                                        {themeItem.name}
+                                      </p>
+                                      <span className='rounded-full bg-neutral-200/80 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400'>
+                                        JSON
+                                      </span>
+                                    </div>
+                                    <div className='mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-neutral-500 dark:text-neutral-400'>
+                                      <span className='max-w-full truncate'>{themeItem.fileName}</span>
+                                      <span className='hidden text-neutral-300 dark:text-neutral-600 sm:inline'>•</span>
+                                      <span>{new Date(themeItem.modifiedAt).toLocaleString()}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                              <button
+                                type='button'
+                                onClick={() => handleApplySavedTheme(themeItem.id)}
+                                disabled={applyingThemeId === themeItem.id}
+                                className='inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-blue-500 px-3 py-2 text-xs font-medium text-white shadow-sm transition-colors hover:bg-blue-600 disabled:opacity-50'
+                              >
+                                <i
+                                  className={`bx ${applyingThemeId === themeItem.id ? 'bx-loader-alt animate-spin' : 'bx-check'} text-sm`}
+                                />
+                                {applyingThemeId === themeItem.id ? 'Applying…' : 'Apply'}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
+              <ThemeManager />
             </div>
 
             {/* Tools Section */}
@@ -1785,7 +1870,9 @@ ${block}`
                       {newServerTransport === 'stdio' ? (
                         <>
                           <div className='space-y-2'>
-                            <label className='text-xs font-medium text-neutral-600 dark:text-neutral-400'>Command</label>
+                            <label className='text-xs font-medium text-neutral-600 dark:text-neutral-400'>
+                              Command
+                            </label>
                             <input
                               type='text'
                               value={newServerCommand}
@@ -1810,7 +1897,9 @@ ${block}`
                       ) : (
                         <>
                           <div className='space-y-2'>
-                            <label className='text-xs font-medium text-neutral-600 dark:text-neutral-400'>Remote URL</label>
+                            <label className='text-xs font-medium text-neutral-600 dark:text-neutral-400'>
+                              Remote URL
+                            </label>
                             <input
                               type='text'
                               value={newServerUrl}
@@ -1932,7 +2021,9 @@ ${block}`
 
                   {/* Help text */}
                   <p className='text-xs text-neutral-500 dark:text-neutral-500'>
-                    Examples: Local stdio → Command "npx" + args "-y @modelcontextprotocol/server-filesystem /home/user/projects". Remote HTTP → URL "https://mcp.example.com/mcp" + optional headers JSON (Authorization, API keys, etc.).
+                    Examples: Local stdio → Command "npx" + args "-y @modelcontextprotocol/server-filesystem
+                    /home/user/projects". Remote HTTP → URL "https://mcp.example.com/mcp" + optional headers JSON
+                    (Authorization, API keys, etc.).
                   </p>
 
                   {/* Connected Servers List */}

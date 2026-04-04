@@ -269,7 +269,7 @@ function App() {
     <>
       {/* Custom title bar for Windows Electron */}
       <TitleBar />
-      {/* Persistent video background across all routes */}
+      {/* Persistent app background across all routes */}
       <VideoBackground />
       {/* SVG filters for liquid glass effect */}
       <LiquidGlassSVG />

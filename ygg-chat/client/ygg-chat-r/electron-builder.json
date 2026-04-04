@@ -1,7 +1,7 @@
 {
   "electronVersion": "38.8.4",
   "appId": "com.graviton.chat",
-  "icon": "public/img/taskbar-logo.png",
+  "icon": "public/img/graviton-dark.png",
   "productName": "Graviton",
   "directories": {
     "output": "release"

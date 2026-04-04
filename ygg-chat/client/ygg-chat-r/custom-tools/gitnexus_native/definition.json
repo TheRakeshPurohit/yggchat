@@ -1,0 +1,109 @@
+{
+  "name": "gitnexus_native",
+  "enabled": true,
+  "description": "Use the locally installed GitNexus CLI directly without MCP for indexing repositories and querying the GitNexus knowledge graph.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["version", "analyze", "list", "status", "query", "context", "impact", "cypher"],
+        "description": "GitNexus action to perform. version checks the local install. analyze/list/status use the CLI. query/context/impact/cypher call GitNexus direct CLI tools without MCP."
+      },
+      "repoPath": {
+        "type": "string",
+        "description": "Repository path to analyze or use as the working directory. Defaults to the tool execution cwd/rootPath when available."
+      },
+      "gitnexusBin": {
+        "type": "string",
+        "description": "Optional absolute path to the GitNexus executable or .cmd shim. If omitted, the tool will auto-detect common install locations."
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "description": "Optional command timeout in milliseconds. Defaults vary by action."
+      },
+      "force": {
+        "type": "boolean",
+        "description": "For analyze: force a full re-index."
+      },
+      "embeddings": {
+        "type": "boolean",
+        "description": "For analyze: enable embeddings."
+      },
+      "skills": {
+        "type": "boolean",
+        "description": "For analyze: generate repo-specific skills."
+      },
+      "skipAgentsMd": {
+        "type": "boolean",
+        "description": "For analyze: skip updating AGENTS.md / CLAUDE.md GitNexus sections."
+      },
+      "skipGit": {
+        "type": "boolean",
+        "description": "For analyze: allow indexing a folder without a .git directory."
+      },
+      "verbose": {
+        "type": "boolean",
+        "description": "For analyze: enable verbose logging."
+      },
+      "repo": {
+        "type": "string",
+        "description": "GitNexus repo registry name for multi-repo queries."
+      },
+      "query": {
+        "type": "string",
+        "description": "For query: search query text."
+      },
+      "taskContext": {
+        "type": "string",
+        "description": "For query: task context to improve ranking."
+      },
+      "goal": {
+        "type": "string",
+        "description": "For query: what you want to find."
+      },
+      "limit": {
+        "type": "integer",
+        "description": "For query: max results to return."
+      },
+      "content": {
+        "type": "boolean",
+        "description": "For query/context: include symbol source content."
+      },
+      "symbol": {
+        "type": "string",
+        "description": "For context: symbol name."
+      },
+      "uid": {
+        "type": "string",
+        "description": "For context: direct symbol UID."
+      },
+      "file": {
+        "type": "string",
+        "description": "For context: file path to disambiguate common names."
+      },
+      "target": {
+        "type": "string",
+        "description": "For impact: target symbol name."
+      },
+      "direction": {
+        "type": "string",
+        "enum": ["upstream", "downstream"],
+        "description": "For impact: blast radius direction. Defaults to upstream."
+      },
+      "depth": {
+        "type": "integer",
+        "description": "For impact: max relationship depth."
+      },
+      "includeTests": {
+        "type": "boolean",
+        "description": "For impact: include test files in results."
+      },
+      "cypher": {
+        "type": "string",
+        "description": "For cypher: raw Cypher query string."
+      }
+    },
+    "required": ["action"]
+  }
+}

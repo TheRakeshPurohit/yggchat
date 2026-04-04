@@ -14,6 +14,28 @@ interface ChatNode {
   children: ChatNode[]
 }
 
+function ensureAppUserExists(db: Database.Database, statements: any, userId: string): void {
+  const normalizedUserId = typeof userId === 'string' ? userId.trim() : ''
+  if (!normalizedUserId) return
+
+  const existingUser = db.prepare('SELECT id FROM users WHERE id = ?').get(normalizedUserId)
+  if (existingUser) return
+
+  const fallbackUsername = `app-user-${normalizedUserId}`
+  const createdAt = new Date().toISOString()
+
+  if (typeof statements?.upsertUser?.run === 'function') {
+    statements.upsertUser.run(normalizedUserId, fallbackUsername, createdAt)
+    return
+  }
+
+  db.prepare('INSERT INTO users (id, username, created_at) VALUES (?, ?, ?)').run(
+    normalizedUserId,
+    fallbackUsername,
+    createdAt
+  )
+}
+
 function buildMessageTree(messages: any[]): ChatNode | null {
   if (!messages || messages.length === 0) return null
 
@@ -394,6 +416,8 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
         return
       }
 
+      ensureAppUserExists(db, statements, user_id)
+
       const projectId = id || uuidv4()
       const now = new Date().toISOString()
 
@@ -637,6 +661,8 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
         res.status(400).json({ error: 'user_id required' })
         return
       }
+
+      ensureAppUserExists(db, statements, user_id)
 
       const conversationId = id || uuidv4()
       const now = new Date().toISOString()

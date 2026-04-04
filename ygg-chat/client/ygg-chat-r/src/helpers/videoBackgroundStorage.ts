@@ -1,4 +1,3 @@
-import { getAssetPath } from '../utils/assetPath'
 import { clearVideoBlobs, deleteVideoBlob, getVideoBlob, storeVideoBlob } from './videoBackgroundDb'
 
 export interface CustomVideoEntry {
@@ -12,11 +11,6 @@ export interface CustomVideoEntry {
   textColorMode?: 'light' | 'dark' | 'auto'
 }
 
-export interface VideoSource {
-  path: string
-  type: 'video/webm' | 'video/mp4'
-}
-
 export type BackgroundMode = 'video' | 'color'
 
 export interface BackgroundColorSettings {
@@ -25,8 +19,8 @@ export interface BackgroundColorSettings {
 }
 
 export const DEFAULT_BACKGROUND_COLORS: BackgroundColorSettings = {
-  light: '#f7f9fb',
-  dark: '#050505',
+  light: 'transparent',
+  dark: 'transparent',
 }
 
 const HEX_COLOR_REGEX = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i
@@ -34,16 +28,6 @@ const BACKGROUND_PREFERENCE_KEY = 'yggdrasil_background_preference'
 const CUSTOM_VIDEO_LIBRARY_KEY = 'yggdrasil_custom_video_library'
 const CUSTOM_VIDEO_ACTIVE_KEY = 'yggdrasil_custom_video_active'
 const VIDEO_BACKGROUND_EVENT = 'yggdrasil:video-background-change'
-
-export const DEFAULT_LIGHT_VIDEO: VideoSource = {
-  path: getAssetPath('video/gfish.webm'),
-  type: 'video/webm',
-}
-
-export const DEFAULT_DARK_VIDEO: VideoSource = {
-  path: getAssetPath('video/gfish.webm'),
-  type: 'video/webm',
-}
 
 export const VIDEO_BACKGROUND_CHANGE_EVENT = VIDEO_BACKGROUND_EVENT
 
@@ -79,12 +63,12 @@ interface StoredBackgroundPreference {
 
 const readBackgroundPreference = (): { mode: BackgroundMode; colors: BackgroundColorSettings } => {
   if (typeof window === 'undefined') {
-    return { mode: 'video', colors: DEFAULT_BACKGROUND_COLORS }
+    return { mode: 'color', colors: DEFAULT_BACKGROUND_COLORS }
   }
 
   const stored = safeParse(window.localStorage.getItem(BACKGROUND_PREFERENCE_KEY)) as StoredBackgroundPreference | null
   const normalized: StoredBackgroundPreference = typeof stored === 'object' && stored !== null ? stored : {}
-  const mode = normalized.mode === 'color' ? 'color' : 'video'
+  const mode = normalized.mode === 'video' ? 'video' : 'color'
 
   const colors = normalizeColorSettings({
     light: normalized.colors?.light ?? DEFAULT_BACKGROUND_COLORS.light,
@@ -252,8 +236,7 @@ export const loadCustomVideoBlobUrl = async (id: string): Promise<string | null>
  */
 export const getActiveTextColorMode = (): 'light' | 'dark' | 'auto' => {
   const activeVideo = loadActiveCustomVideo()
-  // Default to 'light' text for the built-in gfish wallpaper (dark video)
-  return activeVideo?.textColorMode ?? 'light'
+  return activeVideo?.textColorMode ?? 'auto'
 }
 
 /**

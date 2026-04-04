@@ -215,50 +215,52 @@ export const MonacoFileEditorPane: React.FC<MonacoFileEditorPaneProps> = ({
   }, [])
 
   return (
-    <section className='relative flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-neutral-200/80 bg-white/70 shadow-sm backdrop-blur-sm dark:border-neutral-800 dark:bg-neutral-950/60'>
+    <section className='relative flex h-full min-h-0 flex-col overflow-hidden rounded-b-2xl bg-white/70 shadow-lg backdrop-blur-sm dark:bg-neutral-950/60'>
       <div className='flex items-center gap-2 border-b border-neutral-200 px-2 py-2 dark:border-neutral-800'>
         <div className='flex min-w-0 flex-1 items-center gap-1 overflow-x-auto'>
-        {tabs.map(tab => {
-          const isActive = tab.id === activeTabId
-          const kindLabel = getDockTabKindLabel(tab.kind)
+          {tabs.map(tab => {
+            const isActive = tab.id === activeTabId
+            const kindLabel = getDockTabKindLabel(tab.kind)
 
-          return (
-            <div
-              key={tab.id}
-              role='tab'
-              aria-selected={isActive}
-              tabIndex={0}
-              onClick={() => onSelectTab(tab.id)}
-              onKeyDown={event => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault()
-                  onSelectTab(tab.id)
-                }
-              }}
-              className={`group flex min-w-0 max-w-[220px] cursor-pointer items-center gap-2 rounded-xl border px-3 py-1.5 text-xs transition-colors ${getDockTabToneClasses(tab.kind, isActive)}`}
-              title={tab.title || tab.label}
-            >
-              <div className='flex min-w-0 flex-1 items-center gap-2 text-left'>
-                <span className={`h-2 w-2 flex-shrink-0 rounded-full ${getDockTabIndicatorClasses(tab.kind, tab.isDirty)}`} />
-                <span className='truncate'>{tab.label}</span>
-                {kindLabel ? <span className='text-[10px] opacity-70'>{kindLabel}</span> : null}
-                {tab.isSaving ? <span className='text-[10px] opacity-70'>Saving…</span> : null}
-              </div>
-              <button
-                type='button'
-                onClick={event => {
-                  event.stopPropagation()
-                  onCloseTab(tab.id)
+            return (
+              <div
+                key={tab.id}
+                role='tab'
+                aria-selected={isActive}
+                tabIndex={0}
+                onClick={() => onSelectTab(tab.id)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    onSelectTab(tab.id)
+                  }
                 }}
-                className='rounded p-0.5 text-neutral-400 transition-colors hover:bg-neutral-200 hover:text-neutral-700 dark:hover:bg-neutral-700 dark:hover:text-neutral-100'
-                aria-label={`Close ${tab.label}`}
-                title='Close tab'
+                className={`group flex min-w-0 max-w-[220px] cursor-pointer items-center gap-2 rounded-xl border px-3 py-1.5 text-xs transition-colors ${getDockTabToneClasses(tab.kind, isActive)}`}
+                title={tab.title || tab.label}
               >
-                <i className='bx bx-x text-sm' />
-              </button>
-            </div>
-          )
-        })}
+                <div className='flex min-w-0 flex-1 items-center gap-2 text-left'>
+                  <span
+                    className={`h-2 w-2 flex-shrink-0 rounded-full ${getDockTabIndicatorClasses(tab.kind, tab.isDirty)}`}
+                  />
+                  <span className='truncate'>{tab.label}</span>
+                  {kindLabel ? <span className='text-[10px] opacity-70'>{kindLabel}</span> : null}
+                  {tab.isSaving ? <span className='text-[10px] opacity-70'>Saving…</span> : null}
+                </div>
+                <button
+                  type='button'
+                  onClick={event => {
+                    event.stopPropagation()
+                    onCloseTab(tab.id)
+                  }}
+                  className='rounded p-0.5 text-neutral-400 transition-colors hover:bg-neutral-200 hover:text-neutral-700 dark:hover:bg-neutral-700 dark:hover:text-neutral-100'
+                  aria-label={`Close ${tab.label}`}
+                  title='Close tab'
+                >
+                  <i className='bx bx-x text-sm' />
+                </button>
+              </div>
+            )
+          })}
         </div>
         {tabToolbar ? <div className='flex shrink-0 items-center gap-2 pl-2'>{tabToolbar}</div> : null}
       </div>

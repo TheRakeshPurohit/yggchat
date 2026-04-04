@@ -1,0 +1,614 @@
+{
+  "version": 1,
+  "name": "Hermes Agent",
+  "colors": {
+    "chatPanelBg": {
+      "light": "#FFF8EC",
+      "dark": "#000000"
+    },
+    "chatMessageListBg": {
+      "light": "#FFF8EC",
+      "dark": "#000000"
+    },
+    "heimdallPanelBg": {
+      "light": "#FFFCF7",
+      "dark": "#080808"
+    },
+    "conversationToolbarBg": {
+      "light": "rgba(255, 252, 245, 0.92)",
+      "dark": "rgba(0, 0, 0, 0.95)"
+    },
+    "settingsSolidColorSectionBg": {
+      "light": "rgba(255, 249, 238, 0.92)",
+      "dark": "rgba(15, 12, 8, 0.85)"
+    },
+    "appBackgroundColor": {
+      "light": "#FFF8EC",
+      "dark": "#000000"
+    },
+    "settingsPaneBodyBg": {
+      "light": "#FFFDF8",
+      "dark": "#050505"
+    },
+    "chatInputAreaBorder": {
+      "light": "rgba(232, 116, 0, 0.45)",
+      "dark": "rgba(255, 140, 0, 0.7)"
+    },
+    "chatProgressBarFill": {
+      "light": "#E87400",
+      "dark": "#FFB000"
+    },
+    "actionPopoverBorder": {
+      "light": "rgba(232, 116, 0, 0.22)",
+      "dark": "rgba(255, 140, 0, 0.5)"
+    },
+    "sendButtonAnimationColor": {
+      "light": "#E87400",
+      "dark": "#FFB000"
+    },
+    "streamingAnimationColor": {
+      "light": "#FF8C00",
+      "dark": "#FFB000"
+    },
+    "composerToggleActiveBg": {
+      "light": "rgba(255, 176, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.2)"
+    },
+    "composerToggleActiveBorder": {
+      "light": "rgba(232, 116, 0, 0.32)",
+      "dark": "rgba(255, 176, 0, 0.7)"
+    },
+    "composerToggleActiveText": {
+      "light": "#A16207",
+      "dark": "#FFD700"
+    },
+    "heimdallNotePillBg": {
+      "light": "rgba(255, 214, 153, 0.95)",
+      "dark": "#FF8C00"
+    },
+    "heimdallNotePillText": {
+      "light": "#3A2400",
+      "dark": "#000000"
+    },
+    "heimdallNotePillBorder": {
+      "light": "rgba(232, 116, 0, 0.22)",
+      "dark": "rgba(255, 140, 0, 0.4)"
+    },
+    "heimdallNodeHoverModalBg": {
+      "light": "#FFFDF8",
+      "dark": "#0e0e0e"
+    },
+    "heimdallNodeHoverModalBorder": {
+      "light": "rgba(232, 116, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.4)"
+    },
+    "heimdallNodeHoverModalText": {
+      "light": "#2B2118",
+      "dark": "#e5e5e5"
+    },
+    "heimdallNodeHoverModalTitleText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "heimdallNoteDialogBg": {
+      "light": "#FFFDF8",
+      "dark": "#0a0a0a"
+    },
+    "heimdallNoteDialogBorder": {
+      "light": "rgba(232, 116, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.5)"
+    },
+    "heimdallNoteDialogTitleText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "heimdallNoteDialogButtonBg": {
+      "light": "transparent",
+      "dark": "transparent"
+    },
+    "heimdallNoteDialogButtonBorder": {
+      "light": "rgba(232, 116, 0, 0.22)",
+      "dark": "rgba(255, 140, 0, 0.5)"
+    },
+    "heimdallNoteDialogButtonText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "heimdallNoteDialogCloseButtonText": {
+      "light": "#8A7C6E",
+      "dark": "#666666"
+    },
+    "ideContextPillBg": {
+      "light": "rgba(255, 176, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.15)"
+    },
+    "ideContextPillBorder": {
+      "light": "rgba(232, 116, 0, 0.28)",
+      "dark": "rgba(255, 176, 0, 0.5)"
+    },
+    "ideContextPillText": {
+      "light": "#A16207",
+      "dark": "#FFD700"
+    },
+    "ideContextAddButtonBg": {
+      "light": "rgba(255, 140, 0, 0.10)",
+      "dark": "rgba(255, 140, 0, 0.12)"
+    },
+    "ideContextAddButtonBorder": {
+      "light": "rgba(232, 116, 0, 0.28)",
+      "dark": "rgba(255, 176, 0, 0.5)"
+    },
+    "ideContextAddButtonText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "ideContextPreviewBg": {
+      "light": "#FFFDF8",
+      "dark": "#0a0a0a"
+    },
+    "ideContextPreviewBorder": {
+      "light": "rgba(232, 116, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.4)"
+    },
+    "ideContextPreviewFileText": {
+      "light": "#A16207",
+      "dark": "#FF8C00"
+    },
+    "ideContextPreviewCodeText": {
+      "light": "#2B2118",
+      "dark": "#e5e5e5"
+    },
+    "ideContextSelectedPillBg": {
+      "light": "rgba(255, 176, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.18)"
+    },
+    "ideContextSelectedPillBorder": {
+      "light": "rgba(232, 116, 0, 0.28)",
+      "dark": "rgba(255, 176, 0, 0.6)"
+    },
+    "ideContextSelectedPillText": {
+      "light": "#A16207",
+      "dark": "#FFD700"
+    },
+    "ideContextClearButtonBorder": {
+      "light": "rgba(220, 38, 38, 0.28)",
+      "dark": "rgba(255, 100, 100, 0.5)"
+    },
+    "ideContextClearButtonText": {
+      "light": "#B91C1C",
+      "dark": "#FF6B6B"
+    },
+    "ideContextAddedText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "toolJobsModalBackdrop": {
+      "light": "rgba(0, 0, 0, 0.18)",
+      "dark": "rgba(0, 0, 0, 0.8)"
+    },
+    "toolJobsModalBg": {
+      "light": "#FFFDF8",
+      "dark": "#0c0c0c"
+    },
+    "toolJobsModalBorder": {
+      "light": "rgba(232, 116, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.4)"
+    },
+    "toolJobsPanelBg": {
+      "light": "rgba(255, 253, 248, 0.95)",
+      "dark": "rgba(10, 10, 10, 0.95)"
+    },
+    "toolJobsPanelBorder": {
+      "light": "rgba(232, 116, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.35)"
+    },
+    "toolJobsPrimaryText": {
+      "light": "#2B2118",
+      "dark": "#f5f5f5"
+    },
+    "toolJobsSecondaryText": {
+      "light": "#7C6F64",
+      "dark": "#a0a0a0"
+    },
+    "toolJobsMutedText": {
+      "light": "#8A7C6E",
+      "dark": "#666666"
+    },
+    "toolJobsCodeBg": {
+      "light": "#F8F1E6",
+      "dark": "#111111"
+    },
+    "toolJobsCodeText": {
+      "light": "#2B2118",
+      "dark": "#e5e5e5"
+    },
+    "toolJobsErrorBg": {
+      "light": "rgba(254, 242, 242, 0.96)",
+      "dark": "rgba(180, 40, 40, 0.2)"
+    },
+    "toolJobsErrorBorder": {
+      "light": "rgba(220, 38, 38, 0.18)",
+      "dark": "rgba(255, 80, 80, 0.5)"
+    },
+    "toolJobsErrorText": {
+      "light": "#B91C1C",
+      "dark": "#FF6B6B"
+    },
+    "toolJobsLiveBadgeBg": {
+      "light": "rgba(255, 235, 205, 0.96)",
+      "dark": "rgba(255, 140, 0, 0.2)"
+    },
+    "toolJobsLiveBadgeText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "toolJobsLiveDot": {
+      "light": "#E87400",
+      "dark": "#FFB000"
+    },
+    "toolJobsProgressTrack": {
+      "light": "#E8DDD0",
+      "dark": "#1a1a1a"
+    },
+    "toolJobsProgressPending": {
+      "light": "#E87400",
+      "dark": "#FFB000"
+    },
+    "toolJobsProgressRunning": {
+      "light": "#FF8C00",
+      "dark": "#FF8C00"
+    },
+    "toolJobsProgressCompleted": {
+      "light": "#4F7A3C",
+      "dark": "#88C070"
+    },
+    "toolJobsProgressFailed": {
+      "light": "#DC2626",
+      "dark": "#FF6B6B"
+    },
+    "toolJobsStatusPendingBg": {
+      "light": "rgba(255, 176, 0, 0.12)",
+      "dark": "rgba(255, 176, 0, 0.15)"
+    },
+    "toolJobsStatusPendingText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "toolJobsStatusRunningBg": {
+      "light": "rgba(255, 140, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.15)"
+    },
+    "toolJobsStatusRunningText": {
+      "light": "#C2410C",
+      "dark": "#FF8C00"
+    },
+    "toolJobsStatusCompletedBg": {
+      "light": "rgba(79, 122, 60, 0.12)",
+      "dark": "rgba(136, 192, 112, 0.15)"
+    },
+    "toolJobsStatusCompletedText": {
+      "light": "#4F7A3C",
+      "dark": "#88C070"
+    },
+    "toolJobsStatusFailedBg": {
+      "light": "rgba(220, 38, 38, 0.10)",
+      "dark": "rgba(255, 107, 107, 0.15)"
+    },
+    "toolJobsStatusFailedText": {
+      "light": "#B91C1C",
+      "dark": "#FF6B6B"
+    },
+    "toolJobsStatusCancelledBg": {
+      "light": "rgba(120, 113, 108, 0.12)",
+      "dark": "rgba(100, 100, 100, 0.2)"
+    },
+    "toolJobsStatusCancelledText": {
+      "light": "#8A7C6E",
+      "dark": "#888888"
+    },
+    "toolJobsStatusActiveWorkersBg": {
+      "light": "rgba(255, 140, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.15)"
+    },
+    "toolJobsStatusActiveWorkersText": {
+      "light": "#C2410C",
+      "dark": "#FF8C00"
+    },
+    "toolPermissionDialogBg": {
+      "light": "#FFFDF8",
+      "dark": "#0a0a0a"
+    },
+    "toolPermissionDialogBorder": {
+      "light": "rgba(232, 116, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.5)"
+    },
+    "toolPermissionDialogTitleText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "toolPermissionDialogToolNameText": {
+      "light": "#C2410C",
+      "dark": "#FFB000"
+    },
+    "toolPermissionDialogBadgeBg": {
+      "light": "rgba(255, 176, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.18)"
+    },
+    "toolPermissionDialogBadgeText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "toolPermissionDialogCommandBg": {
+      "light": "#F8F1E6",
+      "dark": "#050505"
+    },
+    "toolPermissionDialogCommandLabelText": {
+      "light": "#8A7C6E",
+      "dark": "#a0a0a0"
+    },
+    "toolPermissionDialogCommandText": {
+      "light": "#2B2118",
+      "dark": "#FFD700"
+    },
+    "toolPermissionDialogDenyButtonBg": {
+      "light": "rgba(220, 38, 38, 0.86)",
+      "dark": "rgba(180, 40, 40, 0.9)"
+    },
+    "toolPermissionDialogDenyButtonBorder": {
+      "light": "rgba(220, 38, 38, 0.42)",
+      "dark": "rgba(255, 80, 80, 0.6)"
+    },
+    "toolPermissionDialogDenyButtonText": {
+      "light": "#FFFFFF",
+      "dark": "#ffffff"
+    },
+    "toolPermissionDialogAllowButtonBg": {
+      "light": "rgba(255, 176, 0, 0.14)",
+      "dark": "rgba(255, 140, 0, 0.2)"
+    },
+    "toolPermissionDialogAllowButtonBorder": {
+      "light": "rgba(232, 116, 0, 0.28)",
+      "dark": "rgba(255, 176, 0, 0.6)"
+    },
+    "toolPermissionDialogAllowButtonText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "toolPermissionDialogAllowAllButtonBg": {
+      "light": "rgba(255, 176, 0, 0.10)",
+      "dark": "rgba(255, 140, 0, 0.15)"
+    },
+    "toolPermissionDialogAllowAllButtonBorder": {
+      "light": "rgba(232, 116, 0, 0.24)",
+      "dark": "rgba(255, 176, 0, 0.5)"
+    },
+    "toolPermissionDialogAllowAllButtonText": {
+      "light": "#A16207",
+      "dark": "#FFD700"
+    },
+    "authModalBackdrop": {
+      "light": "rgba(0, 0, 0, 0.18)",
+      "dark": "rgba(0, 0, 0, 0.8)"
+    },
+    "authModalSurfaceBg": {
+      "light": "#FFFDF8",
+      "dark": "#0a0a0a"
+    },
+    "authModalTitleText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "authModalBodyText": {
+      "light": "#2B2118",
+      "dark": "#c0c0c0"
+    },
+    "authModalPrimaryButtonBg": {
+      "light": "#E87400",
+      "dark": "#FF8C00"
+    },
+    "authModalPrimaryButtonBorder": {
+      "light": "#FFB000",
+      "dark": "#FFB000"
+    },
+    "authModalPrimaryButtonText": {
+      "light": "#FFFFFF",
+      "dark": "#000000"
+    },
+    "authModalSecondaryButtonBg": {
+      "light": "transparent",
+      "dark": "transparent"
+    },
+    "authModalSecondaryButtonBorder": {
+      "light": "rgba(232, 116, 0, 0.22)",
+      "dark": "rgba(255, 140, 0, 0.5)"
+    },
+    "authModalSecondaryButtonText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "authModalDangerButtonBg": {
+      "light": "#CC4444",
+      "dark": "#CC4444"
+    },
+    "authModalDangerButtonBorder": {
+      "light": "#DC2626",
+      "dark": "#FF6B6B"
+    },
+    "authModalDangerButtonText": {
+      "light": "#FFFFFF",
+      "dark": "#ffffff"
+    },
+    "htmlToolsModalSurfaceBg": {
+      "light": "#FFFDF8",
+      "dark": "rgba(8, 8, 8, 0.98)"
+    },
+    "htmlToolsModalSurfaceBorder": {
+      "light": "rgba(232, 116, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.4)"
+    },
+    "htmlToolsModalPanelMutedBg": {
+      "light": "rgba(255, 248, 236, 0.96)",
+      "dark": "#0a0a0a"
+    },
+    "htmlToolsModalButtonBg": {
+      "light": "rgba(255, 140, 0, 0.10)",
+      "dark": "rgba(255, 140, 0, 0.08)"
+    },
+    "htmlToolsModalButtonBorder": {
+      "light": "rgba(232, 116, 0, 0.18)",
+      "dark": "rgba(255, 140, 0, 0.25)"
+    },
+    "htmlToolsModalButtonText": {
+      "light": "#7C6F64",
+      "dark": "#a0a0a0"
+    },
+    "htmlToolsModalButtonActiveBg": {
+      "light": "rgba(255, 176, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.18)"
+    },
+    "htmlToolsModalButtonActiveBorder": {
+      "light": "rgba(232, 116, 0, 0.28)",
+      "dark": "rgba(255, 176, 0, 0.5)"
+    },
+    "htmlToolsModalButtonActiveText": {
+      "light": "#A16207",
+      "dark": "#FFB000"
+    },
+    "markdownCodeBlockBg": {
+      "light": "#F8F1E6",
+      "dark": "#0e0e0e"
+    },
+    "markdownCodeBlockBorder": {
+      "light": "rgba(232, 116, 0, 0.16)",
+      "dark": "rgba(255, 140, 0, 0.25)"
+    },
+    "markdownCodeBlockText": {
+      "light": "#2B2118",
+      "dark": "#e0e0e0"
+    },
+    "markdownInlineCodeBg": {
+      "light": "rgba(255, 176, 0, 0.12)",
+      "dark": "rgba(255, 140, 0, 0.12)"
+    },
+    "markdownInlineCodeText": {
+      "light": "#9A3412",
+      "dark": "#FFD700"
+    },
+    "messageRoles": {
+      "user": {
+        "containerBg": {
+          "light": "#FFFDF8",
+          "dark": "rgba(255, 140, 0, 0.05)"
+        },
+        "border": {
+          "light": "rgba(232, 116, 0, 0.18)",
+          "dark": "transparent"
+        },
+        "roleText": {
+          "light": "#A16207",
+          "dark": "#FFB000"
+        }
+      },
+      "assistant": {
+        "containerBg": {
+          "light": "#FFFDF8",
+          "dark": "transparent"
+        },
+        "border": {
+          "light": "rgba(232, 116, 0, 0.18)",
+          "dark": "transparent"
+        },
+        "roleText": {
+          "light": "#4F7A3C",
+          "dark": "#88C070"
+        }
+      },
+      "system": {
+        "containerBg": {
+          "light": "#FFFDF8",
+          "dark": "transparent"
+        },
+        "border": {
+          "light": "rgba(232, 116, 0, 0.18)",
+          "dark": "transparent"
+        },
+        "roleText": {
+          "light": "#7C3AED",
+          "dark": "#c084fc"
+        }
+      },
+      "ex_agent": {
+        "containerBg": {
+          "light": "#FFFDF8",
+          "dark": "transparent"
+        },
+        "border": {
+          "light": "rgba(232, 116, 0, 0.18)",
+          "dark": "transparent"
+        },
+        "roleText": {
+          "light": "#C2410C",
+          "dark": "#FF6B6B"
+        }
+      },
+      "unknown": {
+        "containerBg": {
+          "light": "#FFFDF8",
+          "dark": "transparent"
+        },
+        "border": {
+          "light": "rgba(232, 116, 0, 0.18)",
+          "dark": "transparent"
+        },
+        "roleText": {
+          "light": "#7C6F64",
+          "dark": "#888888"
+        }
+      }
+    },
+    "heimdallNodes": {
+      "user": {
+        "fill": {
+          "light": "#FFF7E8",
+          "dark": "#111111"
+        },
+        "stroke": {
+          "light": "#E87400",
+          "dark": "#FF8C00"
+        },
+        "visibleStroke": {
+          "light": "#FFB000",
+          "dark": "#FFB000"
+        }
+      },
+      "assistant": {
+        "fill": {
+          "light": "#F6FBF0",
+          "dark": "#0e0e0e"
+        },
+        "stroke": {
+          "light": "#88C070",
+          "dark": "#88C070"
+        },
+        "visibleStroke": {
+          "light": "#4F7A3C",
+          "dark": "#88C070"
+        }
+      },
+      "ex_agent": {
+        "fill": {
+          "light": "#FFF1F1",
+          "dark": "#0a0a0a"
+        },
+        "stroke": {
+          "light": "#DC2626",
+          "dark": "#FF6B6B"
+        },
+        "visibleStroke": {
+          "light": "#B91C1C",
+          "dark": "#FF6B6B"
+        }
+      }
+    }
+  }
+}

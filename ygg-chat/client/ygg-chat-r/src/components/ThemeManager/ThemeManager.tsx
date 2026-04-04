@@ -85,7 +85,9 @@ const parseHexColor = (value: string): RgbaColor | null => {
 const parseRgbFunctionColor = (value: string): RgbaColor | null => {
   const match = value
     .trim()
-    .match(/^rgba?\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)(?:\s*,\s*(-?\d*(?:\.\d+)?))?\s*\)$/i)
+    .match(
+      /^rgba?\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)(?:\s*,\s*(-?\d*(?:\.\d+)?))?\s*\)$/i
+    )
 
   if (!match) return null
 
@@ -138,7 +140,9 @@ const ModeColorInput: React.FC<ModeColorInputProps> = ({ modeLabel, value, onCha
 
   return (
     <div className='space-y-2'>
-      <span className='text-[11px] uppercase tracking-[0.09em] text-neutral-500 dark:text-neutral-400'>{modeLabel}</span>
+      <span className='text-[11px] uppercase tracking-[0.09em] text-neutral-500 dark:text-neutral-400'>
+        {modeLabel}
+      </span>
 
       <div className='flex items-center gap-2'>
         <div
@@ -185,7 +189,9 @@ const ModeColorInput: React.FC<ModeColorInputProps> = ({ modeLabel, value, onCha
           }}
           className='flex-1 h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer accent-blue-500'
         />
-        <span className='text-[11px] font-mono text-neutral-500 dark:text-neutral-400 w-9 text-right'>{alphaPercent}%</span>
+        <span className='text-[11px] font-mono text-neutral-500 dark:text-neutral-400 w-9 text-right'>
+          {alphaPercent}%
+        </span>
       </div>
     </div>
   )
@@ -233,10 +239,6 @@ export const ThemeManager: React.FC = () => {
     },
     [enabled, theme]
   )
-
-  const handleToggleEnabled = useCallback(() => {
-    setCustomChatThemeEnabled(!enabled)
-  }, [enabled])
 
   const handleThemeNameChange = useCallback(
     (nextName: string) => {
@@ -410,12 +412,7 @@ export const ThemeManager: React.FC = () => {
   )
 
   const handleRoleColorChange = useCallback(
-    (
-      role: ChatThemeRoleKey,
-      key: 'containerBg' | 'border' | 'roleText',
-      mode: 'light' | 'dark',
-      nextValue: string
-    ) => {
+    (role: ChatThemeRoleKey, key: 'containerBg' | 'border' | 'roleText', mode: 'light' | 'dark', nextValue: string) => {
       updateTheme(current => ({
         ...current,
         colors: {
@@ -472,7 +469,10 @@ export const ThemeManager: React.FC = () => {
         setCustomChatThemeEnabled(true)
         setStatus(`Theme loaded from ${sourceLabel}`)
       } catch (error) {
-        setStatus(error instanceof Error ? `Failed to import theme: ${error.message}` : 'Failed to import theme', 'error')
+        setStatus(
+          error instanceof Error ? `Failed to import theme: ${error.message}` : 'Failed to import theme',
+          'error'
+        )
       }
     },
     [setStatus]
@@ -508,7 +508,10 @@ export const ThemeManager: React.FC = () => {
 
       importInputRef.current?.click()
     } catch (error) {
-      setStatus(error instanceof Error ? `Failed to open theme file: ${error.message}` : 'Failed to open theme file', 'error')
+      setStatus(
+        error instanceof Error ? `Failed to open theme file: ${error.message}` : 'Failed to open theme file',
+        'error'
+      )
     }
   }, [applyImportedTheme, setStatus])
 
@@ -522,7 +525,10 @@ export const ThemeManager: React.FC = () => {
         const rawTheme = await file.text()
         applyImportedTheme(rawTheme, file.name)
       } catch (error) {
-        setStatus(error instanceof Error ? `Failed to read theme file: ${error.message}` : 'Failed to read theme file', 'error')
+        setStatus(
+          error instanceof Error ? `Failed to read theme file: ${error.message}` : 'Failed to read theme file',
+          'error'
+        )
       }
     },
     [applyImportedTheme, setStatus]
@@ -559,7 +565,7 @@ export const ThemeManager: React.FC = () => {
         onClick={() => setIsExpanded(prev => !prev)}
         className='w-full flex items-center justify-between py-2 text-left'
       >
-        <span className='text-[16px] font-medium text-stone-700 dark:text-stone-200'>Custom Theme</span>
+        <span className='text-[16px] font-medium text-stone-700 dark:text-stone-200'>Advanced Custom Theme</span>
         <div className='flex items-center gap-2'>
           <span className='text-xs text-neutral-500 dark:text-neutral-400'>{summary}</span>
           <i className={`bx ${isExpanded ? 'bx-chevron-up' : 'bx-chevron-down'} text-lg text-neutral-500`}></i>
@@ -568,22 +574,6 @@ export const ThemeManager: React.FC = () => {
 
       {isExpanded && (
         <div className='space-y-4 pl-1 pt-1'>
-          <div className='flex flex-wrap items-center justify-between gap-2 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800/30 px-3 py-2'>
-            <div>
-              <p className='text-sm font-medium text-stone-700 dark:text-stone-200'>Enable custom theme</p>
-              <p className='text-xs text-neutral-500 dark:text-neutral-400'>Apply your color overrides to chat and Heimdall.</p>
-            </div>
-            <button
-              type='button'
-              onClick={handleToggleEnabled}
-              className='p-1 rounded hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors'
-              title={enabled ? 'Disable custom theme' : 'Enable custom theme'}
-              aria-pressed={enabled}
-            >
-              <i className={`bx ${enabled ? 'bx-toggle-right text-green-500' : 'bx-toggle-left text-neutral-400'} text-2xl`} />
-            </button>
-          </div>
-
           <div className='space-y-2'>
             <label className='text-xs font-medium text-neutral-600 dark:text-neutral-400'>Theme name</label>
             <input
@@ -670,7 +660,9 @@ export const ThemeManager: React.FC = () => {
           </div>
 
           <div className='space-y-3'>
-            <h4 className='text-sm font-semibold text-stone-700 dark:text-stone-200'>Markdown code blocks + inline code</h4>
+            <h4 className='text-sm font-semibold text-stone-700 dark:text-stone-200'>
+              Markdown code blocks + inline code
+            </h4>
             <PairEditor
               label='Code block surface background'
               value={theme.colors.markdownCodeBlockBg}
@@ -1095,7 +1087,9 @@ export const ThemeManager: React.FC = () => {
             <PairEditor
               label='Always allow button border'
               value={theme.colors.toolPermissionDialogAllowAllButtonBorder}
-              onChange={(mode, value) => handleChatSurfaceChange('toolPermissionDialogAllowAllButtonBorder', mode, value)}
+              onChange={(mode, value) =>
+                handleChatSurfaceChange('toolPermissionDialogAllowAllButtonBorder', mode, value)
+              }
             />
             <PairEditor
               label='Always allow button text'
@@ -1174,7 +1168,9 @@ export const ThemeManager: React.FC = () => {
           </div>
 
           <div className='space-y-3'>
-            <h4 className='text-sm font-semibold text-stone-700 dark:text-stone-200'>Task Manager modal (HTML tools)</h4>
+            <h4 className='text-sm font-semibold text-stone-700 dark:text-stone-200'>
+              Task Manager modal (HTML tools)
+            </h4>
             <PairEditor
               label='Modal surface background'
               value={theme.colors.htmlToolsModalSurfaceBg}

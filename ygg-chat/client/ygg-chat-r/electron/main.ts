@@ -453,7 +453,7 @@ function syncHermesRuntimeSettingsFromStore(): void {
 // Helper to get icon path
 
 function getIconPath(_isDark?: boolean) {
-  const logoFile = 'taskbar-logo.png'
+  const logoFile = 'graviton-dark.png'
   return app.isPackaged
     ? path.join(__dirname, '../dist-electron/img', logoFile)
     : path.join(__dirname, '../public/img', logoFile)

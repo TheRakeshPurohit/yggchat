@@ -908,10 +908,16 @@ export async function createOpenAIChatGPTStreamingRequest(
   const decoder = new TextDecoder()
   let buffer = ''
 
+  // Start a fresh visible generation for this request so Chat.tsx resets any
+  // previous transient stream row/tool state before new deltas arrive.
+  // This matters when the same streamId is reused across successive OpenAI
+  // generations inside tool/repeat loops.
+  const assistantMessageId = uuidv4()
+  onChunk({ type: 'generation_started', messageId: assistantMessageId })
+
   // Accumulators for final message
   let assistantText = ''
   let assistantReasoning = ''
-  let assistantMessageId: string | null = null
   let completionEmitted = false
   const useGPT53StrictTextAssembly = shouldUseGPT53StrictTextAssembly(payload.modelName)
 
@@ -1330,8 +1336,6 @@ export async function createOpenAIChatGPTStreamingRequest(
 
   const emitCompleteMessage = (partial: boolean): boolean => {
     if (completionEmitted) return false
-
-    if (!assistantMessageId) assistantMessageId = uuidv4()
 
     const replayItems = getResponseOutputItemsForReplay()
     const replayArtifacts = buildFinalArtifactsFromReplayItems(replayItems)

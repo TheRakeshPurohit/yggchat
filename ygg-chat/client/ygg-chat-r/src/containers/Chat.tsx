@@ -88,6 +88,10 @@ import {
 } from '../features/chats'
 import type { ContentBlock, ToolCall } from '../features/chats/chatTypes'
 import {
+  extractBranchFileMutations,
+  type WorkspaceMutationOperation,
+} from '../features/chats/workspaceMutationTracking'
+import {
   clearTokens as clearOpenAITokens,
   fetchOpenAIUsageStatus,
   isOpenAIAuthenticated,
@@ -150,6 +154,7 @@ import {
 } from '../hooks/useQueries'
 import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus'
 import { CHAT_INSERT_FILE_PATH_EVENT, type ChatInsertFilePathDetail } from '../helpers/chatInputBridge'
+import { dispatchOpenWorkspaceMutationDiffs } from '../helpers/workspaceMutationDiffBridge'
 import { cloneConversation, localApi } from '../utils/api'
 import { getAssetPath } from '../utils/assetPath'
 import { parseId } from '../utils/helpers'
@@ -303,6 +308,34 @@ const VIRTUAL_ROW_BASE_STYLE: React.CSSProperties = {
   top: 0,
   left: 0,
   width: '100%',
+}
+
+const getWorkspaceFileBaseName = (filePath: string): string => {
+  const normalizedPath = filePath.replace(/\\/g, '/')
+  const segments = normalizedPath.split('/').filter(Boolean)
+  return segments[segments.length - 1] || filePath
+}
+
+const getWorkspaceMutationLabel = (operation: WorkspaceMutationOperation): string => {
+  switch (operation) {
+    case 'create':
+      return 'Created'
+    case 'delete':
+      return 'Deleted'
+    default:
+      return 'Edited'
+  }
+}
+
+const getWorkspaceMutationBadgeClassName = (operation: WorkspaceMutationOperation): string => {
+  switch (operation) {
+    case 'create':
+      return 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+    case 'delete':
+      return 'border border-rose-500/20 bg-rose-500/10 text-rose-600 dark:text-rose-300'
+    default:
+      return 'border border-sky-500/20 bg-sky-500/10 text-sky-600 dark:text-sky-300'
+  }
 }
 
 // const formatStreamDebugId = (value: unknown): string => {
@@ -1068,6 +1101,7 @@ function Chat() {
   const [isRefreshingCredits, setIsRefreshingCredits] = useState(false)
   // Todo list collapsed state
   const [todoListCollapsed, setTodoListCollapsed] = useState(false)
+  const [workspaceMutationsCollapsed, setWorkspaceMutationsCollapsed] = useState(false)
   // Tool jobs modal state
   const [jobsModalOpen, setJobsModalOpen] = useState(false)
   const [orchestratorEnabled, setOrchestratorEnabledState] = useState(() => isOrchestratorEnabled())
@@ -5356,6 +5390,31 @@ function Chat() {
     return null
   }, [displayMessages])
 
+  const branchFileMutationData = useMemo(() => extractBranchFileMutations(displayMessages), [displayMessages])
+  const handleOpenWorkspaceMutationDiffs = useCallback(() => {
+    const filePaths = branchFileMutationData.latestByPath.map(summary => summary.path)
+    if (filePaths.length === 0) return
+
+    dispatchOpenWorkspaceMutationDiffs({
+      filePaths,
+      basePath: ccCwd || null,
+      focusPath: branchFileMutationData.latestByPath[0]?.path || null,
+    })
+  }, [branchFileMutationData.latestByPath, ccCwd])
+  const handleOpenWorkspaceMutationDiffForPath = useCallback(
+    (filePath: string) => {
+      const normalizedPath = filePath.trim()
+      if (!normalizedPath) return
+
+      dispatchOpenWorkspaceMutationDiffs({
+        filePaths: [normalizedPath],
+        basePath: ccCwd || null,
+        focusPath: normalizedPath,
+      })
+    },
+    [ccCwd]
+  )
+
   // Removed obsolete streaming completion effect that synthesized assistant messages.
   // The streaming thunks now dispatch messageAdded and messageBranchCreated directly,
   // and reducers update currentPath appropriately. This avoids race conditions and
@@ -6095,6 +6154,93 @@ function Chat() {
                         <span className={item.done ? 'line-through opacity-80' : ''}>{item.text}</span>
                       </li>
                     ))}
+                  </ul>
+                )}
+              </div>
+            )}
+            {branchFileMutationData.latestByPath.length > 0 && (
+              <div
+                className={`mx-2 ${latestTodoList && latestTodoList.items && latestTodoList.items.length > 0 ? 'mt-1' : toolCallPermissionRequest ? 'mt-1' : 'mt-2'} mb-1 px-2 py-1 rounded-[16px] bg-neutral-100/80 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700`}
+              >
+                <div className='flex items-center justify-between gap-3'>
+                  <span className='min-w-0 flex items-center gap-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-400'>
+                    <i className='bx bx-file text-xl shrink-0'></i>
+                    <span className='truncate text-[12px]'>Modified Files</span>
+                    {workspaceMutationsCollapsed && (
+                      <span className='ml-1 shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
+                        ({branchFileMutationData.latestByPath.length} file
+                        {branchFileMutationData.latestByPath.length === 1 ? '' : 's'})
+                      </span>
+                    )}
+                  </span>
+                  <div className='flex shrink-0 items-center gap-2'>
+                    <span className='text-[10px] text-neutral-400 dark:text-neutral-500'>
+                      {branchFileMutationData.latestByPath.length} file
+                      {branchFileMutationData.latestByPath.length === 1 ? '' : 's'}
+                    </span>
+                    <button
+                      type='button'
+                      onClick={handleOpenWorkspaceMutationDiffs}
+                      className='flex items-center gap-1 rounded-lg border border-neutral-200 px-2 py-1 text-[10px] font-medium text-neutral-600 transition-colors hover:bg-neutral-200 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-700'
+                      title='Open modified files in Git diff'
+                    >
+                      <i className='bx bx-git-compare text-xs' />
+                      <span>Diffs</span>
+                    </button>
+                    <button
+                      onClick={() => setWorkspaceMutationsCollapsed(!workspaceMutationsCollapsed)}
+                      className='mt-1 rounded-lg px-2 py-0.5 transition-colors hover:bg-neutral-200 dark:hover:bg-neutral-700'
+                      title={workspaceMutationsCollapsed ? 'Expand modified files' : 'Collapse modified files'}
+                    >
+                      <i
+                        className={`bx ${workspaceMutationsCollapsed ? 'bx-chevron-down' : 'bx-chevron-up'} text-sm text-neutral-500`}
+                      ></i>
+                    </button>
+                  </div>
+                </div>
+                {!workspaceMutationsCollapsed && (
+                  <ul className='mt-1.5 space-y-1 max-h-40 overflow-y-auto pb-1 pr-1 thin-scrollbar'>
+                    {branchFileMutationData.latestByPath.map(summary => {
+                      const latestMutation = summary.latestMutation
+                      const fileName = getWorkspaceFileBaseName(summary.path)
+                      return (
+                        <li
+                          key={`workspace-summary-${summary.path}`}
+                          className='rounded-xl border border-neutral-200/70 bg-white/60 px-2 py-1.5 dark:border-neutral-700/70 dark:bg-neutral-900/30'
+                        >
+                          <div className='flex items-start gap-2'>
+                            <span
+                              className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${getWorkspaceMutationBadgeClassName(latestMutation.operation)}`}
+                            >
+                              {getWorkspaceMutationLabel(latestMutation.operation)}
+                            </span>
+                            <div className='min-w-0 flex-1'>
+                              <div className='flex items-center gap-1.5'>
+                                <span className='truncate text-xs font-medium text-neutral-800 dark:text-neutral-100'>
+                                  {fileName}
+                                </span>
+                                {summary.mutationCount > 1 && (
+                                  <span className='shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
+                                    ×{summary.mutationCount}
+                                  </span>
+                                )}
+                              </div>
+                              <div className='truncate text-[10px] text-neutral-500 dark:text-neutral-400'>
+                                {summary.path}
+                              </div>
+                            </div>
+                            <button
+                              type='button'
+                              onClick={() => handleOpenWorkspaceMutationDiffForPath(summary.path)}
+                              className='shrink-0 rounded-lg border border-neutral-200 px-2 py-1 text-[10px] font-medium text-neutral-600 transition-colors hover:bg-neutral-200 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-700'
+                              title={`Open diff for ${fileName}`}
+                            >
+                              Diff
+                            </button>
+                          </div>
+                        </li>
+                      )
+                    })}
                   </ul>
                 )}
               </div>

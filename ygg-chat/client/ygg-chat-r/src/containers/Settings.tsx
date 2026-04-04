@@ -1643,15 +1643,15 @@ const Settings: React.FC = () => {
     clearCustomVideoLibrary()
     setVideos([])
     setActiveVideoId(null)
-    showStatus({ type: 'success', text: 'Gallery cleared. Default wallpapers will be used.' })
+    showStatus({ type: 'success', text: 'Gallery cleared. Using the default transparent background.' })
   }
 
   const handleResetToDefault = () => {
     persistActiveCustomVideoId(null)
-    persistBackgroundMode('video')
+    persistBackgroundMode('color')
     setActiveVideoId(null)
-    setBackgroundMode('video')
-    showStatus({ type: 'success', text: 'Reverted to the built-in defaults.' })
+    setBackgroundMode('color')
+    showStatus({ type: 'success', text: 'Reverted to the default transparent background.' })
   }
 
   const handleTextColorModeChange = (id: string, mode: 'light' | 'dark' | 'auto') => {

@@ -466,7 +466,7 @@ export const BrowserPane: React.FC<BrowserPaneProps> = ({
   }, [activeBrowser, onUpdateTab])
 
   return (
-    <section className='relative flex h-full min-h-0 flex-col overflow-hidden rounded-b-2xl bg-white/70 shadow-sm backdrop-blur-sm dark:bg-neutral-950/60'>
+    <section className='relative flex h-full min-h-0 flex-col overflow-hidden rounded-b-2xl bg-white/70 shadow-lg backdrop-blur-sm dark:bg-neutral-950/60'>
       <div className='flex items-center gap-2 border-b border-neutral-200 px-2 py-2 dark:border-neutral-800'>
         <div className='flex min-w-0 flex-1 items-center gap-1 overflow-x-auto'>
           {tabs.map(tab => {
