@@ -121,6 +121,15 @@ yggdrasil_client/
     └── docs/               # Documentation
 ```
 
+## Internal Architecture Docs
+
+If you want a deeper look at how Graviton works internally, start with these documents:
+
+- [Graviton Architecture Context](./ygg-chat/docs/graviton_context.md) — overview of the app architecture, including the React renderer, Electron shell, embedded local server, SQLite persistence model, and orchestration layers.
+- [Graviton Application State Overview](./ygg-chat/docs/stateContext.md) — details on how application state is managed across the main UI surfaces using Redux for live interaction state and TanStack Query for fetched and persisted data.
+
+These are especially useful if you want to understand the internal design of the Graviton app before contributing or making architectural changes.
+
 ## Getting Started (Development)
 
 ## Build

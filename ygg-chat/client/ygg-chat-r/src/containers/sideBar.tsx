@@ -26,6 +26,7 @@ import {
   useLocalTopLevelUserMessages,
   useMoveConversationToProject,
   useProjects,
+  useRecentConversations,
   useSearchTopLevelUserMessages,
 } from '../hooks/useQueries'
 import { localApi } from '../utils/api'
@@ -522,6 +523,7 @@ const SideBar: React.FC<SideBarProps> = ({
   const hoverPreviewCloseTimeoutRef = useRef<number | null>(null)
   const sidebarRef = useRef<HTMLElement | null>(null)
   const expandButtonRef = useRef<HTMLButtonElement | null>(null)
+  const { data: recentConversations = [] } = useRecentConversations(limit)
 
   // Theme state
   const [themeMode, setThemeMode] = useState<'Light' | 'Dark' | 'System'>(() => {
@@ -813,8 +815,11 @@ const SideBar: React.FC<SideBarProps> = ({
   const handleDeleteSidebarConversation = useCallback(
     async (conversation: Conversation) => {
       const label = conversation.title || `Conversation ${conversation.id}`
-      const shouldDelete = window.confirm(`Delete conversation "${label}"? This action cannot be undone.`)
+      const shouldDelete = window.confirm(`Delete conversation \"${label}\"? This action cannot be undone.`)
       if (!shouldDelete) return
+
+      const wasActiveConversation = String(activeConversationId) === String(conversation.id)
+      const previousHistoryEntry = typeof window !== 'undefined' ? window.history.state?.idx : null
 
       try {
         await dispatch(
@@ -834,11 +839,29 @@ const SideBar: React.FC<SideBarProps> = ({
           previous ? previous.filter(item => String(item.id) !== String(conversation.id)) : previous
         )
 
-        if (String(activeConversationId) === String(conversation.id)) {
-          if (conversation.project_id) {
-            navigate(`/conversationPage?projectId=${conversation.project_id}`)
+        if (wasActiveConversation) {
+          closeExpandPortal(false)
+
+          if (previousHistoryEntry != null && previousHistoryEntry > 0) {
+            navigate(-1)
           } else {
-            navigate('/conversationPage')
+            const fallbackConversation = recentConversations.find(candidate => {
+              if (String(candidate.id) === String(conversation.id)) return false
+              return String(candidate.project_id) === String(conversation.project_id)
+            })
+
+            if (fallbackConversation?.id && fallbackConversation.project_id) {
+              dispatch(chatSliceActions.conversationSet(fallbackConversation.id))
+              dispatch(activeConversationIdSet(fallbackConversation.id))
+              navigate(`/chat/${fallbackConversation.project_id}/${fallbackConversation.id}`, {
+                replace: true,
+                state: fallbackConversation.storage_mode
+                  ? { storageMode: fallbackConversation.storage_mode }
+                  : undefined,
+              })
+            } else {
+              navigate('/homepage', { replace: true })
+            }
           }
         }
 
@@ -848,7 +871,7 @@ const SideBar: React.FC<SideBarProps> = ({
         console.error('Failed to delete conversation from sidebar:', deleteError)
       }
     },
-    [activeConversationId, dispatch, navigate, queryClient]
+    [activeConversationId, closeExpandPortal, dispatch, navigate, queryClient, recentConversations]
   )
 
   const handleOpenMoveConversation = useCallback((conversation: Conversation) => {
@@ -1105,7 +1128,7 @@ const SideBar: React.FC<SideBarProps> = ({
     hoveredConversationId: ConversationId | null = null
   ) => {
     const actionIconShellClass = renderCollapsed
-      ? 'flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-transparent dark:bg-transparent dark:text-neutral-300 text-white'
+      ? 'flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-transparent dark:bg-transparent text-stone-900 dark:text-neutral-300'
       : 'flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-transparent dark:bg-neutral-900 dark:text-neutral-300 text-neutral-100'
 
     return (

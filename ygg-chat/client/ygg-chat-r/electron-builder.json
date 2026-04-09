@@ -46,7 +46,8 @@
   },
   "mac": {
     "target": ["dmg"],
-    "category": "public.app-category.productivity"
+    "category": "public.app-category.productivity",
+    "icon": "public/img/graviton-dark.icns"
   },
   "linux": {
     "target": ["AppImage"],

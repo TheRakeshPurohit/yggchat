@@ -347,9 +347,15 @@ const getWorkspaceMutationBadgeClassName = (operation: WorkspaceMutationOperatio
 
 type EmptyChatStateProps = {
   onSelectProjectFolder?: () => Promise<void> | void
+  projectFolderPath?: string
 }
 
-const EmptyChatState = ({ onSelectProjectFolder }: EmptyChatStateProps) => (
+const EmptyChatState = ({ onSelectProjectFolder, projectFolderPath }: EmptyChatStateProps) => {
+  const projectFolderName = projectFolderPath?.trim()
+    ? getWorkspaceFileBaseName(projectFolderPath.trim())
+    : ''
+
+  return (
   <div className='flex min-h-[420px] flex-1 items-center justify-center px-6 py-12 sm:px-10'>
     <div className='mx-auto flex max-w-sm flex-col items-center text-center'>
       <div className='mb-5 rounded-[28px] border border-stone-200/80 bg-white/75 p-5 shadow-[0_16px_40px_-24px_rgba(0,0,0,0.35)] backdrop-blur-xl dark:border-white/10 dark:bg-neutral-900/70'>
@@ -388,7 +394,9 @@ const EmptyChatState = ({ onSelectProjectFolder }: EmptyChatStateProps) => (
         Ask a question, drop in some context, or sketch an idea to make it real.
       </p>
       <div className='mt-4 flex items-center gap-3'>
-        <span className='text-sm font-medium text-stone-700 dark:text-stone-300'>Open project folder</span>
+        <span className='text-sm font-medium text-stone-700 dark:text-stone-300'>
+          {projectFolderName ? `Working in ${projectFolderName}` : 'Open project folder'}
+        </span>
         <button
           type='button'
           onClick={() => {
@@ -415,7 +423,8 @@ const EmptyChatState = ({ onSelectProjectFolder }: EmptyChatStateProps) => (
       </div>
     </div>
   </div>
-)
+  )
+}
 
 type VirtualizedRowContainerProps = {
   id: string
@@ -5780,7 +5789,7 @@ function Chat() {
           >
             <React.Profiler id='chat-virtual-list' onRender={handleVirtualListProfilerRender}>
               {virtualRows.length === 0 ? (
-                <EmptyChatState onSelectProjectFolder={handleSelectProjectFolder} />
+                <EmptyChatState onSelectProjectFolder={handleSelectProjectFolder} projectFolderPath={ccCwd} />
               ) : (
                 (() => {
                   const totalSize = virtualizer.getTotalSize()
