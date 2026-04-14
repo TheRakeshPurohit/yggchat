@@ -29,7 +29,7 @@ interface ElectronAPI {
   }
   storage: {
     get: (key: string) => Promise<any>
-    set: (key: string, value: any) => Promise<void>
+    set: (key: string, value: any) => Promise<{ success: boolean; error?: string }>
     clear: () => Promise<{ success: boolean; error?: string }>
   }
   secrets: {

@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.87] - 2026-04-14
+
+### Added
+
+- Added MCP stdio framing auto-detection with content-length/newline-JSON fallback, plus Blender MCP compatibility and server env support.
+- Added LM Studio provider URL override in Settings and synced it into the headless provider config.
+- Added Windows Terminal curl examples for note embedding, upsert, and vector table configuration.
+- Added a logout button to the top of Settings next to Home.
+
+### Changed
+
+- Subagent/provider routing now inherits caller context instead of leaking to OpenRouter.
+- Explain-from-selection now always parents the new user message to the selected message, avoiding wrong-branch explains.
+- Updated internal note/retrieval guidance around note-first memory, vector search, and lexical reranking.
+
+### Fixed
+
+- Fixed LM Studio server address handling so the client no longer depends on a static base URL.
+- Fixed branch-parenting behavior for explain selection in the chat flow.
+
 ### Added
 
 ### Changed

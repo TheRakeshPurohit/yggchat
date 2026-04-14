@@ -9,7 +9,7 @@ export interface FetchNotesArgs {
 }
 
 export interface FetchChatsArgs {
-  action?: 'list_chats' | 'get_chats' | 'search_chats' | 'search_messages' | 'get_notes' | 'read_branch'
+  action?: 'list_chats' | 'get_chats' | 'search_chats' | 'search_messages' | 'search_notes' | 'get_notes' | 'read_branch'
   conversationId?: string
   conversationIds?: string[]
   userId?: string
@@ -31,6 +31,7 @@ interface FetchChatsExecuteOptions {
   getConversationById: (conversationId: string) => Record<string, any> | undefined
   searchConversations?: (input: { userId: string; projectId?: string; query: string; limit: number }) => Array<Record<string, any>>
   searchTopLevelMessages?: (input: { userId: string; projectId?: string; query: string; limit: number }) => Array<Record<string, any>>
+  searchNotes?: (input: { userId: string; projectId?: string; query: string; limit: number }) => Array<Record<string, any>>
   listMessagesByConversationId: (conversationId: string) => Array<Record<string, any>>
   listTopLevelUserMessagesByConversationId?: (conversationId: string) => Array<Record<string, any>>
   getMessageById: (messageId: string) => Record<string, any> | undefined
@@ -76,6 +77,23 @@ interface MessageSearchItem {
   score: number
 }
 
+interface NoteSearchItem {
+  conversation_id: string
+  project_id: string | null
+  storage_mode: 'cloud' | 'local'
+  conversation_title: string | null
+  message_id: string
+  message_created_at: string
+  note_updated_at: string | null
+  note: string
+  match_type: 'fts' | 'fuzzy' | 'vector'
+  score: number
+  lexical_score?: number
+  vector_score?: number
+  recency_score?: number
+  vector_distance?: number | null
+}
+
 export interface FetchNotesResult {
   success: boolean
   error?: string
@@ -91,11 +109,12 @@ export interface FetchNotesResult {
 export interface FetchChatsResult {
   success: boolean
   error?: string
-  action?: 'list_chats' | 'get_chats' | 'search_chats' | 'search_messages' | 'get_notes' | 'read_branch'
+  action?: 'list_chats' | 'get_chats' | 'search_chats' | 'search_messages' | 'search_notes' | 'get_notes' | 'read_branch'
   currentConversationId?: string | null
   totalCount?: number
   chats?: ChatSummaryItem[]
   messageSearchResults?: MessageSearchItem[]
+  noteSearchResults?: NoteSearchItem[]
   notes?: BaseMessageItem[]
   conversationId?: string | null
   requestedConversationIds?: string[]
@@ -272,11 +291,12 @@ const resolveNotesAction = (rawAction: unknown): 'top_level' | 'siblings' | 'all
   return 'top_level'
 }
 
-const resolveChatsAction = (rawAction: unknown): 'list_chats' | 'get_chats' | 'search_chats' | 'search_messages' | 'get_notes' | 'read_branch' => {
+const resolveChatsAction = (rawAction: unknown): 'list_chats' | 'get_chats' | 'search_chats' | 'search_messages' | 'search_notes' | 'get_notes' | 'read_branch' => {
   const normalized = safeText(rawAction).trim().toLowerCase()
   if (normalized === 'get_chats') return 'get_chats'
   if (normalized === 'search_chats') return 'search_chats'
   if (normalized === 'search_messages') return 'search_messages'
+  if (normalized === 'search_notes') return 'search_notes'
   if (normalized === 'get_notes') return 'get_notes'
   if (normalized === 'read_branch') return 'read_branch'
   return 'list_chats'
@@ -610,6 +630,67 @@ export async function execute(
       action,
       totalCount: messageSearchResults.length,
       messageSearchResults,
+    }
+  }
+
+  if (action === 'search_notes') {
+    const query = safeText(args?.query).trim()
+    if (!query) {
+      return { success: false, error: 'query is required when action="search_notes"' }
+    }
+
+    const explicitUserId = safeText(args?.userId).trim()
+    const projectId = safeText(args?.projectId).trim() || undefined
+    const inferredConversationId = safeText(args?.conversationId || options.currentConversationId).trim()
+    const inferredUserId = inferredConversationId ? safeText(options.getConversationById(inferredConversationId)?.user_id).trim() : ''
+    const userId = explicitUserId || inferredUserId
+
+    if (!userId) {
+      return {
+        success: false,
+        error: 'userId is required for search_notes unless it can be inferred from conversationId/current conversation',
+      }
+    }
+
+    const noteSearchResults = options.searchNotes
+      ? options.searchNotes({ userId, projectId, query, limit }).map(result => ({
+          conversation_id: safeText(result?.conversation_id),
+          project_id: normalizeNullableText(result?.project_id),
+          storage_mode: safeText(result?.storage_mode) === 'cloud' ? 'cloud' : 'local',
+          conversation_title: normalizeNullableText(result?.conversation_title),
+          message_id: safeText(result?.message_id),
+          message_created_at: safeText(result?.message_created_at),
+          note_updated_at: normalizeNullableText(result?.note_updated_at),
+          note: safeText(result?.note),
+          match_type:
+            safeText(result?.match_type) === 'vector'
+              ? 'vector'
+              : safeText(result?.match_type) === 'fuzzy'
+                ? 'fuzzy'
+                : 'fts',
+          score: typeof result?.score === 'number' && Number.isFinite(result.score) ? result.score : 0,
+          lexical_score:
+            typeof result?.lexical_score === 'number' && Number.isFinite(result.lexical_score)
+              ? result.lexical_score
+              : undefined,
+          vector_score:
+            typeof result?.vector_score === 'number' && Number.isFinite(result.vector_score) ? result.vector_score : undefined,
+          recency_score:
+            typeof result?.recency_score === 'number' && Number.isFinite(result.recency_score)
+              ? result.recency_score
+              : undefined,
+          vector_distance:
+            typeof result?.vector_distance === 'number' && Number.isFinite(result.vector_distance)
+              ? result.vector_distance
+              : null,
+        }))
+      : []
+
+    return {
+      success: true,
+      action,
+      totalCount: noteSearchResults.length,
+      noteSearchResults,
     }
   }
 

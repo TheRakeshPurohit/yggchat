@@ -84,15 +84,15 @@ export const BUILTIN_TOOL_DEFINITIONS: SharedToolDefinition[] = [
     name: 'fetch_chats',
     enabled: true,
     description:
-      'Browse local chats and branches. Can list chats, fetch compact chat summaries by id, fetch notes for a conversation, or read a linear message segment from a specific branch starting at a message id.',
+      'Browse local chats and branches. Can list chats, fetch compact chat summaries by id, search chats, search top-level messages, search note summaries, fetch notes for a conversation, or read a linear message segment from a specific branch starting at a message id.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['list_chats', 'get_chats', 'search_chats', 'search_messages', 'get_notes', 'read_branch'],
+          enum: ['list_chats', 'get_chats', 'search_chats', 'search_messages', 'search_notes', 'get_notes', 'read_branch'],
           description:
-            'Action to perform: "list_chats" returns recent chats with compact metadata and top-level branch messages. "get_chats" returns one or more chats by conversation id. "search_chats" searches chats by title using the same local search path used by the sidebar. "search_messages" searches top-level user messages using the same local path used by the sidebar message search. "get_notes" returns all notes for a specific conversation with message ids. "read_branch" returns a linear segment of messages from a specific message id until a branch point or the end of the branch.',
+            'Action to perform: "list_chats" returns recent chats with compact metadata and top-level branch messages. "get_chats" returns one or more chats by conversation id. "search_chats" searches chats by title using the same local search path used by the sidebar. "search_messages" searches top-level user messages using the same local path used by the sidebar message search. "search_notes" searches note summaries using the note-memory search endpoint and returns matching conversation/message ids plus relevant note snippets. "get_notes" returns all notes for a specific conversation with message ids. "read_branch" returns a linear segment of messages from a specific message id until a branch point or the end of the branch.',
         },
         conversationId: {
           type: 'string',
@@ -105,15 +105,15 @@ export const BUILTIN_TOOL_DEFINITIONS: SharedToolDefinition[] = [
         },
         userId: {
           type: 'string',
-          description: 'User id for "search_chats". Optional when it can be inferred from the current conversation or provided conversationId.',
+          description: 'User id for "search_chats", "search_messages", or "search_notes". Optional when it can be inferred from the current conversation or provided conversationId.',
         },
         projectId: {
           type: 'string',
-          description: 'Optional project id filter for "search_chats".',
+          description: 'Optional project id filter for "search_chats", "search_messages", or "search_notes".',
         },
         query: {
           type: 'string',
-          description: 'Search query for "search_chats".',
+          description: 'Search query for "search_chats", "search_messages", or "search_notes".',
         },
         branchPointAncestorId: {
           type: 'string',

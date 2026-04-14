@@ -3,10 +3,16 @@
 
 import { v4 as uuidv4 } from 'uuid'
 import { ConversationId, MessageId, ToolDefinition as SharedToolDefinition } from '../../../../../shared/types'
+import { loadProviderSettings, resolveLmStudioBaseUrl } from '../../helpers/providerSettingsStorage'
 import { ContentBlock, Message, Model, ToolCall } from './chatTypes'
 import { getToolsForAI } from './toolDefinitions'
 
-const DEFAULT_LMSTUDIO_BASE = import.meta.env.VITE_LMSTUDIO_BASE || 'http://172.31.32.1:1234'
+const DEFAULT_LMSTUDIO_BASE = resolveLmStudioBaseUrl()
+
+function getLmStudioBaseUrl(): string {
+  const configured = loadProviderSettings().lmStudioBaseUrl
+  return configured || DEFAULT_LMSTUDIO_BASE
+}
 
 // Map internal ToolDefinition -> OpenAI tool schema
 function mapTools(tools: SharedToolDefinition[]) {
@@ -23,7 +29,7 @@ function mapTools(tools: SharedToolDefinition[]) {
 }
 
 // Fetch LM Studio models
-export async function fetchLmStudioModels(baseUrl = DEFAULT_LMSTUDIO_BASE): Promise<Model[]> {
+export async function fetchLmStudioModels(baseUrl = getLmStudioBaseUrl()): Promise<Model[]> {
   const res = await fetch(`${baseUrl}/v1/models`)
   if (!res.ok) {
     throw new Error(`LM Studio models fetch failed: HTTP ${res.status}`)
@@ -171,7 +177,7 @@ export interface LmStudioRequestPayload {
 export async function createLmStudioStreamingRequest(
   payload: LmStudioRequestPayload,
   handlers: LmStudioStreamHandlers,
-  baseUrl = DEFAULT_LMSTUDIO_BASE
+  baseUrl = getLmStudioBaseUrl()
 ) {
   const { onChunk, signal } = handlers
 

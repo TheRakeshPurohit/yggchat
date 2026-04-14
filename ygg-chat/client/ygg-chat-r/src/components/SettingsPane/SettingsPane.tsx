@@ -199,6 +199,8 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
       type?: 'stdio' | 'http'
       command?: string
       args?: string[]
+      env?: Record<string, string>
+      stdioFraming?: 'content-length' | 'newline-json'
       url?: string
       headers?: Record<string, string>
       oauth?: {
@@ -222,6 +224,8 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
   const [newServerTransport, setNewServerTransport] = useState<'stdio' | 'http'>('stdio')
   const [newServerCommand, setNewServerCommand] = useState('')
   const [newServerArgs, setNewServerArgs] = useState('')
+  const [newServerEnvText, setNewServerEnvText] = useState('')
+  const [newServerStdioFraming, setNewServerStdioFraming] = useState<'content-length' | 'newline-json'>('content-length')
   const [newServerUrl, setNewServerUrl] = useState('')
   const [newServerHeadersText, setNewServerHeadersText] = useState('')
   const [newServerOauthClientId, setNewServerOauthClientId] = useState('')
@@ -632,6 +636,32 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
     const command = newServerCommand.trim()
     const args = newServerArgs.trim().split(/\s+/).filter(Boolean)
     const url = newServerUrl.trim()
+
+    let parsedEnv: Record<string, string> | undefined
+    const envText = newServerEnvText.trim()
+
+    if (envText) {
+      try {
+        const parsed = JSON.parse(envText)
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          setMcpActionStatus({
+            type: 'error',
+            message: 'Environment variables must be a JSON object, e.g. {"BLENDER_HOST":"localhost"}',
+          })
+          return
+        }
+
+        parsedEnv = Object.fromEntries(
+          Object.entries(parsed).map(([key, value]) => [key, typeof value === 'string' ? value : String(value)])
+        )
+      } catch {
+        setMcpActionStatus({
+          type: 'error',
+          message: 'Invalid environment variables JSON. Example: {"BLENDER_HOST":"localhost","BLENDER_PORT":"9876"}',
+        })
+        return
+      }
+    }
     const oauthClientId = newServerOauthClientId.trim()
     const oauthClientSecret = newServerOauthClientSecret.trim()
     const oauthScopes = newServerOauthScopes
@@ -721,6 +751,8 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
               type: 'stdio' as const,
               command,
               args,
+              env: parsedEnv,
+              stdioFraming: newServerStdioFraming,
               enabled: true,
             }
 
@@ -730,6 +762,8 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
         setNewServerName('')
         setNewServerCommand('')
         setNewServerArgs('')
+        setNewServerEnvText('')
+        setNewServerStdioFraming('content-length')
         setNewServerUrl('')
         setNewServerHeadersText('')
         setNewServerOauthClientId('')
@@ -756,6 +790,8 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
     newServerTransport,
     newServerCommand,
     newServerArgs,
+    newServerEnvText,
+    newServerStdioFraming,
     newServerUrl,
     newServerHeadersText,
     newServerOauthClientId,
@@ -2177,6 +2213,34 @@ ${block}`
                               className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
                             />
                           </div>
+                          <div className='space-y-2'>
+                            <label className='text-xs font-medium text-neutral-600 dark:text-neutral-400'>
+                              Environment Variables (JSON, optional)
+                            </label>
+                            <textarea
+                              value={newServerEnvText}
+                              onChange={e => setNewServerEnvText(e.target.value)}
+                              placeholder='{"BLENDER_HOST":"localhost","BLENDER_PORT":"9876"}'
+                              rows={3}
+                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                            />
+                            <p className='text-[11px] text-neutral-500 dark:text-neutral-400'>
+                              Example: {`{"BLENDER_HOST":"localhost","BLENDER_PORT":"9876"}`}
+                            </p>
+                          </div>
+                          <div className='space-y-2'>
+                            <label className='text-xs font-medium text-neutral-600 dark:text-neutral-400'>
+                              stdio Framing
+                            </label>
+                            <select
+                              value={newServerStdioFraming}
+                              onChange={e => setNewServerStdioFraming(e.target.value as 'content-length' | 'newline-json')}
+                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                            >
+                              <option value='content-length'>content-length (standard MCP)</option>
+                              <option value='newline-json'>newline-json (Blender MCP compatibility)</option>
+                            </select>
+                          </div>
                         </>
                       ) : (
                         <>
@@ -2288,6 +2352,8 @@ ${block}`
                             setNewServerTransport('stdio')
                             setNewServerCommand('')
                             setNewServerArgs('')
+                            setNewServerEnvText('')
+                            setNewServerStdioFraming('content-length')
                             setNewServerUrl('')
                             setNewServerHeadersText('')
                             setNewServerOauthClientId('')
@@ -2305,9 +2371,10 @@ ${block}`
 
                   {/* Help text */}
                   <p className='text-xs text-neutral-500 dark:text-neutral-500'>
-                    Examples: Local stdio → Command "npx" + args "-y @modelcontextprotocol/server-filesystem
-                    /home/user/projects". Remote HTTP → URL "https://mcp.example.com/mcp" + optional headers JSON
-                    (Authorization, API keys, etc.).
+                    Examples: Local stdio → Command "C:\\mcp\\blender-mcp-venv\\Scripts\\blender-mcp.exe" + env JSON
+                    {` {"BLENDER_HOST":"localhost","BLENDER_PORT":"9876"} `} + stdio framing "newline-json" for Blender MCP.
+                    Remote HTTP → URL "https://mcp.example.com/mcp" + optional headers JSON (Authorization, API keys,
+                    etc.).
                   </p>
 
                   {/* Connected Servers List */}
@@ -2362,6 +2429,16 @@ ${block}`
                               <p className='text-xs text-neutral-500 dark:text-neutral-400 truncate mt-0.5'>
                                 {server.url || `${server.command || ''} ${(server.args || []).join(' ')}`.trim()}
                               </p>
+                              {server.env && Object.keys(server.env).length > 0 && (
+                                <p className='text-[11px] text-neutral-400 dark:text-neutral-500 truncate mt-0.5'>
+                                  env: {Object.keys(server.env).join(', ')}
+                                </p>
+                              )}
+                              {server.transport === 'stdio' && (
+                                <p className='text-[11px] text-neutral-400 dark:text-neutral-500 truncate mt-0.5'>
+                                  framing: {server.stdioFraming || 'content-length'}
+                                </p>
+                              )}
                               {server.headers && Object.keys(server.headers).length > 0 && (
                                 <p className='text-xs text-neutral-500 dark:text-neutral-400 mt-0.5'>
                                   Headers: {Object.keys(server.headers).join(', ')}

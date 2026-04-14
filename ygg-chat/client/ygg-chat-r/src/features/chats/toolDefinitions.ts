@@ -32,6 +32,9 @@ export interface ToolDefinition {
   appPermissions?: {
     agent?: 'read' | 'write'
   }
+  ui?: {
+    entry?: string
+  }
 }
 
 // Built-in tool definitions (static, shared source of truth)
@@ -56,6 +59,7 @@ const cloneTool = (tool: ToolDefinition): ToolDefinition => ({
     ? { ...tool.mcpUi, visibility: tool.mcpUi.visibility ? [...tool.mcpUi.visibility] : undefined }
     : undefined,
   appPermissions: tool.appPermissions ? { ...tool.appPermissions } : undefined,
+  ui: tool.ui ? { ...tool.ui } : undefined,
 })
 
 // Mutable array that holds merged tools (built-in + custom)

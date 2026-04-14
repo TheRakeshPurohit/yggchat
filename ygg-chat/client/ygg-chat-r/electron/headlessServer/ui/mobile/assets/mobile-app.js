@@ -64334,9 +64334,12 @@ var CustomToolIframe = ({
   html: html5,
   toolName = null,
   userId = null,
-  rootPath = null
+  rootPath = null,
+  src = null,
+  warning = null
 }) => {
   const iframeRef = (0, import_react26.useRef)(null);
+  const [acknowledged, setAcknowledged] = (0, import_react26.useState)(false);
   (0, import_react26.useEffect)(() => {
     const iframe = iframeRef.current;
     if (!iframe) return;
@@ -64347,11 +64350,18 @@ var CustomToolIframe = ({
     });
     return () => cleanup();
   }, [rootPath, toolName, userId]);
-  return /* @__PURE__ */ import_react26.default.createElement("div", { className: "mobile-custom-tool-iframe-wrap" }, /* @__PURE__ */ import_react26.default.createElement(
+  const shouldGate = Boolean(src && warning && !acknowledged);
+  const resolvedSrc = (0, import_react26.useMemo)(() => {
+    if (src) return src;
+    if (!html5) return void 0;
+    return void 0;
+  }, [src, html5]);
+  return /* @__PURE__ */ import_react26.default.createElement("div", { className: "mobile-custom-tool-iframe-wrap" }, shouldGate ? /* @__PURE__ */ import_react26.default.createElement("div", { className: "mobile-custom-tool-warning" }, /* @__PURE__ */ import_react26.default.createElement("div", { className: "mobile-custom-tool-warning-title" }, "Desktop-oriented custom app"), /* @__PURE__ */ import_react26.default.createElement("div", { className: "mobile-custom-tool-warning-body" }, warning), /* @__PURE__ */ import_react26.default.createElement("button", { type: "button", className: "mobile-tool-app-toggle", onClick: () => setAcknowledged(true) }, "Proceed anyway")) : /* @__PURE__ */ import_react26.default.createElement(
     "iframe",
     {
       ref: iframeRef,
-      srcDoc: html5,
+      src: resolvedSrc,
+      srcDoc: !resolvedSrc ? html5 : void 0,
       className: "mobile-custom-tool-iframe",
       style: { border: "none" },
       title: toolName ? `Custom Tool: ${toolName}` : "Custom Tool App",
@@ -64363,6 +64373,12 @@ var CustomToolIframe = ({
 };
 
 // electron/headlessServer/ui/mobile/src/components/ToolCallCard.tsx
+var LOCAL_UI_BASE = "/api/headless/custom-tools/ui/";
+var buildRemoteCustomToolUiUrl = (toolName) => {
+  const trimmed = String(toolName || "").trim();
+  if (!trimmed) return null;
+  return `${LOCAL_UI_BASE}${encodeURIComponent(trimmed)}/`;
+};
 var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var findPathHint = (args) => {
   if (!args) return null;
@@ -64426,6 +64442,8 @@ var renderToolResult = (result, index3, groupId, options) => {
       CustomToolIframe,
       {
         html: htmlPayload.html,
+        src: buildRemoteCustomToolUiUrl(htmlPayload.toolName ?? options.fallbackToolName ?? null),
+        warning: "This custom app may rely on desktop-only capabilities. Some actions may fail in remote/browser mode, but you can still try opening it.",
         toolName: htmlPayload.toolName ?? options.fallbackToolName ?? null,
         userId: options.currentUserId ?? null,
         rootPath: options.rootPath ?? null

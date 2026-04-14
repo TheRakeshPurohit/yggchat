@@ -9,6 +9,7 @@ export const MIN_OPENROUTER_TEMPERATURE = 0
 export const MAX_OPENROUTER_TEMPERATURE = 2
 export const DEFAULT_COMPACTION_SYSTEM_PROMPT =
   'You compact chat history. Return detailed markdown that preserves goals, hard requirements, key facts, decisions, pending tasks, and unresolved questions. Do not include tool protocol chatter, but include general context around changes made instead. Include full absolute paths of files touched/edited, and brief summary of what changed.'
+export const DEFAULT_LMSTUDIO_BASE_URL = import.meta.env.VITE_LMSTUDIO_BASE || 'http://172.31.32.1:1234'
 
 export interface ProviderSettings {
   /** Whether the provider selector is visible in the chat UI */
@@ -23,6 +24,8 @@ export interface ProviderSettings {
   compactionModel: string | null
   /** System prompt used by auto-compaction summarization. */
   compactionSystemPrompt: string
+  /** Optional LM Studio server base URL override. Null = use app default. */
+  lmStudioBaseUrl: string | null
 }
 
 const DEFAULT_SETTINGS: ProviderSettings = {
@@ -32,6 +35,7 @@ const DEFAULT_SETTINGS: ProviderSettings = {
   compactionProvider: null,
   compactionModel: null,
   compactionSystemPrompt: DEFAULT_COMPACTION_SYSTEM_PROMPT,
+  lmStudioBaseUrl: null,
 }
 
 const COMMUNITY_ALLOWED_PROVIDERS = new Set(['LM Studio', 'OpenAI (ChatGPT)'])
@@ -48,6 +52,42 @@ function normalizeCompactionSystemPrompt(value: unknown): string {
   if (typeof value !== 'string') return DEFAULT_COMPACTION_SYSTEM_PROMPT
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : DEFAULT_COMPACTION_SYSTEM_PROMPT
+}
+
+export function normalizeLmStudioBaseUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+
+  const trimmed = value.trim()
+  if (!trimmed) return null
+
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null
+    }
+
+    const normalizedPath = parsed.pathname.replace(/\/+$/, '').replace(/\/v1$/i, '')
+    const suffix = normalizedPath && normalizedPath !== '/' ? normalizedPath : ''
+    return `${parsed.origin}${suffix}`
+  } catch {
+    return null
+  }
+}
+
+export function resolveLmStudioBaseUrl(): string {
+  return normalizeLmStudioBaseUrl(loadProviderSettings().lmStudioBaseUrl) || DEFAULT_LMSTUDIO_BASE_URL
+}
+
+function syncProviderSettingsToElectronStore(settings: ProviderSettings): void {
+  if (typeof window === 'undefined') return
+  if (import.meta.env.VITE_ENVIRONMENT !== 'electron') return
+
+  const storageApi = window.electronAPI?.storage
+  if (!storageApi?.set) return
+
+  void storageApi.set(STORAGE_KEY, settings).catch(error => {
+    console.error('Failed to mirror provider settings to Electron storage:', error)
+  })
 }
 
 /**
@@ -71,6 +111,7 @@ export function loadProviderSettings(): ProviderSettings {
       compactionProvider: parsed.compactionProvider ?? DEFAULT_SETTINGS.compactionProvider,
       compactionModel: parsed.compactionModel ?? DEFAULT_SETTINGS.compactionModel,
       compactionSystemPrompt: normalizeCompactionSystemPrompt(parsed.compactionSystemPrompt),
+      lmStudioBaseUrl: normalizeLmStudioBaseUrl(parsed.lmStudioBaseUrl),
     }
   } catch {
     return {
@@ -88,11 +129,13 @@ export function saveProviderSettings(settings: ProviderSettings): void {
     ...settings,
     openRouterTemperature: normalizeOpenRouterTemperature(settings.openRouterTemperature),
     compactionSystemPrompt: normalizeCompactionSystemPrompt(settings.compactionSystemPrompt),
+    lmStudioBaseUrl: normalizeLmStudioBaseUrl(settings.lmStudioBaseUrl),
   }
 
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized))
     window.dispatchEvent(new CustomEvent(PROVIDER_SETTINGS_CHANGE_EVENT, { detail: normalized }))
+    syncProviderSettingsToElectronStore(normalized)
   } catch (error) {
     console.error('Failed to save provider settings:', error)
   }

@@ -5,6 +5,14 @@ import { CustomToolIframe } from './CustomToolIframe'
 import type { ToolGroup, ToolResultLike } from '../types'
 import { extractHtmlFromToolResult, toReadableToolResult } from '../messageParser'
 
+const LOCAL_UI_BASE = '/api/headless/custom-tools/ui/'
+
+const buildRemoteCustomToolUiUrl = (toolName: string | null | undefined): string | null => {
+  const trimmed = String(toolName || '').trim()
+  if (!trimmed) return null
+  return `${LOCAL_UI_BASE}${encodeURIComponent(trimmed)}/`
+}
+
 interface ToolCallCardProps {
   group: ToolGroup
   defaultExpanded?: boolean
@@ -133,6 +141,8 @@ const renderToolResult = (
             ) : null}
             <CustomToolIframe
               html={htmlPayload.html}
+              src={buildRemoteCustomToolUiUrl(htmlPayload.toolName ?? options.fallbackToolName ?? null)}
+              warning='This custom app may rely on desktop-only capabilities. Some actions may fail in remote/browser mode, but you can still try opening it.'
               toolName={htmlPayload.toolName ?? options.fallbackToolName ?? null}
               userId={options.currentUserId ?? null}
               rootPath={options.rootPath ?? null}

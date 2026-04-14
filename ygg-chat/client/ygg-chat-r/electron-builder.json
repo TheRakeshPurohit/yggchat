@@ -20,7 +20,11 @@
     "**/node_modules/bindings/**/*",
     "**/node_modules/file-uri-to-path/**/*",
     "**/node_modules/electron-updater/**/*",
-    "**/node_modules/node-pty/**/*"
+    "**/node_modules/node-pty/**/*",
+    "**/node_modules/sqlite-vec/**/*",
+    "**/node_modules/sqlite-vec-*/*",
+    "**/node_modules/@sqlite/vec/**/*",
+    "**/node_modules/@sqlite/vec-*/*"
   ],
   "extraResources": [
     {

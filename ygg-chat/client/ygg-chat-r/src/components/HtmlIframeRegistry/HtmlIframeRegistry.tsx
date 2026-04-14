@@ -10,7 +10,7 @@ import React, {
   useState,
 } from 'react'
 import type { ContentBlock, Message } from '../../features/chats/chatTypes'
-import { getMcpTools, type ToolDefinition } from '../../features/chats/toolDefinitions'
+import { getMcpTools, getToolByName, type ToolDefinition } from '../../features/chats/toolDefinitions'
 import type { Conversation } from '../../features/conversations/conversationTypes'
 import { useAuth } from '../../hooks/useAuth'
 import {
@@ -19,7 +19,7 @@ import {
   useHtmlToolsCache,
   type HtmlToolRecord,
 } from '../../hooks/useQueries'
-import { environment, localApi } from '../../utils/api'
+import { buildCachedLocalApiUrl, environment, localApi } from '../../utils/api'
 import { attachMessageBridge as attachSharedMessageBridge } from '../../utils/iframeBridge'
 import {
   buildCspValue,
@@ -50,6 +50,7 @@ type HtmlIframeEntryBase = {
 type HtmlIframeHtmlEntry = HtmlIframeEntryBase & {
   kind: 'html'
   html: string
+  src?: string | null
 }
 
 type HtmlIframeMcpEntry = HtmlIframeEntryBase & {
@@ -135,6 +136,7 @@ type HtmlIframeRegistryContextValue = {
 type IframeRecord = {
   iframe: HTMLIFrameElement
   html: string
+  src?: string | null
   fullHeight: boolean
   toolName?: string | null
   cleanup: () => void
@@ -545,10 +547,19 @@ const createIframeRecord = (
   const iframe = document.createElement('iframe')
   configureIframeElement(iframe)
   iframe.className = getIframeClassName(fullHeight)
-  iframe.srcdoc = html
+  const customTool = toolName ? getToolByName(toolName) : undefined
+  const src = customTool?.isCustom && customTool.ui?.entry
+    ? buildCachedLocalApiUrl(`/headless/custom-tools/ui/${encodeURIComponent(customTool.name)}/`)
+    : null
+  if (src) {
+    iframe.src = src
+  } else {
+    iframe.srcdoc = html
+  }
   const record: IframeRecord = {
     iframe,
     html,
+    src,
     fullHeight,
     toolName,
     cleanup: () => {},
@@ -1214,10 +1225,17 @@ export const HtmlIframeRegistryProvider: React.FC<{
         existingHtmlEntry && existingHtmlEntry.html === html
           ? existingHtmlEntry.lastUsedAt
           : (existingEntry?.lastUsedAt ?? now)
+      const nextSrc = (() => {
+        const customTool = nextToolName ? getToolByName(nextToolName) : undefined
+        return customTool?.isCustom && customTool.ui?.entry
+          ? buildCachedLocalApiUrl(`/headless/custom-tools/ui/${encodeURIComponent(customTool.name)}/`)
+          : null
+      })()
       const nextEntry: HtmlIframeHtmlEntry = {
         key,
         kind: 'html',
         html,
+        src: nextSrc,
         label: nextLabel,
         favorite: existingEntry?.favorite ?? false,
         status: existingEntry?.status ?? 'active',
@@ -1421,8 +1439,22 @@ export const HtmlIframeRegistryProvider: React.FC<{
         logHtmlTools('iframe-create', { key, fullHeight })
       } else {
         record.toolName = meta?.toolName ?? record.toolName ?? null
-        if (record.html !== html) {
+        const customTool = record.toolName ? getToolByName(record.toolName) : undefined
+        const nextSrc = customTool?.isCustom && customTool.ui?.entry
+          ? buildCachedLocalApiUrl(`/headless/custom-tools/ui/${encodeURIComponent(customTool.name)}/`)
+          : null
+        if (record.src !== nextSrc) {
+          record.src = nextSrc
+          if (nextSrc) {
+            record.iframe.src = nextSrc
+          } else {
+            record.iframe.srcdoc = html
+          }
+        }
+        if (!record.src && record.html !== html) {
           record.iframe.srcdoc = html
+          record.html = html
+        } else {
           record.html = html
         }
         if (record.fullHeight !== fullHeight) {
@@ -1437,10 +1469,17 @@ export const HtmlIframeRegistryProvider: React.FC<{
       const nextLabel = label ?? existingEntry?.label ?? null
       const nextToolName = meta?.toolName ?? existingEntry?.toolName ?? null
       const sizeBytes = getHtmlSizeBytes(html)
+      const nextSrc = (() => {
+        const customTool = nextToolName ? getToolByName(nextToolName) : undefined
+        return customTool?.isCustom && customTool.ui?.entry
+          ? buildCachedLocalApiUrl(`/headless/custom-tools/ui/${encodeURIComponent(customTool.name)}/`)
+          : null
+      })()
       const nextEntry: HtmlIframeHtmlEntry = {
         key,
         kind: 'html',
         html,
+        src: nextSrc,
         label: nextLabel,
         favorite: existingEntry?.favorite ?? false,
         status: existingEntry?.status === 'hibernated' ? 'active' : (existingEntry?.status ?? 'active'),

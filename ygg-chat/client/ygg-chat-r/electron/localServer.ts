@@ -9,6 +9,7 @@ import crypto from 'crypto'
 import { app as electronApp } from 'electron'
 import express from 'express'
 import fs from 'fs'
+import { createRequire as createNodeRequire } from 'module'
 import type { AddressInfo } from 'net'
 import path from 'path'
 import { v4 as uuidv4 } from 'uuid'
@@ -18,6 +19,7 @@ import { isManagedToolPath } from './utils/managedToolPaths.js'
 
 // Tool imports
 import { registerHeadlessServerRoutes } from './headlessServer/index.js'
+import { embedText as embedTextWithLmStudio, embedTexts as embedTextsWithLmStudio, getLmStudioBaseUrl } from './headlessServer/providers/lmStudioEmbeddings.js'
 import {
   handleLspWebSocketUpgrade,
   initializeLspLocalServer,
@@ -751,6 +753,9 @@ function initializeBuiltInToolRegistry() {
         if (typeof searchTopLevelUserMessages !== 'function') return []
         return searchTopLevelUserMessages({ userId, projectId, query, limit })
       },
+      searchNotes: ({ userId, projectId, query, limit }) => {
+        return searchNotes({ userId, query, projectId, limit })
+      },
       listMessagesByConversationId: conversationId => {
         const getter = statements?.getMessagesByConversationId
         if (!getter || typeof getter.all !== 'function') return []
@@ -1246,6 +1251,112 @@ let oauthCallbackServer: any = null // OAuth callback server on port 1455
 let db: Database.Database | null = null
 let statements: any = {}
 let currentDbPath: string | null = null
+let sqliteVecAvailable = false
+let sqliteVecLoadError: string | null = null
+
+const requireCjs = createNodeRequire(import.meta.url)
+
+const sqliteVecLoadCandidates: Array<{ label: string; loader: () => string }> = [
+  {
+    label: '@sqlite/vec',
+    loader: () => {
+      const sqliteVecModule = requireCjs('@sqlite/vec') as any
+      if (typeof sqliteVecModule?.getLoadablePath === 'function') {
+        const loaded = sqliteVecModule.getLoadablePath()
+        if (typeof loaded === 'string') return loaded
+      }
+      if (typeof sqliteVecModule?.default?.getLoadablePath === 'function') {
+        const loaded = sqliteVecModule.default.getLoadablePath()
+        if (typeof loaded === 'string') return loaded
+      }
+      if (typeof sqliteVecModule?.path === 'string') return sqliteVecModule.path
+      if (typeof sqliteVecModule?.default?.path === 'string') return sqliteVecModule.default.path
+      if (typeof sqliteVecModule?.load === 'function') {
+        const loaded = sqliteVecModule.load()
+        if (typeof loaded === 'string') return loaded
+      }
+      if (typeof sqliteVecModule?.default === 'function') {
+        const loaded = sqliteVecModule.default()
+        if (typeof loaded === 'string') return loaded
+      }
+      if (typeof sqliteVecModule?.default?.load === 'function') {
+        const loaded = sqliteVecModule.default.load()
+        if (typeof loaded === 'string') return loaded
+      }
+      if (typeof sqliteVecModule === 'string') return sqliteVecModule
+      throw new Error('Module loaded but no extension path export found')
+    },
+  },
+  {
+    label: 'sqlite-vec',
+    loader: () => {
+      const sqliteVecModule = requireCjs('sqlite-vec') as any
+      if (typeof sqliteVecModule?.getLoadablePath === 'function') {
+        const loaded = sqliteVecModule.getLoadablePath()
+        if (typeof loaded === 'string') return loaded
+      }
+      if (typeof sqliteVecModule?.default?.getLoadablePath === 'function') {
+        const loaded = sqliteVecModule.default.getLoadablePath()
+        if (typeof loaded === 'string') return loaded
+      }
+      if (typeof sqliteVecModule?.path === 'string') return sqliteVecModule.path
+      if (typeof sqliteVecModule?.default?.path === 'string') return sqliteVecModule.default.path
+      if (typeof sqliteVecModule?.load === 'function') {
+        const loaded = sqliteVecModule.load()
+        if (typeof loaded === 'string') return loaded
+      }
+      if (typeof sqliteVecModule?.default === 'function') {
+        const loaded = sqliteVecModule.default()
+        if (typeof loaded === 'string') return loaded
+      }
+      if (typeof sqliteVecModule?.default?.load === 'function') {
+        const loaded = sqliteVecModule.default.load()
+        if (typeof loaded === 'string') return loaded
+      }
+      if (typeof sqliteVecModule === 'string') return sqliteVecModule
+      throw new Error('Module loaded but no extension path export found')
+    },
+  },
+]
+
+function resolveSqliteExtensionLoadPath(extensionPath: string): string {
+  if (typeof extensionPath !== 'string' || extensionPath.trim().length === 0) {
+    return extensionPath
+  }
+
+  const trimmed = extensionPath.trim()
+  const unpackedCandidate = trimmed.replace(/\.asar([\\/])/i, '.asar.unpacked$1')
+  if (unpackedCandidate !== trimmed && fs.existsSync(unpackedCandidate)) {
+    return unpackedCandidate
+  }
+
+  return trimmed
+}
+
+function tryEnableSqliteVec(database: Database.Database): { available: boolean; loadedFrom?: string; error?: string } {
+  const failureReasons: string[] = []
+
+  for (const candidate of sqliteVecLoadCandidates) {
+    try {
+      const rawExtensionPath = candidate.loader()
+      const extensionPath = resolveSqliteExtensionLoadPath(rawExtensionPath)
+      database.loadExtension(extensionPath)
+      return { available: true, loadedFrom: candidate.label }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      failureReasons.push(`${candidate.label}: ${reason}`)
+      console.debug(`[LocalServer] sqlite-vec candidate ${candidate.label} not available: ${reason}`)
+    }
+  }
+
+  return {
+    available: false,
+    error:
+      failureReasons.length > 0
+        ? `sqlite-vec failed to load (${failureReasons.join(' | ')})`
+        : 'sqlite-vec extension package not installed or failed to load',
+  }
+}
 
 // Initialize database at specified path
 function initializeLocalDatabase(dbPath: string) {
@@ -1266,6 +1377,15 @@ function initializeLocalDatabase(dbPath: string) {
 
   db = new Database(dbPath)
   db.pragma('foreign_keys = ON')
+
+  const sqliteVecStatus = tryEnableSqliteVec(db)
+  sqliteVecAvailable = sqliteVecStatus.available
+  sqliteVecLoadError = sqliteVecStatus.available ? null : sqliteVecStatus.error || 'unknown error'
+  if (sqliteVecAvailable) {
+    console.log(`[LocalServer] sqlite-vec enabled (${sqliteVecStatus.loadedFrom || 'unknown loader'})`)
+  } else {
+    console.warn(`[LocalServer] sqlite-vec unavailable: ${sqliteVecLoadError}`)
+  }
 
   // Create tables (minimal schema for sync operations)
   db.exec(`
@@ -1593,6 +1713,346 @@ function initializeLocalDatabase(dbPath: string) {
 
   if (topLevelMessageFtsAvailable) {
     console.log('[LocalServer] Top-level message FTS index ready')
+  }
+
+  // Note search docs + FTS index for per-message notes (best effort)
+  let noteSearchFtsAvailable = false
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS note_search_docs (
+        message_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        project_id TEXT,
+        user_id TEXT NOT NULL,
+        storage_mode TEXT NOT NULL CHECK (storage_mode IN ('cloud','local')) DEFAULT 'local',
+        conversation_title TEXT,
+        note TEXT NOT NULL,
+        message_created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        note_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+        FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_note_search_docs_user_note_updated
+        ON note_search_docs(user_id, note_updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_note_search_docs_user_project_note_updated
+        ON note_search_docs(user_id, project_id, note_updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_note_search_docs_conversation_id
+        ON note_search_docs(conversation_id);
+
+      CREATE TABLE IF NOT EXISTS note_search_embedding_state (
+        message_id TEXT PRIMARY KEY,
+        content_hash TEXT,
+        embedding_model TEXT,
+        embedding_dimensions INTEGER,
+        embedding_updated_at DATETIME,
+        embedding_status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (embedding_status IN ('pending','ready','error','stale')),
+        last_error TEXT,
+        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS note_search_vector_config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        embedding_model TEXT,
+        embedding_dimensions INTEGER,
+        vector_table_name TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      INSERT OR IGNORE INTO note_search_vector_config (id, vector_table_name) VALUES (1, 'note_search_vec');
+    `)
+
+    try {
+      const vectorConfigColumns = db.prepare(`PRAGMA table_info(note_search_vector_config)`).all() as { name: string }[]
+      const vectorConfigColumnNames = new Set(vectorConfigColumns.map(col => col.name))
+      if (!vectorConfigColumnNames.has('embedding_model')) {
+        db.exec(`ALTER TABLE note_search_vector_config ADD COLUMN embedding_model TEXT`)
+      }
+      if (!vectorConfigColumnNames.has('embedding_dimensions')) {
+        db.exec(`ALTER TABLE note_search_vector_config ADD COLUMN embedding_dimensions INTEGER`)
+      }
+      if (!vectorConfigColumnNames.has('vector_table_name')) {
+        db.exec(`ALTER TABLE note_search_vector_config ADD COLUMN vector_table_name TEXT`)
+      }
+      if (!vectorConfigColumnNames.has('updated_at')) {
+        db.exec(`ALTER TABLE note_search_vector_config ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP`)
+      }
+    } catch (vectorConfigMigrationError) {
+      console.warn('[LocalServer] Failed to migrate note_search_vector_config table:', vectorConfigMigrationError)
+    }
+
+    if (sqliteVecAvailable) {
+      const configuredDimensionsRow = db.prepare(
+        `SELECT embedding_dimensions, vector_table_name FROM note_search_vector_config WHERE id = 1`
+      ).get() as { embedding_dimensions?: number | null; vector_table_name?: string | null } | undefined
+      const configuredDimensions = Number(configuredDimensionsRow?.embedding_dimensions || 0)
+      const vectorTableName =
+        typeof configuredDimensionsRow?.vector_table_name === 'string' && configuredDimensionsRow.vector_table_name.trim().length > 0
+          ? configuredDimensionsRow.vector_table_name.trim()
+          : 'note_search_vec'
+
+      if (configuredDimensions > 0) {
+        db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS ${vectorTableName} USING vec0(
+            message_id TEXT PRIMARY KEY,
+            embedding float[${configuredDimensions}],
+            user_id TEXT partition key,
+            project_id TEXT,
+            storage_mode TEXT,
+            conversation_id TEXT,
+            note_updated_at TEXT
+          );
+        `)
+      }
+    }
+
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS note_search_fts USING fts5(
+        message_id UNINDEXED,
+        conversation_title,
+        note,
+        tokenize = 'unicode61 remove_diacritics 2'
+      );
+    `)
+
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS note_search_docs_fts_insert
+      AFTER INSERT ON note_search_docs
+      BEGIN
+        INSERT INTO note_search_fts (message_id, conversation_title, note)
+        VALUES (
+          NEW.message_id,
+          COALESCE(NEW.conversation_title, ''),
+          COALESCE(NEW.note, '')
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS note_search_docs_fts_update
+      AFTER UPDATE ON note_search_docs
+      BEGIN
+        DELETE FROM note_search_fts WHERE message_id = OLD.message_id;
+        INSERT INTO note_search_fts (message_id, conversation_title, note)
+        VALUES (
+          NEW.message_id,
+          COALESCE(NEW.conversation_title, ''),
+          COALESCE(NEW.note, '')
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS note_search_docs_fts_delete
+      AFTER DELETE ON note_search_docs
+      BEGIN
+        DELETE FROM note_search_fts WHERE message_id = OLD.message_id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_messages_insert
+      AFTER INSERT ON messages
+      WHEN LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0
+      BEGIN
+        INSERT INTO note_search_docs (
+          message_id,
+          conversation_id,
+          project_id,
+          user_id,
+          storage_mode,
+          conversation_title,
+          note,
+          message_created_at,
+          note_updated_at
+        )
+        SELECT
+          NEW.id,
+          NEW.conversation_id,
+          c.project_id,
+          c.user_id,
+          c.storage_mode,
+          c.title,
+          NEW.note,
+          COALESCE(NEW.created_at, CURRENT_TIMESTAMP),
+          CURRENT_TIMESTAMP
+        FROM conversations c
+        WHERE c.id = NEW.conversation_id;
+
+        INSERT OR REPLACE INTO note_search_embedding_state (
+          message_id,
+          content_hash,
+          embedding_model,
+          embedding_dimensions,
+          embedding_updated_at,
+          embedding_status,
+          last_error
+        ) VALUES (
+          NEW.id,
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          'pending',
+          NULL
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_messages_update
+      AFTER UPDATE ON messages
+      BEGIN
+        DELETE FROM note_search_docs WHERE message_id = OLD.id;
+        INSERT INTO note_search_docs (
+          message_id,
+          conversation_id,
+          project_id,
+          user_id,
+          storage_mode,
+          conversation_title,
+          note,
+          message_created_at,
+          note_updated_at
+        )
+        SELECT
+          NEW.id,
+          NEW.conversation_id,
+          c.project_id,
+          c.user_id,
+          c.storage_mode,
+          c.title,
+          NEW.note,
+          COALESCE(NEW.created_at, CURRENT_TIMESTAMP),
+          CURRENT_TIMESTAMP
+        FROM conversations c
+        WHERE c.id = NEW.conversation_id
+          AND LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0;
+
+        DELETE FROM note_search_embedding_state
+        WHERE message_id = OLD.id
+          AND LENGTH(TRIM(COALESCE(NEW.note, ''))) = 0;
+
+        INSERT OR REPLACE INTO note_search_embedding_state (
+          message_id,
+          content_hash,
+          embedding_model,
+          embedding_dimensions,
+          embedding_updated_at,
+          embedding_status,
+          last_error
+        )
+        SELECT
+          NEW.id,
+          NULL,
+          s.embedding_model,
+          s.embedding_dimensions,
+          s.embedding_updated_at,
+          'stale',
+          NULL
+        FROM note_search_embedding_state s
+        WHERE s.message_id = OLD.id
+          AND LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0;
+
+        INSERT OR IGNORE INTO note_search_embedding_state (
+          message_id,
+          content_hash,
+          embedding_model,
+          embedding_dimensions,
+          embedding_updated_at,
+          embedding_status,
+          last_error
+        )
+        SELECT
+          NEW.id,
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          'pending',
+          NULL
+        WHERE LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_messages_delete
+      AFTER DELETE ON messages
+      BEGIN
+        DELETE FROM note_search_docs WHERE message_id = OLD.id;
+        DELETE FROM note_search_embedding_state WHERE message_id = OLD.id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_conversations_update
+      AFTER UPDATE ON conversations
+      BEGIN
+        UPDATE note_search_docs
+        SET
+          project_id = NEW.project_id,
+          user_id = NEW.user_id,
+          storage_mode = NEW.storage_mode,
+          conversation_title = NEW.title,
+          note_updated_at = CURRENT_TIMESTAMP
+        WHERE conversation_id = NEW.id;
+      END;
+    `)
+
+    db.exec(`DELETE FROM note_search_docs;`)
+    db.exec(`DELETE FROM note_search_fts;`)
+    db.exec(`
+      INSERT INTO note_search_docs (
+        message_id,
+        conversation_id,
+        project_id,
+        user_id,
+        storage_mode,
+        conversation_title,
+        note,
+        message_created_at,
+        note_updated_at
+      )
+      SELECT
+        m.id,
+        m.conversation_id,
+        c.project_id,
+        c.user_id,
+        c.storage_mode,
+        c.title,
+        m.note,
+        COALESCE(m.created_at, CURRENT_TIMESTAMP),
+        CURRENT_TIMESTAMP
+      FROM messages m
+      INNER JOIN conversations c ON c.id = m.conversation_id
+      WHERE LENGTH(TRIM(COALESCE(m.note, ''))) > 0;
+    `)
+
+    db.exec(`
+      DELETE FROM note_search_embedding_state
+      WHERE message_id NOT IN (SELECT message_id FROM note_search_docs);
+    `)
+    db.exec(`
+      INSERT OR IGNORE INTO note_search_embedding_state (
+        message_id,
+        content_hash,
+        embedding_model,
+        embedding_dimensions,
+        embedding_updated_at,
+        embedding_status,
+        last_error
+      )
+      SELECT
+        d.message_id,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        'pending',
+        NULL
+      FROM note_search_docs d;
+    `)
+
+    noteSearchFtsAvailable = true
+  } catch (noteSearchError) {
+    console.warn(
+      '[LocalServer] Note search schema/FTS unavailable. Falling back to basic note search.',
+      noteSearchError
+    )
+  }
+
+  if (noteSearchFtsAvailable) {
+    console.log('[LocalServer] Note search FTS index ready')
   }
 
   // Triggers to maintain children_ids integrity
@@ -4285,6 +4745,8 @@ function setupServer() {
     try {
       const definitions = customToolRegistry.getDefinitions()
       const statuses = customToolRegistry.getStatuses()
+      // const tools = definitions.map(tool => ({ ...tool, ui: tool.ui }))
+      // redundant gpt things 
       res.json({ success: true, tools: definitions, statuses, settings: customToolRegistry.getSettings() })
     } catch (error) {
       console.error('[LocalServer] Error getting custom tools:', error)
@@ -6224,6 +6686,999 @@ function setupServer() {
     return `${prefix}${text.slice(start, end).trim()}${suffix}`
   }
 
+  const NOTE_SEARCH_FTS_CANDIDATE_LIMIT = 220
+  const NOTE_SEARCH_FUZZY_CANDIDATE_LIMIT = 1200
+  const NOTE_SEARCH_VECTOR_CANDIDATE_LIMIT = 80
+
+  const normalizeEmbeddingInput = (embedding: unknown): number[] => {
+    if (Array.isArray(embedding)) {
+      return embedding.map(value => Number(value)).filter(value => Number.isFinite(value))
+    }
+
+    if (typeof embedding === 'string') {
+      try {
+        const parsed = JSON.parse(embedding)
+        return normalizeEmbeddingInput(parsed)
+      } catch {
+        return []
+      }
+    }
+
+    return []
+  }
+
+  const computeNoteContentHash = (note: string) => crypto.createHash('sha256').update(note, 'utf8').digest('hex')
+
+  const getNoteVectorConfig = () => {
+    const row = db!
+      .prepare(
+        `SELECT embedding_model, embedding_dimensions, vector_table_name, updated_at FROM note_search_vector_config WHERE id = 1`
+      )
+      .get() as
+      | {
+          embedding_model?: string | null
+          embedding_dimensions?: number | null
+          vector_table_name?: string | null
+          updated_at?: string | null
+        }
+      | undefined
+
+    return {
+      embedding_model: row?.embedding_model || null,
+      embedding_dimensions: Number(row?.embedding_dimensions || 0),
+      vector_table_name:
+        typeof row?.vector_table_name === 'string' && row.vector_table_name.trim().length > 0
+          ? row.vector_table_name.trim()
+          : 'note_search_vec',
+      updated_at: row?.updated_at || null,
+    }
+  }
+
+  const ensureNoteVectorTable = (dimensions: number) => {
+    if (!sqliteVecAvailable) {
+      throw new Error(sqliteVecLoadError || 'sqlite-vec unavailable')
+    }
+
+    const normalizedDimensions = Math.max(0, Math.floor(Number(dimensions)))
+    if (!normalizedDimensions) {
+      throw new Error('embedding dimensions must be a positive integer')
+    }
+
+    const vectorConfig = getNoteVectorConfig()
+    const vectorTableName = vectorConfig.vector_table_name
+
+    if (vectorConfig.embedding_dimensions && vectorConfig.embedding_dimensions !== normalizedDimensions) {
+      throw new Error(
+        `Existing note vector dimensions (${vectorConfig.embedding_dimensions}) do not match requested dimensions (${normalizedDimensions})`
+      )
+    }
+
+    db!.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS ${vectorTableName} USING vec0(
+        message_id TEXT PRIMARY KEY,
+        embedding float[${normalizedDimensions}],
+        user_id TEXT partition key,
+        project_id TEXT,
+        storage_mode TEXT,
+        conversation_id TEXT,
+        note_updated_at TEXT
+      );
+    `)
+
+    db!
+      .prepare(
+        `
+        UPDATE note_search_vector_config
+        SET embedding_dimensions = ?,
+            vector_table_name = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+      `
+      )
+      .run(normalizedDimensions, vectorTableName)
+
+    return { ...getNoteVectorConfig(), embedding_dimensions: normalizedDimensions }
+  }
+
+  const getNoteVectorStatus = () => {
+    const vectorConfig = getNoteVectorConfig()
+    return {
+      available: sqliteVecAvailable,
+      error: sqliteVecLoadError,
+      embedding_model: vectorConfig.embedding_model,
+      embedding_dimensions: vectorConfig.embedding_dimensions || null,
+      vector_table_name: vectorConfig.vector_table_name,
+      configured: sqliteVecAvailable && vectorConfig.embedding_dimensions > 0,
+    }
+  }
+
+  const upsertNoteEmbedding = (params: {
+    messageId: string
+    embedding: unknown
+    embeddingModel?: string
+    expectedUserId?: string
+  }) => {
+    const embedding = normalizeEmbeddingInput(params.embedding)
+    if (embedding.length === 0) {
+      throw new Error('embedding must be a non-empty numeric array')
+    }
+
+    const vectorConfig = ensureNoteVectorTable(embedding.length)
+    const doc = db!
+      .prepare(
+        `
+        SELECT
+          message_id,
+          conversation_id,
+          project_id,
+          user_id,
+          storage_mode,
+          note,
+          note_updated_at
+        FROM note_search_docs
+        WHERE message_id = ?
+      `
+      )
+      .get(params.messageId) as
+      | {
+          message_id: string
+          conversation_id: string
+          project_id: string | null
+          user_id: string
+          storage_mode: string
+          note: string
+          note_updated_at: string
+        }
+      | undefined
+
+    if (!doc) {
+      throw new Error('note search document not found for message_id')
+    }
+
+    if (params.expectedUserId && doc.user_id !== params.expectedUserId) {
+      throw new Error('note search document does not belong to expected user')
+    }
+
+    const contentHash = computeNoteContentHash(doc.note || '')
+    db!
+      .prepare(
+        `
+        INSERT OR REPLACE INTO ${vectorConfig.vector_table_name} (
+          message_id,
+          embedding,
+          user_id,
+          project_id,
+          storage_mode,
+          conversation_id,
+          note_updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        doc.message_id,
+        JSON.stringify(embedding),
+        doc.user_id,
+        doc.project_id,
+        doc.storage_mode,
+        doc.conversation_id,
+        doc.note_updated_at
+      )
+
+    db!
+      .prepare(
+        `
+        INSERT INTO note_search_embedding_state (
+          message_id,
+          content_hash,
+          embedding_model,
+          embedding_dimensions,
+          embedding_updated_at,
+          embedding_status,
+          last_error
+        ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 'ready', NULL)
+        ON CONFLICT(message_id) DO UPDATE SET
+          content_hash = excluded.content_hash,
+          embedding_model = excluded.embedding_model,
+          embedding_dimensions = excluded.embedding_dimensions,
+          embedding_updated_at = CURRENT_TIMESTAMP,
+          embedding_status = 'ready',
+          last_error = NULL
+      `
+      )
+      .run(doc.message_id, contentHash, params.embeddingModel || null, embedding.length)
+
+    if (params.embeddingModel) {
+      db!
+        .prepare(
+          `UPDATE note_search_vector_config SET embedding_model = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`
+        )
+        .run(params.embeddingModel)
+    }
+
+    return {
+      message_id: doc.message_id,
+      conversation_id: doc.conversation_id,
+      embedding_dimensions: embedding.length,
+      embedding_model: params.embeddingModel || null,
+      content_hash: contentHash,
+    }
+  }
+
+  const markNoteEmbeddingState = (params: {
+    messageId: string
+    status: 'pending' | 'ready' | 'error' | 'stale'
+    error?: string | null
+    embeddingModel?: string | null
+    embeddingDimensions?: number | null
+  }) => {
+    db!
+      .prepare(
+        `
+        INSERT INTO note_search_embedding_state (
+          message_id,
+          embedding_model,
+          embedding_dimensions,
+          embedding_updated_at,
+          embedding_status,
+          last_error
+        ) VALUES (?, ?, ?, CASE WHEN ? = 'ready' THEN CURRENT_TIMESTAMP ELSE NULL END, ?, ?)
+        ON CONFLICT(message_id) DO UPDATE SET
+          embedding_model = COALESCE(excluded.embedding_model, note_search_embedding_state.embedding_model),
+          embedding_dimensions = COALESCE(excluded.embedding_dimensions, note_search_embedding_state.embedding_dimensions),
+          embedding_updated_at = CASE WHEN excluded.embedding_status = 'ready' THEN CURRENT_TIMESTAMP ELSE note_search_embedding_state.embedding_updated_at END,
+          embedding_status = excluded.embedding_status,
+          last_error = excluded.last_error
+      `
+      )
+      .run(
+        params.messageId,
+        params.embeddingModel || null,
+        params.embeddingDimensions || null,
+        params.status,
+        params.status,
+        params.error || null
+      )
+  }
+
+  const deleteNoteEmbedding = (messageId: string) => {
+    const vectorConfig = getNoteVectorConfig()
+    if (sqliteVecAvailable && vectorConfig.embedding_dimensions > 0) {
+      try {
+        db!.prepare(`DELETE FROM ${vectorConfig.vector_table_name} WHERE message_id = ?`).run(messageId)
+      } catch (error) {
+        console.warn('[LocalServer] Failed to delete note embedding row:', error)
+      }
+    }
+    db!.prepare(`DELETE FROM note_search_embedding_state WHERE message_id = ?`).run(messageId)
+  }
+
+  const backfillNoteEmbeddings = async (params: {
+    userId: string
+    projectId?: string
+    model?: string
+    baseUrl?: string
+    batchSize?: number
+    limit?: number
+    includeStatuses?: Array<'pending' | 'stale' | 'error'>
+  }) => {
+    const includeStatuses = Array.isArray(params.includeStatuses) && params.includeStatuses.length > 0
+      ? params.includeStatuses.filter(status => ['pending', 'stale', 'error'].includes(status))
+      : ['pending', 'stale', 'error']
+
+    if (includeStatuses.length === 0) {
+      throw new Error('includeStatuses must contain at least one of pending, stale, error')
+    }
+
+    const batchSize = Math.min(Math.max(Math.floor(Number(params.batchSize || 8)), 1), 32)
+    const limit = Math.min(Math.max(Math.floor(Number(params.limit || 50)), 1), 500)
+    const placeholders = includeStatuses.map(() => '?').join(', ')
+    const whereProject = params.projectId ? 'AND d.project_id = ?' : ''
+
+    const rows = db!
+      .prepare(
+        `
+        SELECT
+          d.message_id,
+          d.conversation_id,
+          d.project_id,
+          d.user_id,
+          d.note,
+          d.note_updated_at,
+          s.embedding_status,
+          s.embedding_model,
+          s.embedding_dimensions,
+          s.content_hash,
+          s.last_error
+        FROM note_search_docs d
+        INNER JOIN note_search_embedding_state s ON s.message_id = d.message_id
+        WHERE d.user_id = ?
+          ${whereProject}
+          AND s.embedding_status IN (${placeholders})
+        ORDER BY
+          CASE s.embedding_status
+            WHEN 'error' THEN 0
+            WHEN 'stale' THEN 1
+            ELSE 2
+          END,
+          datetime(d.note_updated_at) DESC
+        LIMIT ?
+      `
+      )
+      .all(
+        params.userId,
+        ...(params.projectId ? [params.projectId] : []),
+        ...includeStatuses,
+        limit
+      ) as Array<{
+        message_id: string
+        conversation_id: string
+        project_id: string | null
+        user_id: string
+        note: string
+        note_updated_at: string
+        embedding_status: 'pending' | 'stale' | 'error' | 'ready'
+        embedding_model?: string | null
+        embedding_dimensions?: number | null
+        content_hash?: string | null
+        last_error?: string | null
+      }>
+
+    if (rows.length === 0) {
+      return {
+        processed: 0,
+        embedded: 0,
+        failed: 0,
+        skipped: 0,
+        dimensions: getNoteVectorConfig().embedding_dimensions || null,
+        model: params.model || getNoteVectorConfig().embedding_model || null,
+        results: [] as Array<any>,
+      }
+    }
+
+    const results: Array<any> = []
+    let embedded = 0
+    let failed = 0
+    let skipped = 0
+    let dimensions: number | null = getNoteVectorConfig().embedding_dimensions || null
+    let resolvedModel: string | null = params.model || getNoteVectorConfig().embedding_model || null
+
+    for (let index = 0; index < rows.length; index += batchSize) {
+      const batch = rows.slice(index, index + batchSize)
+      const validBatch = batch.filter(row => typeof row.note === 'string' && row.note.trim().length > 0)
+
+      for (const row of batch) {
+        if (!validBatch.includes(row)) {
+          skipped += 1
+          results.push({
+            message_id: row.message_id,
+            conversation_id: row.conversation_id,
+            status: 'skipped',
+            reason: 'empty_note',
+          })
+        }
+      }
+
+      if (validBatch.length === 0) continue
+
+      try {
+        const embeddingResult = await embedTextsWithLmStudio({
+          inputs: validBatch.map(row => row.note),
+          model: params.model,
+          inputType: 'document',
+          baseUrl: params.baseUrl,
+        })
+
+        dimensions = embeddingResult.dimensions
+        resolvedModel = embeddingResult.model
+
+        for (let batchIndex = 0; batchIndex < validBatch.length; batchIndex += 1) {
+          const row = validBatch[batchIndex]
+          try {
+            const upsertResult = upsertNoteEmbedding({
+              messageId: row.message_id,
+              embedding: embeddingResult.embeddings[batchIndex],
+              embeddingModel: embeddingResult.model,
+              expectedUserId: params.userId,
+            })
+
+            embedded += 1
+            results.push({
+              message_id: row.message_id,
+              conversation_id: row.conversation_id,
+              status: 'ready',
+              embedding_dimensions: upsertResult.embedding_dimensions,
+              embedding_model: upsertResult.embedding_model,
+            })
+          } catch (error) {
+            failed += 1
+            const message = error instanceof Error ? error.message : 'Failed to upsert note embedding'
+            markNoteEmbeddingState({
+              messageId: row.message_id,
+              status: 'error',
+              error: message,
+              embeddingModel: embeddingResult.model,
+              embeddingDimensions: embeddingResult.dimensions,
+            })
+            results.push({
+              message_id: row.message_id,
+              conversation_id: row.conversation_id,
+              status: 'error',
+              error: message,
+            })
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to generate embeddings from LM Studio'
+        failed += validBatch.length
+        for (const row of validBatch) {
+          markNoteEmbeddingState({
+            messageId: row.message_id,
+            status: 'error',
+            error: message,
+            embeddingModel: params.model || null,
+            embeddingDimensions: dimensions,
+          })
+          results.push({
+            message_id: row.message_id,
+            conversation_id: row.conversation_id,
+            status: 'error',
+            error: message,
+          })
+        }
+      }
+    }
+
+    return {
+      processed: rows.length,
+      embedded,
+      failed,
+      skipped,
+      dimensions,
+      model: resolvedModel,
+      results,
+    }
+  }
+
+  const vectorSearchNotes = (params: {
+    userId: string
+    queryEmbedding: unknown
+    projectId?: string
+    limit: number
+  }) => {
+    if (!sqliteVecAvailable) return [] as Array<any>
+
+    const queryEmbedding = normalizeEmbeddingInput(params.queryEmbedding)
+    if (queryEmbedding.length === 0) {
+      throw new Error('query embedding must be a non-empty numeric array')
+    }
+
+    const vectorConfig = getNoteVectorConfig()
+    if (!vectorConfig.embedding_dimensions) {
+      throw new Error('note vector search is not configured yet')
+    }
+    if (vectorConfig.embedding_dimensions !== queryEmbedding.length) {
+      throw new Error(
+        `query embedding dimensions (${queryEmbedding.length}) do not match configured dimensions (${vectorConfig.embedding_dimensions})`
+      )
+    }
+
+    const whereProject = params.projectId ? 'AND project_id = ?' : ''
+    const rows = db!
+      .prepare(
+        `
+        SELECT
+          message_id,
+          conversation_id,
+          project_id,
+          storage_mode,
+          note_updated_at,
+          distance
+        FROM ${vectorConfig.vector_table_name}
+        WHERE embedding MATCH ?
+          AND k = ?
+          AND user_id = ?
+          ${whereProject}
+        ORDER BY distance
+      `
+      )
+      .all(
+        JSON.stringify(queryEmbedding),
+        Math.max(params.limit, 1),
+        params.userId,
+        ...(params.projectId ? [params.projectId] : [])
+      ) as Array<any>
+
+    return rows
+  }
+
+  const clampNoteSearchScore = (value: number, min: number = 0, max: number = 1) =>
+    Math.min(max, Math.max(min, value))
+
+  const getNoteSearchLexicalSignals = (params: {
+    queryTokens: string[]
+    normalizedQuery: string
+    conversationTitle: string | null
+    note: string
+  }) => {
+    const normalizedTitle = normalizeSearchText(params.conversationTitle || '')
+    const normalizedText = normalizeSearchText(`${params.conversationTitle || ''} ${params.note || ''}`)
+    const candidateTokens = Array.from(new Set(normalizedText.split(' ').filter(Boolean))).slice(0, 160)
+    const candidateTokenSet = new Set(candidateTokens)
+    const titleTokenSet = new Set(normalizedTitle.split(' ').filter(Boolean))
+
+    let exactTokenMatches = 0
+    let partialTokenMatches = 0
+    let titleExactTokenMatches = 0
+
+    for (const token of params.queryTokens) {
+      if (candidateTokenSet.has(token)) {
+        exactTokenMatches += 1
+      } else if (candidateTokens.some(candidateToken => candidateToken.includes(token) || token.includes(candidateToken))) {
+        partialTokenMatches += 1
+      }
+
+      if (titleTokenSet.has(token)) {
+        titleExactTokenMatches += 1
+      }
+    }
+
+    const phraseMatch = Boolean(params.normalizedQuery && normalizedText.includes(params.normalizedQuery))
+    const exactCoverage = params.queryTokens.length > 0 ? exactTokenMatches / params.queryTokens.length : 0
+    const partialCoverage =
+      params.queryTokens.length > 0 ? Math.min(1, (exactTokenMatches + partialTokenMatches) / params.queryTokens.length) : 0
+
+    const lexicalBoost = clampNoteSearchScore(
+      (phraseMatch ? 0.32 : 0) +
+        exactCoverage * 0.55 +
+        exactTokenMatches * 0.08 +
+        Math.max(partialCoverage - exactCoverage, 0) * 0.16 +
+        Math.min(titleExactTokenMatches, 2) * 0.05,
+      0,
+      1.25
+    )
+
+    return {
+      exact_token_matches: exactTokenMatches,
+      partial_token_matches: partialTokenMatches,
+      title_exact_token_matches: titleExactTokenMatches,
+      exact_coverage: exactCoverage,
+      partial_coverage: partialCoverage,
+      phrase_match: phraseMatch,
+      lexical_boost: lexicalBoost,
+    }
+  }
+
+  const getNoteSearchVectorPenaltyFactor = (params: {
+    queryTokens: string[]
+    exactCoverage: number
+    partialCoverage: number
+    phraseMatch: boolean
+  }) => {
+    if (params.phraseMatch || params.queryTokens.length === 0 || params.queryTokens.length > 6) {
+      return 1
+    }
+
+    if (params.exactCoverage >= 0.5) {
+      return 1
+    }
+
+    if (params.exactCoverage > 0) {
+      return 0.88
+    }
+
+    if (params.partialCoverage > 0) {
+      return 0.68
+    }
+
+    return 0.42
+  }
+
+  const searchNotes = (params: {
+    userId: string
+    query: string
+    projectId?: string
+    limit: number
+    queryEmbedding?: unknown
+    vectorWeight?: number
+    lexicalWeight?: number
+    recencyWeight?: number
+  }) => {
+    const {
+      userId,
+      query,
+      projectId,
+      limit,
+      queryEmbedding,
+      vectorWeight = 0.45,
+      lexicalWeight = 0.45,
+      recencyWeight = 0.1,
+    } = params
+    const trimmedQuery = query.trim()
+    const queryTokens = splitSearchTokens(trimmedQuery)
+    const normalizedQuery = normalizeSearchText(trimmedQuery)
+
+    type NoteSearchSourceType = 'fts' | 'fuzzy' | 'vector'
+    type NoteSearchMatchType = NoteSearchSourceType | 'hybrid'
+
+    type NoteSearchCandidate = {
+      message_id: string
+      conversation_id: string
+      project_id: string | null
+      storage_mode: 'cloud' | 'local'
+      conversation_title: string | null
+      message_created_at: string
+      note_updated_at: string
+      note: string
+      match_type: NoteSearchMatchType
+      source_match_types?: NoteSearchSourceType[]
+      relevance: number
+      vector_distance?: number | null
+      lexical_score?: number | null
+      vector_score?: number | null
+      recency_score?: number | null
+      exact_token_matches?: number
+      partial_token_matches?: number
+      exact_token_coverage?: number
+      token_coverage?: number
+      phrase_match?: boolean
+    }
+
+    const candidateMap = new Map<string, NoteSearchCandidate>()
+    const scopeClause = projectId ? ' AND project_id = ?' : ''
+    const scopeParams = projectId ? [userId, projectId] : [userId]
+
+    const pushCandidate = (candidate: NoteSearchCandidate) => {
+      const existing = candidateMap.get(candidate.message_id)
+      if (!existing) {
+        candidateMap.set(candidate.message_id, {
+          ...candidate,
+          source_match_types:
+            candidate.source_match_types || (candidate.match_type === 'hybrid' ? [] : [candidate.match_type as NoteSearchSourceType]),
+        })
+        return
+      }
+
+      const existingTypes = existing.source_match_types || (existing.match_type === 'hybrid' ? [] : [existing.match_type as NoteSearchSourceType])
+      const candidateTypes =
+        candidate.source_match_types || (candidate.match_type === 'hybrid' ? [] : [candidate.match_type as NoteSearchSourceType])
+      const mergedTypes = Array.from(new Set([...existingTypes, ...candidateTypes]))
+
+      const existingVectorDistance = typeof existing.vector_distance === 'number' ? existing.vector_distance : null
+      const candidateVectorDistance = typeof candidate.vector_distance === 'number' ? candidate.vector_distance : null
+
+      candidateMap.set(candidate.message_id, {
+        ...existing,
+        relevance: Math.max(existing.relevance, candidate.relevance),
+        lexical_score: Math.max(existing.lexical_score ?? 0, candidate.lexical_score ?? 0) || undefined,
+        vector_score: Math.max(existing.vector_score ?? 0, candidate.vector_score ?? 0) || undefined,
+        vector_distance:
+          existingVectorDistance === null
+            ? candidateVectorDistance
+            : candidateVectorDistance === null
+              ? existingVectorDistance
+              : Math.min(existingVectorDistance, candidateVectorDistance),
+        source_match_types: mergedTypes,
+      })
+    }
+
+    if (queryEmbedding !== undefined && queryEmbedding !== null) {
+      try {
+        const vectorRows = vectorSearchNotes({
+          userId,
+          queryEmbedding,
+          projectId,
+          limit: Math.max(limit, NOTE_SEARCH_VECTOR_CANDIDATE_LIMIT),
+        })
+
+        for (const row of vectorRows) {
+          const doc = db!
+            .prepare(
+              `
+              SELECT
+                message_id,
+                conversation_id,
+                project_id,
+                storage_mode,
+                conversation_title,
+                message_created_at,
+                note_updated_at,
+                note
+              FROM note_search_docs
+              WHERE message_id = ?
+            `
+            )
+            .get(String(row.message_id)) as
+            | {
+                message_id: string
+                conversation_id: string
+                project_id: string | null
+                storage_mode: string
+                conversation_title: string | null
+                message_created_at: string
+                note_updated_at: string
+                note: string
+              }
+            | undefined
+
+          if (!doc) continue
+
+          const distanceValue = Number(row.distance)
+          const vectorScore = Number.isFinite(distanceValue) ? 1 / (1 + Math.max(distanceValue, 0)) : 0
+
+          pushCandidate({
+            message_id: doc.message_id,
+            conversation_id: doc.conversation_id,
+            project_id: doc.project_id || null,
+            storage_mode: doc.storage_mode === 'cloud' ? 'cloud' : 'local',
+            conversation_title: doc.conversation_title || null,
+            message_created_at: doc.message_created_at,
+            note_updated_at: doc.note_updated_at,
+            note: doc.note || '',
+            match_type: 'vector',
+            relevance: vectorScore,
+            vector_distance: Number.isFinite(distanceValue) ? distanceValue : null,
+            vector_score: vectorScore,
+          })
+        }
+      } catch (vectorSearchError) {
+        console.warn('[LocalServer] Note vector search failed, continuing with lexical search only:', vectorSearchError)
+      }
+    }
+
+    const tryRunFts = (ftsQuery: string) => {
+      if (!ftsQuery) return
+
+      const rows = db!
+        .prepare(
+          `
+          SELECT
+            d.message_id,
+            d.conversation_id,
+            d.project_id,
+            d.storage_mode,
+            d.conversation_title,
+            d.message_created_at,
+            d.note_updated_at,
+            d.note,
+            bm25(note_search_fts) AS fts_rank
+          FROM note_search_fts
+          INNER JOIN note_search_docs d ON d.message_id = note_search_fts.message_id
+          WHERE note_search_fts MATCH ?
+            AND d.user_id = ?
+            ${scopeClause}
+          ORDER BY fts_rank ASC, datetime(d.note_updated_at) DESC, datetime(d.message_created_at) DESC
+          LIMIT ?
+        `
+        )
+        .all(ftsQuery, ...scopeParams, NOTE_SEARCH_FTS_CANDIDATE_LIMIT) as Array<any>
+
+      for (const row of rows) {
+        const normalizedText = normalizeSearchText(`${row.conversation_title || ''} ${row.note || ''}`)
+        const rank = Number.isFinite(Number(row.fts_rank)) ? Math.max(Number(row.fts_rank), 0) : 10
+        const rankBoost = 1 / (1 + rank)
+        const containsBoost = normalizedQuery && normalizedText.includes(normalizedQuery) ? 0.12 : 0
+        const lexicalScore = 0.74 + rankBoost * 0.18 + containsBoost
+
+        pushCandidate({
+          message_id: String(row.message_id),
+          conversation_id: String(row.conversation_id),
+          project_id: row.project_id || null,
+          storage_mode: row.storage_mode === 'cloud' ? 'cloud' : 'local',
+          conversation_title: row.conversation_title || null,
+          message_created_at: row.message_created_at,
+          note_updated_at: row.note_updated_at,
+          note: row.note || '',
+          match_type: 'fts',
+          relevance: lexicalScore,
+          lexical_score: lexicalScore,
+        })
+      }
+    }
+
+    if (queryTokens.length > 0) {
+      try {
+        tryRunFts(buildStrictFtsQuery(queryTokens))
+      } catch {
+        // FTS5 may be unavailable in some SQLite builds; fuzzy fallback still works.
+      }
+
+      if (candidateMap.size < limit * 2) {
+        try {
+          tryRunFts(buildRelaxedFtsQuery(queryTokens))
+        } catch {
+          // FTS5 may be unavailable in some SQLite builds; fuzzy fallback still works.
+        }
+      }
+    }
+
+    if (candidateMap.size < limit * 2) {
+      const recentRows = db!
+        .prepare(
+          `
+          SELECT
+            message_id,
+            conversation_id,
+            project_id,
+            storage_mode,
+            conversation_title,
+            message_created_at,
+            note_updated_at,
+            note
+          FROM note_search_docs
+          WHERE user_id = ?
+            ${scopeClause}
+          ORDER BY datetime(note_updated_at) DESC, datetime(message_created_at) DESC
+          LIMIT ?
+        `
+        )
+        .all(...scopeParams, NOTE_SEARCH_FUZZY_CANDIDATE_LIMIT) as Array<any>
+
+      const fuzzyThreshold = normalizedQuery.length <= 5 ? 0.78 : 0.64
+
+      for (const row of recentRows) {
+        const messageId = String(row.message_id)
+        if (candidateMap.has(messageId)) continue
+
+        const fuzzyRelevance = calculateFuzzyRelevance(
+          trimmedQuery,
+          `${row.conversation_title || ''} ${row.note || ''}`,
+          row.note || null
+        )
+        if (fuzzyRelevance < fuzzyThreshold) continue
+
+        const lexicalScore = clampNoteSearchScore(fuzzyRelevance, 0, 1.05)
+
+        pushCandidate({
+          message_id: messageId,
+          conversation_id: String(row.conversation_id),
+          project_id: row.project_id || null,
+          storage_mode: row.storage_mode === 'cloud' ? 'cloud' : 'local',
+          conversation_title: row.conversation_title || null,
+          message_created_at: row.message_created_at,
+          note_updated_at: row.note_updated_at,
+          note: row.note || '',
+          match_type: 'fuzzy',
+          relevance: lexicalScore,
+          lexical_score: lexicalScore,
+        })
+      }
+    }
+
+    const now = Date.now()
+    const maxAgeMs = 180 * 24 * 60 * 60 * 1000
+
+    const scoredCandidates = Array.from(candidateMap.values())
+      .map(candidate => {
+        const lexicalSignals = getNoteSearchLexicalSignals({
+          queryTokens,
+          normalizedQuery,
+          conversationTitle: candidate.conversation_title,
+          note: candidate.note,
+        })
+
+        const baseLexicalScore = Math.max(candidate.lexical_score ?? 0, 0)
+        const lexicalScore = clampNoteSearchScore(baseLexicalScore + lexicalSignals.lexical_boost, 0, 1.75)
+
+        const rawVectorScore = Math.max(candidate.vector_score ?? 0, 0)
+        const vectorPenaltyFactor =
+          rawVectorScore > 0
+            ? getNoteSearchVectorPenaltyFactor({
+                queryTokens,
+                exactCoverage: lexicalSignals.exact_coverage,
+                partialCoverage: lexicalSignals.partial_coverage,
+                phraseMatch: lexicalSignals.phrase_match,
+              })
+            : 1
+        const vectorScore = rawVectorScore * vectorPenaltyFactor
+
+        const updatedMs = new Date(candidate.note_updated_at || candidate.message_created_at).getTime()
+        const ageMs = Number.isFinite(updatedMs) ? Math.max(now - updatedMs, 0) : maxAgeMs
+        const recencyScore = candidate.recency_score ?? Math.max(0, 1 - ageMs / maxAgeMs)
+        const combinedScore = vectorWeight * vectorScore + lexicalWeight * lexicalScore + recencyWeight * recencyScore
+
+        const sourceMatchTypes =
+          candidate.source_match_types || (candidate.match_type === 'hybrid' ? [] : [candidate.match_type as NoteSearchSourceType])
+        const hasVectorSignal = vectorScore > 0 || sourceMatchTypes.includes('vector')
+        const hasLexicalSignal = lexicalScore > 0
+        const matchType: NoteSearchMatchType = hasVectorSignal && hasLexicalSignal
+          ? 'hybrid'
+          : hasVectorSignal
+            ? 'vector'
+            : sourceMatchTypes.includes('fts')
+              ? 'fts'
+              : 'fuzzy'
+
+        return {
+          ...candidate,
+          match_type: matchType,
+          source_match_types: sourceMatchTypes,
+          lexical_score: lexicalScore,
+          vector_score: vectorScore,
+          recency_score: recencyScore,
+          relevance: combinedScore,
+          exact_token_matches: lexicalSignals.exact_token_matches,
+          partial_token_matches: lexicalSignals.partial_token_matches,
+          exact_token_coverage: lexicalSignals.exact_coverage,
+          token_coverage: lexicalSignals.partial_coverage,
+          phrase_match: lexicalSignals.phrase_match,
+        }
+      })
+      .sort((a, b) => {
+        if (b.relevance !== a.relevance) return b.relevance - a.relevance
+        const aTime = new Date(a.note_updated_at || a.message_created_at).getTime()
+        const bTime = new Date(b.note_updated_at || b.message_created_at).getTime()
+        return bTime - aTime
+      })
+
+    const groupedByConversation = new Map<
+      string,
+      {
+        best: NoteSearchCandidate
+        conversation_hit_count: number
+        matched_message_ids: string[]
+        source_match_types: Set<NoteSearchSourceType>
+      }
+    >()
+
+    for (const candidate of scoredCandidates) {
+      const existing = groupedByConversation.get(candidate.conversation_id)
+      const sourceTypes = candidate.source_match_types || []
+
+      if (!existing) {
+        groupedByConversation.set(candidate.conversation_id, {
+          best: candidate,
+          conversation_hit_count: 1,
+          matched_message_ids: [candidate.message_id],
+          source_match_types: new Set(sourceTypes),
+        })
+        continue
+      }
+
+      existing.conversation_hit_count += 1
+      if (!existing.matched_message_ids.includes(candidate.message_id)) {
+        existing.matched_message_ids.push(candidate.message_id)
+      }
+      for (const sourceType of sourceTypes) {
+        existing.source_match_types.add(sourceType)
+      }
+    }
+
+    return Array.from(groupedByConversation.values())
+      .sort((a, b) => {
+        if (b.best.relevance !== a.best.relevance) return b.best.relevance - a.best.relevance
+        const aTime = new Date(a.best.note_updated_at || a.best.message_created_at).getTime()
+        const bTime = new Date(b.best.note_updated_at || b.best.message_created_at).getTime()
+        return bTime - aTime
+      })
+      .slice(0, limit)
+      .map(group => ({
+        conversation_id: group.best.conversation_id,
+        project_id: group.best.project_id,
+        storage_mode: group.best.storage_mode,
+        conversation_title: group.best.conversation_title,
+        message_id: group.best.message_id,
+        message_created_at: group.best.message_created_at,
+        note_updated_at: group.best.note_updated_at,
+        note: buildMessageSnippet(group.best.note, trimmedQuery),
+        match_type: group.best.match_type,
+        source_match_types: Array.from(group.source_match_types),
+        score: Number(group.best.relevance.toFixed(6)),
+        lexical_score: Number((group.best.lexical_score || 0).toFixed(6)),
+        vector_score: Number((group.best.vector_score || 0).toFixed(6)),
+        recency_score: Number((group.best.recency_score || 0).toFixed(6)),
+        vector_distance: group.best.vector_distance ?? null,
+        conversation_hit_count: group.conversation_hit_count,
+        matched_message_ids: group.matched_message_ids.slice(0, 5),
+        why_matched: {
+          exact_token_matches: group.best.exact_token_matches || 0,
+          partial_token_matches: group.best.partial_token_matches || 0,
+          exact_token_coverage: Number((group.best.exact_token_coverage || 0).toFixed(6)),
+          token_coverage: Number((group.best.token_coverage || 0).toFixed(6)),
+          phrase_match: Boolean(group.best.phrase_match),
+        },
+      }))
+  }
+
   const searchTopLevelUserMessages = (params: {
     userId: string
     query: string
@@ -6430,6 +7885,348 @@ function setupServer() {
     } catch (error) {
       console.error('[LocalServer] ❌ Error searching conversations by title:', error)
       res.status(500).json({ error: 'Failed to search conversations' })
+    }
+  })
+
+  // GET /api/local/conversations/search/notes?userId=xxx&q=term&limit=20&projectId=xxx
+  app.get('/api/local/conversations/search/notes', (req, res) => {
+    try {
+      const userId = req.query.userId as string
+      const rawQuery = (req.query.q as string) || ''
+      const projectId = (req.query.projectId as string | undefined) || undefined
+      const rawLimit = Number(req.query.limit ?? 20)
+      const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 20, 1), 50)
+      const queryEmbedding = req.query.embedding
+      const vectorWeight = req.query.vectorWeight !== undefined ? Number(req.query.vectorWeight) : undefined
+      const lexicalWeight = req.query.lexicalWeight !== undefined ? Number(req.query.lexicalWeight) : undefined
+      const recencyWeight = req.query.recencyWeight !== undefined ? Number(req.query.recencyWeight) : undefined
+
+      if (!userId) {
+        res.status(400).json({ error: 'userId required' })
+        return
+      }
+
+      if (!rawQuery.trim()) {
+        res.status(400).json({ error: 'q required' })
+        return
+      }
+
+      const results = searchNotes({
+        userId,
+        query: rawQuery,
+        projectId,
+        limit,
+        queryEmbedding,
+        vectorWeight,
+        lexicalWeight,
+        recencyWeight,
+      })
+
+      res.json({
+        results,
+        sqlite_vec: getNoteVectorStatus(),
+      })
+    } catch (error) {
+      console.error('[LocalServer] ❌ Error searching notes:', error)
+      res.status(500).json({ error: 'Failed to search notes' })
+    }
+  })
+
+  // POST /api/local/conversations/search/notes/search
+  app.post('/api/local/conversations/search/notes/search', async (req, res) => {
+    try {
+      const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : ''
+      const rawQuery = typeof req.body?.q === 'string' ? req.body.q : ''
+      const projectId = typeof req.body?.projectId === 'string' && req.body.projectId.trim().length > 0 ? req.body.projectId.trim() : undefined
+      const rawLimit = Number(req.body?.limit ?? 20)
+      const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 20, 1), 50)
+      const vectorWeight = req.body?.vectorWeight !== undefined ? Number(req.body.vectorWeight) : undefined
+      const lexicalWeight = req.body?.lexicalWeight !== undefined ? Number(req.body.lexicalWeight) : undefined
+      const recencyWeight = req.body?.recencyWeight !== undefined ? Number(req.body.recencyWeight) : undefined
+      const model = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
+      const baseUrl = typeof req.body?.baseUrl === 'string' ? req.body.baseUrl.trim() : ''
+      const skipEmbedding = req.body?.skipEmbedding === true
+
+      if (!userId) {
+        res.status(400).json({ error: 'userId required' })
+        return
+      }
+
+      if (!rawQuery.trim()) {
+        res.status(400).json({ error: 'q required' })
+        return
+      }
+
+      let queryEmbedding: number[] | undefined
+      let embeddingMeta: {
+        used: boolean
+        model: string | null
+        input_type: 'query'
+        dimensions: number | null
+        base_url: string | null
+        error: string | null
+      } = {
+        used: false,
+        model: null,
+        input_type: 'query',
+        dimensions: null,
+        base_url: null,
+        error: null,
+      }
+
+      const vectorStatus = getNoteVectorStatus()
+      const shouldTryEmbedding = !skipEmbedding && sqliteVecAvailable && vectorStatus.embedding_dimensions && vectorStatus.embedding_dimensions > 0
+
+      if (shouldTryEmbedding) {
+        try {
+          const embeddingResult = await embedTextWithLmStudio({
+            text: rawQuery,
+            model: model || vectorStatus.embedding_model || undefined,
+            inputType: 'query',
+            baseUrl: baseUrl || undefined,
+          })
+
+          queryEmbedding = embeddingResult.embedding
+          embeddingMeta = {
+            used: true,
+            model: embeddingResult.model,
+            input_type: 'query',
+            dimensions: embeddingResult.dimensions,
+            base_url: getLmStudioBaseUrl(baseUrl || undefined),
+            error: null,
+          }
+        } catch (embeddingError) {
+          embeddingMeta = {
+            used: false,
+            model: model || vectorStatus.embedding_model || null,
+            input_type: 'query',
+            dimensions: null,
+            base_url: getLmStudioBaseUrl(baseUrl || undefined),
+            error: embeddingError instanceof Error ? embeddingError.message : 'Failed to generate query embedding',
+          }
+          console.warn('[LocalServer] Note query embedding failed, falling back to lexical search only:', embeddingError)
+        }
+      }
+
+      const results = searchNotes({
+        userId,
+        query: rawQuery,
+        projectId,
+        limit,
+        queryEmbedding,
+        vectorWeight,
+        lexicalWeight,
+        recencyWeight,
+      })
+
+      res.json({
+        results,
+        query: rawQuery,
+        embedding: embeddingMeta,
+        sqlite_vec: getNoteVectorStatus(),
+      })
+    } catch (error) {
+      console.error('[LocalServer] ❌ Error searching notes with server-side embeddings:', error)
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to search notes' })
+    }
+  })
+
+  // GET /api/local/conversations/search/notes/vector-status
+  app.get('/api/local/conversations/search/notes/vector-status', (_req, res) => {
+    try {
+      res.json(getNoteVectorStatus())
+    } catch (error) {
+      console.error('[LocalServer] ❌ Error fetching note vector status:', error)
+      res.status(500).json({ error: 'Failed to fetch note vector status' })
+    }
+  })
+
+  // POST /api/local/conversations/search/notes/configure-vector
+  app.post('/api/local/conversations/search/notes/configure-vector', (req, res) => {
+    try {
+      const embeddingDimensions = Number(req.body?.embeddingDimensions)
+      const embeddingModel = typeof req.body?.embeddingModel === 'string' ? req.body.embeddingModel.trim() : ''
+
+      if (!Number.isFinite(embeddingDimensions) || embeddingDimensions <= 0) {
+        res.status(400).json({ error: 'embeddingDimensions must be a positive integer' })
+        return
+      }
+
+      const vectorConfig = ensureNoteVectorTable(embeddingDimensions)
+      if (embeddingModel) {
+        db!
+          .prepare(`UPDATE note_search_vector_config SET embedding_model = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`)
+          .run(embeddingModel)
+      }
+
+      res.json({
+        success: true,
+        sqlite_vec: getNoteVectorStatus(),
+        vector_config: {
+          ...vectorConfig,
+          embedding_model: embeddingModel || vectorConfig.embedding_model,
+        },
+      })
+    } catch (error) {
+      console.error('[LocalServer] ❌ Error configuring note vector table:', error)
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to configure note vector table' })
+    }
+  })
+
+  // POST /api/local/conversations/search/notes/upsert-embedding
+  app.post('/api/local/conversations/search/notes/upsert-embedding', (req, res) => {
+    try {
+      const messageId = typeof req.body?.messageId === 'string' ? req.body.messageId.trim() : ''
+      const embedding = req.body?.embedding
+      const embeddingModel = typeof req.body?.embeddingModel === 'string' ? req.body.embeddingModel.trim() : ''
+      const expectedUserId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : ''
+
+      if (!messageId) {
+        res.status(400).json({ error: 'messageId required' })
+        return
+      }
+
+      const result = upsertNoteEmbedding({
+        messageId,
+        embedding,
+        embeddingModel: embeddingModel || undefined,
+        expectedUserId: expectedUserId || undefined,
+      })
+
+      res.json({ success: true, result, sqlite_vec: getNoteVectorStatus() })
+    } catch (error) {
+      console.error('[LocalServer] ❌ Error upserting note embedding:', error)
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to upsert note embedding' })
+    }
+  })
+
+  // POST /api/local/conversations/search/notes/mark-embedding-state
+  app.post('/api/local/conversations/search/notes/mark-embedding-state', (req, res) => {
+    try {
+      const messageId = typeof req.body?.messageId === 'string' ? req.body.messageId.trim() : ''
+      const status = req.body?.status as 'pending' | 'ready' | 'error' | 'stale'
+
+      if (!messageId) {
+        res.status(400).json({ error: 'messageId required' })
+        return
+      }
+
+      if (!['pending', 'ready', 'error', 'stale'].includes(status)) {
+        res.status(400).json({ error: 'status must be one of pending, ready, error, stale' })
+        return
+      }
+
+      markNoteEmbeddingState({
+        messageId,
+        status,
+        error: typeof req.body?.error === 'string' ? req.body.error : null,
+        embeddingModel: typeof req.body?.embeddingModel === 'string' ? req.body.embeddingModel : null,
+        embeddingDimensions:
+          req.body?.embeddingDimensions !== undefined ? Number(req.body.embeddingDimensions) : null,
+      })
+
+      res.json({ success: true })
+    } catch (error) {
+      console.error('[LocalServer] ❌ Error marking note embedding state:', error)
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to mark note embedding state' })
+    }
+  })
+
+  // POST /api/local/conversations/search/notes/embed
+  app.post('/api/local/conversations/search/notes/embed', async (req, res) => {
+    try {
+      const text = typeof req.body?.text === 'string' ? req.body.text.trim() : ''
+      const model = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
+      const inputTypeRaw = typeof req.body?.inputType === 'string' ? req.body.inputType.trim().toLowerCase() : ''
+      const baseUrl = typeof req.body?.baseUrl === 'string' ? req.body.baseUrl.trim() : ''
+      const messageId = typeof req.body?.messageId === 'string' ? req.body.messageId.trim() : ''
+      const expectedUserId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : ''
+      const upsert = req.body?.upsert === true
+
+      if (!text) {
+        res.status(400).json({ error: 'text required' })
+        return
+      }
+
+      const inputType = inputTypeRaw === 'query' || inputTypeRaw === 'document' ? inputTypeRaw : 'none'
+      const embeddingResult = await embedTextWithLmStudio({
+        text,
+        model: model || undefined,
+        inputType,
+        baseUrl: baseUrl || undefined,
+      })
+
+      let upsertResult: ReturnType<typeof upsertNoteEmbedding> | null = null
+      if (upsert) {
+        if (!messageId) {
+          res.status(400).json({ error: 'messageId required when upsert=true' })
+          return
+        }
+
+        upsertResult = upsertNoteEmbedding({
+          messageId,
+          embedding: embeddingResult.embedding,
+          embeddingModel: embeddingResult.model,
+          expectedUserId: expectedUserId || undefined,
+        })
+      }
+
+      res.json({
+        success: true,
+        model: embeddingResult.model,
+        input_type: embeddingResult.inputType,
+        dimensions: embeddingResult.dimensions,
+        embedding: embeddingResult.embedding,
+        upserted: upsert,
+        upsert_result: upsertResult,
+        lmstudio: {
+          base_url: getLmStudioBaseUrl(baseUrl || undefined),
+        },
+        sqlite_vec: getNoteVectorStatus(),
+      })
+    } catch (error) {
+      console.error('[LocalServer] ❌ Error generating note embedding with LM Studio:', error)
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to generate note embedding' })
+    }
+  })
+
+  // POST /api/local/conversations/search/notes/backfill-missing
+  app.post('/api/local/conversations/search/notes/backfill-missing', async (req, res) => {
+    try {
+      const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : ''
+      const projectId = typeof req.body?.projectId === 'string' ? req.body.projectId.trim() : ''
+      const model = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
+      const baseUrl = typeof req.body?.baseUrl === 'string' ? req.body.baseUrl.trim() : ''
+      const batchSize = req.body?.batchSize !== undefined ? Number(req.body.batchSize) : undefined
+      const limit = req.body?.limit !== undefined ? Number(req.body.limit) : undefined
+      const includeStatuses = Array.isArray(req.body?.includeStatuses) ? req.body.includeStatuses : undefined
+
+      if (!userId) {
+        res.status(400).json({ error: 'userId required' })
+        return
+      }
+
+      const result = await backfillNoteEmbeddings({
+        userId,
+        projectId: projectId || undefined,
+        model: model || undefined,
+        baseUrl: baseUrl || undefined,
+        batchSize,
+        limit,
+        includeStatuses,
+      })
+
+      res.json({
+        success: true,
+        result,
+        lmstudio: {
+          base_url: getLmStudioBaseUrl(baseUrl || undefined),
+        },
+        sqlite_vec: getNoteVectorStatus(),
+      })
+    } catch (error) {
+      console.error('[LocalServer] ❌ Error backfilling note embeddings with LM Studio:', error)
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to backfill note embeddings' })
     }
   })
 

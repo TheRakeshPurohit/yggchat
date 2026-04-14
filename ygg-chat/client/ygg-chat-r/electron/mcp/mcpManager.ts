@@ -20,6 +20,7 @@ import {
 // ============================================================================
 
 export type McpServerTransport = 'stdio' | 'http'
+export type McpStdioFraming = 'content-length' | 'newline-json'
 
 export interface McpOAuthConfig {
   resourceMetadataUrl?: string
@@ -50,6 +51,7 @@ export interface McpServerConfig {
   command?: string
   args?: string[]
   env?: Record<string, string>
+  stdioFraming?: McpStdioFraming
 
   // remote HTTP transport
   url?: string
@@ -174,6 +176,19 @@ function resolveTransport(config: Partial<McpServerConfig>): McpServerTransport 
   return normalizeTransport(config.transport) ?? normalizeTransport(config.type) ?? (config.url ? 'http' : 'stdio')
 }
 
+function resolveStdioFraming(config: Partial<McpServerConfig>): McpStdioFraming {
+  if (config.stdioFraming === 'content-length' || config.stdioFraming === 'newline-json') {
+    return config.stdioFraming
+  }
+
+  const command = typeof config.command === 'string' ? path.basename(config.command).toLowerCase() : ''
+  if (command === 'blender-mcp' || command === 'blender-mcp.exe') {
+    return 'newline-json'
+  }
+
+  return 'content-length'
+}
+
 const MCP_PROTOCOL_VERSION = '2025-11-25'
 const OAUTH_ACCESS_TOKEN_CLOCK_SKEW_MS = 60_000
 
@@ -189,9 +204,10 @@ class McpClient extends EventEmitter {
     reject: (error: Error) => void
     timeout: NodeJS.Timeout
   }> = new Map()
-  private buffer = ''
+  private buffer = Buffer.alloc(0)
   private sessionId?: string
   private readonly transport: McpServerTransport
+  private readonly stdioFraming: McpStdioFraming
   private oauth?: McpOAuthConfig
   private authFlowPromise: Promise<void> | null = null
   private lastOAuthError?: string
@@ -208,6 +224,7 @@ class McpClient extends EventEmitter {
   ) {
     super()
     this.transport = resolveTransport(config)
+    this.stdioFraming = resolveStdioFraming(config)
     this.oauth = config.oauth ? { ...config.oauth } : undefined
   }
 
@@ -259,9 +276,9 @@ class McpClient extends EventEmitter {
       shell: process.platform === 'win32',
     })
 
-    // Handle stdout (JSON-RPC messages)
+    // Handle stdout (Content-Length framed JSON-RPC messages)
     this.process.stdout?.on('data', (data: Buffer) => {
-      this.handleData(data.toString())
+      this.handleData(data)
     })
 
     // Handle stderr (logging)
@@ -404,24 +421,86 @@ class McpClient extends EventEmitter {
     }
   }
 
-  private handleData(data: string): void {
-    this.buffer += data
+  private handleData(data: Buffer): void {
+    this.buffer = Buffer.concat([this.buffer, data])
 
-    // Process complete messages (newline-delimited JSON)
-    let newlineIndex: number
-    while ((newlineIndex = this.buffer.indexOf('\n')) !== -1) {
-      const line = this.buffer.slice(0, newlineIndex).trim()
-      this.buffer = this.buffer.slice(newlineIndex + 1)
-
-      if (line) {
-        try {
-          const message = JSON.parse(line)
-          this.handleMessage(message)
-        } catch (err) {
-          console.error(`[MCP:${this.name}] Failed to parse message:`, line, err)
-        }
-      }
+    if (this.stdioFraming === 'newline-json') {
+      this.handleNewlineJsonData()
+      return
     }
+
+    this.handleContentLengthData()
+  }
+
+  private handleContentLengthData(): void {
+    while (true) {
+      const headerEnd = this.buffer.indexOf('\r\n\r\n')
+      if (headerEnd === -1) {
+        return
+      }
+
+      const headerText = this.buffer.subarray(0, headerEnd).toString('utf8')
+      const contentLengthMatch = headerText.match(/(?:^|\r\n)content-length:\s*(\d+)/i)
+
+      if (!contentLengthMatch) {
+        console.error(`[MCP:${this.name}] Missing Content-Length header in stdio response:`, headerText)
+        this.buffer = Buffer.alloc(0)
+        return
+      }
+
+      const contentLength = Number.parseInt(contentLengthMatch[1], 10)
+      if (!Number.isFinite(contentLength) || contentLength < 0) {
+        console.error(`[MCP:${this.name}] Invalid Content-Length header in stdio response:`, contentLengthMatch[1])
+        this.buffer = Buffer.alloc(0)
+        return
+      }
+
+      const messageStart = headerEnd + 4
+      const messageEnd = messageStart + contentLength
+      if (this.buffer.length < messageEnd) {
+        return
+      }
+
+      const messageText = this.buffer.subarray(messageStart, messageEnd).toString('utf8')
+      this.buffer = this.buffer.subarray(messageEnd)
+      this.parseStdioJson(messageText)
+    }
+  }
+
+  private handleNewlineJsonData(): void {
+    while (true) {
+      const newlineIndex = this.buffer.indexOf(0x0a)
+      if (newlineIndex === -1) {
+        return
+      }
+
+      const line = this.buffer.subarray(0, newlineIndex).toString('utf8').trim()
+      this.buffer = this.buffer.subarray(newlineIndex + 1)
+
+      if (!line) {
+        continue
+      }
+
+      this.parseStdioJson(line)
+    }
+  }
+
+  private parseStdioJson(messageText: string): void {
+    try {
+      const message = JSON.parse(messageText)
+      this.handleMessage(message)
+    } catch (err) {
+      console.error(`[MCP:${this.name}] Failed to parse stdio message:`, messageText, err)
+    }
+  }
+
+  private encodeStdioMessage(message: JsonRpcRequest | JsonRpcNotification): Buffer {
+    const body = Buffer.from(JSON.stringify(message), 'utf8')
+    if (this.stdioFraming === 'newline-json') {
+      return Buffer.concat([body, Buffer.from('\n', 'utf8')])
+    }
+    const header = Buffer.from(`Content-Length: ${body.byteLength}\r\n\r\n`, 'utf8')
+    return Buffer.concat([header, body])
   }
 
   private handleMessage(message: JsonRpcResponse | JsonRpcNotification): void {
@@ -490,7 +569,7 @@ class McpClient extends EventEmitter {
 
       this.pendingRequests.set(id, { resolve, reject, timeout })
 
-      const message = JSON.stringify(request) + '\n'
+      const message = this.encodeStdioMessage(request)
       this.process.stdin.write(message)
     })
   }
@@ -1251,7 +1330,7 @@ class McpClient extends EventEmitter {
       params,
     }
 
-    const message = JSON.stringify(notification) + '\n'
+    const message = this.encodeStdioMessage(notification)
     this.process.stdin.write(message)
   }
 
@@ -1413,10 +1492,12 @@ class McpManager extends EventEmitter {
         command: serverConfig.command,
         args: Array.isArray(serverConfig.args) ? serverConfig.args : [],
         env: serverConfig.env,
+        stdioFraming: serverConfig.stdioFraming,
         url: serverConfig.url,
         headers: serverConfig.headers,
         oauth: serverConfig.oauth,
       }
+
     })
   }
 
@@ -1460,6 +1541,7 @@ class McpManager extends EventEmitter {
         command: config.command,
         args: config.args,
         env: config.env,
+        stdioFraming: config.stdioFraming,
         url: config.url,
         headers: config.headers,
         oauth: config.oauth,
@@ -1515,6 +1597,7 @@ class McpManager extends EventEmitter {
       transport,
       type: transport,
       args: Array.isArray(config.args) ? config.args : [],
+      stdioFraming: resolveStdioFraming(config),
     }
 
     if (transport === 'http' && !normalizedConfig.url) {
@@ -1570,6 +1653,7 @@ class McpManager extends EventEmitter {
       transport,
       type: transport,
       args: Array.isArray(config.args) ? config.args : [],
+      stdioFraming: resolveStdioFraming(config),
     }
 
     configs.push(normalizedConfig)
@@ -1596,6 +1680,7 @@ class McpManager extends EventEmitter {
       transport,
       type: transport,
       args: Array.isArray(merged.args) ? merged.args : [],
+      stdioFraming: resolveStdioFraming(merged),
     }
 
     await this.saveConfig(configs, this.settings)

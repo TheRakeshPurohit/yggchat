@@ -222,7 +222,7 @@ export function registerMcpRoutes(app: Express): void {
   app.post('/api/mcp/servers', async (req, res) => {
     try {
       await mcpManager.initialize()
-      const { name, command, args, env, enabled, autoStart, url, headers, transport, type, oauth } = req.body
+      const { name, command, args, env, stdioFraming, enabled, autoStart, url, headers, transport, type, oauth } = req.body
 
       if (!name || typeof name !== 'string') {
         res.status(400).json({ success: false, error: 'Missing "name" in request body' })
@@ -267,6 +267,11 @@ export function registerMcpRoutes(app: Express): void {
         return
       }
 
+      if (stdioFraming !== undefined && stdioFraming !== 'content-length' && stdioFraming !== 'newline-json') {
+        res.status(400).json({ success: false, error: '"stdioFraming" must be "content-length" or "newline-json"' })
+        return
+      }
+
       if (headers !== undefined && (typeof headers !== 'object' || headers === null || Array.isArray(headers))) {
         res.status(400).json({ success: false, error: '"headers" must be an object' })
         return
@@ -283,6 +288,7 @@ export function registerMcpRoutes(app: Express): void {
         command: typeof command === 'string' ? command : undefined,
         args: Array.isArray(args) ? args : [],
         env: env || undefined,
+        stdioFraming: stdioFraming === 'content-length' || stdioFraming === 'newline-json' ? stdioFraming : undefined,
         url: typeof url === 'string' ? url : undefined,
         headers: headers || undefined,
         oauth: parsedOAuth,
@@ -304,7 +310,7 @@ export function registerMcpRoutes(app: Express): void {
   app.put('/api/mcp/servers/:name', async (req, res) => {
     try {
       await mcpManager.initialize()
-      const { command, args, env, enabled, autoStart, url, headers, transport, type, oauth } = req.body
+      const { command, args, env, stdioFraming, enabled, autoStart, url, headers, transport, type, oauth } = req.body
 
       if (args !== undefined && !Array.isArray(args)) {
         res.status(400).json({ success: false, error: '"args" must be an array' })
@@ -313,6 +319,11 @@ export function registerMcpRoutes(app: Express): void {
 
       if (env !== undefined && (typeof env !== 'object' || env === null || Array.isArray(env))) {
         res.status(400).json({ success: false, error: '"env" must be an object' })
+        return
+      }
+
+      if (stdioFraming !== undefined && stdioFraming !== 'content-length' && stdioFraming !== 'newline-json') {
+        res.status(400).json({ success: false, error: '"stdioFraming" must be "content-length" or "newline-json"' })
         return
       }
 
@@ -342,6 +353,7 @@ export function registerMcpRoutes(app: Express): void {
       if (command !== undefined) updates.command = command
       if (args !== undefined) updates.args = args
       if (env !== undefined) updates.env = env
+      if (stdioFraming !== undefined) updates.stdioFraming = stdioFraming
       if (enabled !== undefined) updates.enabled = enabled
       if (autoStart !== undefined) updates.autoStart = autoStart
       if (url !== undefined) updates.url = url

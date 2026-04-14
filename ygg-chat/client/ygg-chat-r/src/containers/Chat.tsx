@@ -4710,129 +4710,68 @@ function Chat() {
 
   const handleExplainFromSelection = useCallback(
     (id: string, newContent: string) => {
-      if (currentConversationId) {
-        // Replace any @file mentions with actual file contents before branching
-        const processed = replaceFileMentionsWithPath(newContent)
-        const contentWithIdeContext = appendIdeContextToMessage(processed)
-        // console.log(processed)
+      if (!currentConversationId) return
 
-        // Find the message to check if it has children
-        const parsedId = parseId(id)
-        const originalMessage = conversationMessages.find(m => m.id === parsedId)
-        const { content: contentWithCwdAnnouncement, pendingCwdValue } = withPendingCwdAnnouncement(
-          currentConversationId,
-          contentWithIdeContext
-        )
+      // Explain selection should always create a new user child under the selected message,
+      // even when that message already has children.
+      const processed = replaceFileMentionsWithPath(newContent)
+      const contentWithIdeContext = appendIdeContextToMessage(processed)
+      const parsedId = parseId(id)
+      const originalMessage = conversationMessages.find(m => m.id === parsedId)
+      const { content: contentWithCwdAnnouncement, pendingCwdValue } = withPendingCwdAnnouncement(
+        currentConversationId,
+        contentWithIdeContext
+      )
 
-        if (!originalMessage) {
-          console.error('Message not found:', id)
-          return
-        }
-
-        // Check if message has children
-        const hasChildren = originalMessage.children_ids && originalMessage.children_ids.length > 0
-
-        if (!hasChildren) {
-          // No children: send a new message with this message as parent (linear continuation)
-          // Create optimistic message for instant UI feedback
-          const optimisticUserMessage: Message = {
-            id: `temp-${Date.now()}`,
-            conversation_id: currentConversationId,
-            role: 'user' as const,
-            content: contentWithCwdAnnouncement,
-            content_plain_text: contentWithCwdAnnouncement,
-            parent_id: parsedId,
-            children_ids: [],
-            created_at: new Date().toISOString(),
-            model_name: selectedModel?.name || '',
-            partial: false,
-            pastedContext: [],
-            artifacts: [],
-          }
-          dispatch(chatSliceActions.optimisticMessageSet(optimisticUserMessage))
-
-          // Send as a regular message with the selected message as parent
-          const streamId = generateStreamId('primary')
-          setPendingViewStreamId(streamId)
-
-          dispatch(
-            sendMessage({
-              conversationId: currentConversationId,
-              input: { content: contentWithCwdAnnouncement },
-              parent: parsedId,
-              repeatNum: 1,
-              think: think,
-              imageConfig: isImageGenerationModel ? imageConfig : undefined,
-              reasoningConfig: think ? reasoningConfig : undefined,
-              cwd: ccCwd || undefined,
-              streamId,
-            })
-          )
-            .unwrap()
-            .then(result => {
-              clearPendingCwdAnnouncement(currentConversationId, pendingCwdValue)
-              if (!result?.userMessage) {
-                console.warn('Server did not confirm user message')
-              }
-              // Messages already added to Redux via SSE stream
-            })
-            .catch(error => {
-              // Clear optimistic message on error
-              dispatch(chatSliceActions.optimisticMessageCleared())
-              console.error('Failed to send message:', error)
-            })
-        } else {
-          // Has children: create a branch (same as branch button behavior)
-          // Create optimistic branch message for instant UI feedback.
-          // Keep artifacts so pasted images do not flicker away during branch send.
-          const optimisticArtifacts = Array.isArray(originalMessage.artifacts) ? originalMessage.artifacts : []
-          const optimisticBranchMessage: Message = {
-            id: `branch-temp-${Date.now()}`,
-            conversation_id: currentConversationId,
-            role: 'user' as const,
-            content: contentWithCwdAnnouncement,
-            content_plain_text: contentWithCwdAnnouncement,
-            parent_id: originalMessage.parent_id,
-            children_ids: [],
-            created_at: new Date().toISOString(),
-            model_name: selectedModel?.name || '',
-            partial: false,
-            pastedContext: [],
-            artifacts: optimisticArtifacts,
-          }
-          dispatch(chatSliceActions.optimisticBranchMessageSet(optimisticBranchMessage))
-
-          const streamId = generateStreamId('branch')
-          setPendingViewStreamId(streamId)
-
-          dispatch(
-            editMessageWithBranching({
-              conversationId: currentConversationId,
-              originalMessageId: parsedId,
-              newContent: contentWithCwdAnnouncement,
-              modelOverride: selectedModel?.name,
-              think: think,
-              cwd: ccCwd || undefined,
-              streamId,
-            })
-          )
-            .unwrap()
-            .then(() => {
-              clearPendingCwdAnnouncement(currentConversationId, pendingCwdValue)
-              dispatch(chatSliceActions.messageArtifactsBackupCleared({ messageId: parsedId }))
-              // Invalidate React Query cache after successful branch to fetch new messages
-              queryClient.invalidateQueries({
-                queryKey: ['conversations', currentConversationId, 'messages'],
-                refetchType: 'active',
-              })
-            })
-            .catch(error => {
-              // Clear optimistic branch message on error
-              dispatch(chatSliceActions.optimisticBranchMessageCleared())
-              console.error('Failed to branch message:', error)
-            })
-        }
+      if (!originalMessage) {
+        console.error('Message not found:', id)
+        return
       }
+
+      const optimisticUserMessage: Message = {
+        id: `temp-${Date.now()}`,
+        conversation_id: currentConversationId,
+        role: 'user' as const,
+        content: contentWithCwdAnnouncement,
+        content_plain_text: contentWithCwdAnnouncement,
+        parent_id: parsedId,
+        children_ids: [],
+        created_at: new Date().toISOString(),
+        model_name: selectedModel?.name || '',
+        partial: false,
+        pastedContext: [],
+        artifacts: [],
+      }
+      dispatch(chatSliceActions.optimisticMessageSet(optimisticUserMessage))
+
+      const streamId = generateStreamId('primary')
+      setPendingViewStreamId(streamId)
+
+      dispatch(
+        sendMessage({
+          conversationId: currentConversationId,
+          input: { content: contentWithCwdAnnouncement },
+          parent: parsedId,
+          repeatNum: 1,
+          think: think,
+          imageConfig: isImageGenerationModel ? imageConfig : undefined,
+          reasoningConfig: think ? reasoningConfig : undefined,
+          cwd: ccCwd || undefined,
+          streamId,
+        })
+      )
+        .unwrap()
+        .then(result => {
+          clearPendingCwdAnnouncement(currentConversationId, pendingCwdValue)
+          if (!result?.userMessage) {
+            console.warn('Server did not confirm user message')
+          }
+          // Messages already added to Redux via SSE stream
+        })
+        .catch(error => {
+          dispatch(chatSliceActions.optimisticMessageCleared())
+          console.error('Failed to send explain-selection message:', error)
+        })
     },
     [
       currentConversationId,
@@ -4842,10 +4781,10 @@ function Chat() {
       replaceFileMentionsWithPath,
       appendIdeContextToMessage,
       conversationMessages,
-      queryClient,
       ccCwd,
       isImageGenerationModel,
       imageConfig,
+      reasoningConfig,
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
     ]

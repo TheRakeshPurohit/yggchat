@@ -58,10 +58,15 @@ It is organized as an npm workspace:
 ### Chat/streaming core
 - `client/ygg-chat-r/src/features/chats/chatActions.ts`: primary orchestration thunk(s):
   - sends messages,
+  - starts typed streams (`primary`, `branch`, `subagent`, `tool`),
+  - attaches `conversationId` and branch lineage metadata,
+  - updates stream lineage after branch/user nodes are materialized,
   - handles SSE stream events,
   - executes tool calls with permission checks,
   - supports subagent/orchestrator behavior.
-- `client/ygg-chat-r/src/features/chats/chatSlice.ts`: streaming/messaging state buffers by `streamId`.
+- `client/ygg-chat-r/src/features/chats/chatSlice.ts`: Redux chat state including the multi-stream container (`streaming.activeIds`, `streaming.byId`, `primaryStreamId`, `lastCompletedId`) plus per-stream buffers/events/tool calls keyed by `streamId`.
+- `client/ygg-chat-r/src/features/chats/chatSelectors.ts`: branch-aware and conversation-aware stream selection, especially `selectCurrentViewStream`.
+- `client/ygg-chat-r/src/containers/Chat.tsx`: consumes the branch-aware stream selector, keeps a short-lived pending stream fallback, and drives visible loading/stream UI from the current branch stream instead of a purely global streaming flag.
 - `client/ygg-chat-r/src/features/chats/toolDefinitions.ts`: merged built-in + custom + MCP tool registry used by model/tool runtime.
 
 ### API and sync utilities

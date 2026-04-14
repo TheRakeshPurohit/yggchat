@@ -44,7 +44,6 @@ import { persistToolResultsWithFallback } from './toolResultPersistence'
 import {
   getSubagentEnabledTools,
   isOrchestratorEnabled,
-  shouldForceSubagentOpenAIProvider,
   shouldUseGlobalAgentModelForSubagentDefault,
 } from '../../helpers/subagentToolSettings'
 import { loadAgentSettings } from '../../helpers/agentSettingsStorage'
@@ -1175,15 +1174,22 @@ const SUBAGENT_MAX_TURNS = 12
 const normalizeProviderSlug = (providerName: string | null | undefined): string =>
   (providerName || '').toLowerCase().replace(/\s+/g, '')
 
-const isOpenAIChatGPTProvider = (providerName: string | null | undefined): boolean => {
-  const slug = normalizeProviderSlug(providerName)
-  return slug === 'openaichatgpt' || slug === 'openai(chatgpt)'
+type SubagentInheritedProvider = 'openaichatgpt' | 'openrouter' | 'lmstudio'
+
+const resolveInheritedSubagentProvider = (
+  callerProviderName: string | null | undefined
+): SubagentInheritedProvider | undefined => {
+  const slug = normalizeProviderSlug(callerProviderName)
+  if (slug === 'openaichatgpt' || slug === 'openai(chatgpt)') return 'openaichatgpt'
+  if (slug === 'openrouter') return 'openrouter'
+  if (slug === 'lmstudio') return 'lmstudio'
+  return undefined
 }
 
 const resolveSubagentDefaults = async (
   requestedModel: unknown,
-  currentProviderName?: string | null
-): Promise<{ model: string; provider?: 'openaichatgpt' }> => {
+  callerProviderName?: string | null
+): Promise<{ model: string; provider?: SubagentInheritedProvider }> => {
   const normalizedRequestedModel = typeof requestedModel === 'string' ? requestedModel.trim() : ''
 
   let defaultModel = DEFAULT_SUBAGENT_MODEL
@@ -1198,10 +1204,9 @@ const resolveSubagentDefaults = async (
     }
   }
 
-  const forceOpenAIProvider = shouldForceSubagentOpenAIProvider() && isOpenAIChatGPTProvider(currentProviderName)
   return {
     model: normalizedRequestedModel || defaultModel,
-    provider: forceOpenAIProvider ? 'openaichatgpt' : undefined,
+    provider: resolveInheritedSubagentProvider(callerProviderName),
   }
 }
 
@@ -1229,7 +1234,11 @@ const parseToolResultsFromContentBlocks = (contentBlocks: any): any[] => {
 /**
  * Simple subagent execution without tool calling (fallback when context not available)
  */
-const executeSimpleSubagentCall = async (toolCall: any, accessToken: string | null): Promise<string> => {
+const executeSimpleSubagentCall = async (
+  toolCall: any,
+  accessToken: string | null,
+  callerProviderName?: string | null
+): Promise<string> => {
   const args = toolCall.arguments || {}
   const { prompt, model, systemPrompt, maxTokens, temperature, response_format, responseFormat } = args
   const effectiveResponseFormat = response_format ?? responseFormat
@@ -1238,7 +1247,10 @@ const executeSimpleSubagentCall = async (toolCall: any, accessToken: string | nu
     throw new Error('Subagent requires a prompt')
   }
 
-  const { model: resolvedModel, provider: resolvedProvider } = await resolveSubagentDefaults(model)
+  const { model: resolvedModel, provider: resolvedProvider } = await resolveSubagentDefaults(
+    model,
+    callerProviderName
+  )
 
   try {
     if (shouldUseCommunityLocalEphemeral()) {
@@ -1468,6 +1480,7 @@ const executeSubagentCall = async (
     parentMessageId: string
     streamId?: string
     rootPath: string | null
+    callerProvider?: string | null
   }
 ): Promise<string> => {
   const args = toolCall.arguments || {}
@@ -1492,9 +1505,10 @@ const executeSubagentCall = async (
   const { dispatch, getState, conversationId, parentMessageId, rootPath } = context
   const streamId = context.streamId
   const state = getState()
+  const callerProviderName = context.callerProvider ?? state.chat.providerState.currentProvider
   const { model: resolvedModel, provider: resolvedProvider } = await resolveSubagentDefaults(
     model,
-    state.chat.providerState.currentProvider
+    callerProviderName
   )
 
   // Get filtered tool definitions for this subagent
@@ -2110,6 +2124,7 @@ export const executeLocalTool = async (
     priority?: 'low' | 'normal' | 'high' | 'critical'
     timeoutMs?: number
     accessToken?: string | null
+    callerProvider?: string | null
     // For subagent execution
     dispatch?: any
     getState?: () => RootState
@@ -2122,7 +2137,11 @@ export const executeLocalTool = async (
   if (preparedToolCall?.name === 'subagent') {
     if (!context?.dispatch || !context?.getState || !context?.conversationId || !context?.messageId) {
       // Fallback to simple mode if context not available
-      return await executeSimpleSubagentCall(preparedToolCall, context?.accessToken ?? null)
+      return await executeSimpleSubagentCall(
+        preparedToolCall,
+        context?.accessToken ?? null,
+        context?.callerProvider ?? null
+      )
     }
     return await executeSubagentCall(preparedToolCall, context.accessToken ?? null, {
       dispatch: context.dispatch,
@@ -2131,6 +2150,7 @@ export const executeLocalTool = async (
       parentMessageId: context.messageId,
       streamId: context.streamId,
       rootPath,
+      callerProvider: context.callerProvider,
     })
   }
 
@@ -2330,6 +2350,7 @@ const executeToolWithPermissionCheck = async (
     ...context,
     dispatch,
     getState,
+    callerProvider: context?.provider ?? null,
   }
 
   // Always resolve operation mode at execution time so Chat/Agent toggles apply mid-stream.

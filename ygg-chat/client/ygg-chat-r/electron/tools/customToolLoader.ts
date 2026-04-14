@@ -159,6 +159,9 @@ export interface CustomToolDefinition {
   appPermissions?: {
     agent?: 'read' | 'write'
   }
+  ui?: {
+    entry?: string
+  }
   jsRuntimeMode?: 'electron' | 'custom' | 'none'
   jsRuntimes?: string
   author?: string
@@ -308,6 +311,7 @@ function cloneDefinition(definition: CustomToolDefinition): CustomToolDefinition
       required: definition.inputSchema.required ? [...definition.inputSchema.required] : undefined,
     },
     appPermissions: definition.appPermissions ? { ...definition.appPermissions } : undefined,
+    ui: definition.ui ? { ...definition.ui } : undefined,
   }
 }
 
@@ -533,6 +537,7 @@ class CustomToolRegistry extends EventEmitter {
         enabled,
         description: definition.description,
         appPermissions: definition.appPermissions,
+        ui: definition.ui,
         jsRuntimeMode: definition.jsRuntimeMode,
         jsRuntimes: definition.jsRuntimes,
         author: definition.author,

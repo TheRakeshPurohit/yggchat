@@ -450,6 +450,22 @@ function syncHermesRuntimeSettingsFromStore(): void {
   }
 }
 
+function syncLmStudioBaseUrlFromStore(): void {
+  try {
+    const providerSettings = getFromStore('ygg_provider_settings')
+    const rawValue = typeof providerSettings?.lmStudioBaseUrl === 'string' ? providerSettings.lmStudioBaseUrl.trim() : ''
+    if (rawValue) {
+      const normalized = rawValue.replace(/\/+$/, '').replace(/\/v1$/i, '')
+      process.env.LMSTUDIO_BASE_URL = `${normalized}/v1`
+      return
+    }
+  } catch (error) {
+    console.error('[Electron] Failed to sync LM Studio base URL from storage:', error)
+  }
+
+  delete process.env.LMSTUDIO_BASE_URL
+}
+
 // Helper to get icon path
 
 function getIconPath(_isDark?: boolean) {
@@ -847,6 +863,7 @@ app.whenReady().then(async () => {
   try {
     await initializeStore()
     syncHermesRuntimeSettingsFromStore()
+    syncLmStudioBaseUrlFromStore()
     process.env.YGG_APP_USER_DATA = app.getPath('userData')
     const managedHooksDirectory = await ensureManagedHooksInitialized()
     console.log(`[Electron] Managed hooks directory ready at: ${managedHooksDirectory}`)
@@ -1021,12 +1038,18 @@ ipcMain.handle('storage:set', async (_event, key: string, value: any) => {
       if (key === HERMES_RUNTIME_SETTINGS_STORAGE_KEY) {
         applyHermesRuntimeSettingsToEnv(null)
       }
+      if (key === 'ygg_provider_settings') {
+        syncLmStudioBaseUrlFromStore()
+      }
       // console.log('[Electron IPC] Deleted key from storage')
       return { success }
     } else {
       const success = setInStore(key, value)
       if (key === HERMES_RUNTIME_SETTINGS_STORAGE_KEY) {
         applyHermesRuntimeSettingsToEnv(value)
+      }
+      if (key === 'ygg_provider_settings') {
+        syncLmStudioBaseUrlFromStore()
       }
       // console.log('[Electron IPC] Stored successfully')
       return { success }
@@ -1049,6 +1072,7 @@ ipcMain.handle('storage:clear', async () => {
   try {
     const success = clearStore()
     applyHermesRuntimeSettingsToEnv(null)
+    syncLmStudioBaseUrlFromStore()
     return { success }
   } catch (error) {
     console.error('[Electron IPC] Failed to clear storage:', error)

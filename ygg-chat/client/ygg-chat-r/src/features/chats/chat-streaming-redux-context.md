@@ -1,23 +1,34 @@
 # Chat streaming via Redux: current state
 
-This note captures how chat streaming currently works in `ygg-chat-r` before making changes.
+This note describes the **implemented** multi-stream Redux model in `ygg-chat-r`.
+
+It is no longer accurate to think of chat streaming as a single global boolean. The app now tracks:
+- multiple concurrent streams,
+- stream-to-conversation ownership,
+- branch/message lineage,
+- branch-aware stream selection in the chat UI,
+- and a small legacy compatibility layer for older UI paths.
+
+---
 
 ## Main idea
 
-Streaming is tracked in Redux under `state.chat.streaming`, not just a single boolean.
+Streaming lives under `state.chat.streaming`.
 
-There is a newer **multi-stream** model:
-- `streaming.byId[streamId]` stores per-stream state
+The current model is:
+- `streaming.byId[streamId]` stores full per-stream state
 - `streaming.activeIds` stores all active stream IDs
-- `streaming.primaryStreamId` points to the current primary stream
-- each stream also carries `lineage` metadata so it can be associated with a branch/message
+- `streaming.primaryStreamId` tracks the current primary stream
+- `streaming.lastCompletedId` tracks bookkeeping for the most recently finished stream
+- each stream stores both `conversationId` and `lineage`
 
-At the same time, the UI still keeps a **legacy compatibility path**:
+This matters because the app can now have more than one active stream at a time, and the UI must decide which one belongs to the **currently viewed conversation/branch**.
+
+A legacy compatibility path still exists:
 - `state.chat.composition.sending`
-- selectors like `selectSendingState`
-- some UI logic still asks "is *anything* streaming?" instead of "is the *current branch view* streaming?"
+- legacy selectors like `selectSendingState`
 
-That mix is the important thing to understand.
+But the main rendering path in `Chat.tsx` now uses **branch-aware stream selection**, not just a global "anything is streaming" flag.
 
 ---
 
@@ -27,7 +38,7 @@ Defined in:
 - `src/features/chats/chatTypes.ts`
 - initialized in `src/features/chats/chatSlice.ts`
 
-Important pieces:
+Important structure:
 
 ```ts
 state.chat.streaming = {
@@ -48,8 +59,10 @@ Each `StreamState` contains:
 - `streamingMessageId`
 - `error`
 - `finished`
-- `streamType` (`primary | subagent | tool | branch`)
+- `conversationId`
 - `lineage`
+- `createdAt`
+- `streamType` (`primary | subagent | tool | branch`)
 
 `lineage` can include:
 - `parentStreamId`
@@ -57,211 +70,458 @@ Each `StreamState` contains:
 - `originMessageId`
 - `branchId`
 
-The key branch-related field is usually `lineage.rootMessageId`, which is meant to identify the parent/root message that the stream belongs to.
+Two fields are especially important now:
+- `conversationId`: prevents cross-conversation bleed
+- `lineage.rootMessageId`: associates a stream with the branch root / parent message it belongs to
+
+---
+
+## Stream creation and IDs
+
+Helpers live in `src/features/chats/streamHelpers.ts`.
+
+### Stream types
+- `primary`
+- `branch`
+- `subagent`
+- `tool`
+
+### ID generation
+`generateStreamId(...)` creates typed IDs:
+- primary: UUID
+- branch: `branch:{shortUuid}`
+- subagent: `{parentStreamId}:sub:{shortUuid}` or `sub:{uuid}`
+- tool: `tool:{toolCallId}:{shortUuid}` or `tool:{uuid}`
+
+`inferStreamTypeFromId(...)` can recover the stream type from the ID shape.
+
+This is used by shared send flows so a branch send can still be treated as a branch stream even when it shares common transport/orchestration logic.
 
 ---
 
 ## How streams start
 
-In `chatActions.ts`, send thunks generate a `streamId` and dispatch `chatSliceActions.sendingStarted(...)`.
+`chatActions.ts` dispatches `chatSliceActions.sendingStarted(...)` when a send flow begins.
 
-Examples:
-- `sendMessage(...)` uses `generateStreamId('primary')`
-- `editMessageWithBranching(...)` uses `generateStreamId('branch')`
-- `sendHermesMessage(...)` uses `generateStreamId('primary')`
+Implemented examples include:
+- `sendMessage(...)` → usually `streamType: 'primary'`
+- `editMessageWithBranching(...)` → `streamType: 'branch'`
+- Hermes/Claude Code style sends also start streams and attach `conversationId`
 
-Typical start payload:
+Typical payloads now include `conversationId` and often `lineage`.
+
+Primary send example:
 
 ```ts
 chatSliceActions.sendingStarted({
   streamId,
   streamType: 'primary',
+  conversationId,
   lineage: {
     rootMessageId: parent,
   },
 })
 ```
 
+Branch send example:
+
+```ts
+chatSliceActions.sendingStarted({
+  streamId,
+  streamType: 'branch',
+  conversationId,
+  lineage: {
+    rootMessageId: parentId,
+  },
+})
+```
+
 Reducer behavior in `chatSlice.ts`:
 - creates `streaming.byId[streamId]`
-- marks it `active: true`
-- pushes the ID into `streaming.activeIds`
-- if `streamType === 'primary'`, sets `streaming.primaryStreamId = streamId`
-- for legacy compatibility, also sets `composition.sending = true`
+- fills it from `createEmptyStreamState(...)`
+- marks the stream `active: true`
+- stores `conversationId`
+- pushes `streamId` into `streaming.activeIds`
+- if the stream is `primary`, sets `streaming.primaryStreamId = streamId`
+- for primary streams, keeps legacy `composition.sending = true`
+- for primary/branch sends, clears `composition.imageDrafts`
+
+---
+
+## How lineage is updated after the real user branch node exists
+
+One important implementation detail is that some flows do **not** know the final branch anchor at stream start.
+
+After the real user message is created/received, `chatActions.ts` can dispatch:
+
+```ts
+chatSliceActions.streamLineageUpdated({
+  streamId,
+  targetParentId: userMessage.id,
+})
+```
+
+Reducer behavior:
+- updates `stream.lineage.rootMessageId = targetParentId`
+
+This is important for branch-aware selection because the stream may start with an approximate lineage, then be rebound to the actual branch node once the created user message is known.
 
 ---
 
 ## How stream updates arrive
 
-Chunks are handled by `chatSliceActions.streamChunkReceived(...)`.
+`chatSliceActions.streamChunkReceived(...)` updates a specific stream.
 
-That reducer updates the target stream in `streaming.byId[streamId]`:
-- text chunks append to `buffer`
-- reasoning chunks append to `thinkingBuffer`
-- tool calls update `toolCalls`
-- ordered render data is accumulated in `events`
-- `complete` sets `messageId` but intentionally does **not** end the stream yet
-- `error` marks that stream inactive and removes it from `activeIds`
+The reducer supports both:
+- legacy chunk payloads
+- new `{ streamId, chunk }` payloads
 
-Important detail:
-- the stream is not considered fully done just because a `complete` chunk arrived
-- actual shutdown happens later through `streamCompleted(...)` or `sendingCompleted(...)`
+Behavior by chunk type:
 
-This is because some flows are multi-turn and may keep going after intermediate completion events.
+### `reset`
+Clears:
+- `buffer`
+- `thinkingBuffer`
+- `toolCalls`
+- `events`
+- `error`
+- `messageId`
+- `streamingMessageId`
+
+### `generation_started`
+Sets:
+- `streamingMessageId`
+
+Also resets the live streaming buffers/events for the new generation turn.
+
+### `chunk` with `part: 'text'`
+- appends to `buffer`
+- appends a `text` entry to `events`
+
+### `chunk` with `part: 'reasoning'`
+- appends to `thinkingBuffer`
+- appends a `reasoning` entry to `events`
+
+### `chunk` with `part: 'tool_call'`
+- upserts into `toolCalls`
+- upserts a `tool_call` event in `events`
+
+### `chunk` with `part: 'tool_result'`
+- appends a deduplicated `tool_result` event to `events`
+
+### `chunk` with `part: 'image'`
+- appends a deduplicated `image` event to `events`
+
+### top-level `tool_call`
+Still supported as a legacy path and normalized into `toolCalls` + `events`.
+
+### `complete`
+- sets `stream.messageId`
+- intentionally does **not** shut the stream down yet
+
+### `error`
+- sets `stream.error`
+- marks stream inactive
+- clears `streamingMessageId`
+- removes the stream from `activeIds`
+- clears `primaryStreamId` if needed
+
+The key implementation detail is still:
+- a `complete` chunk is not the same thing as final stream teardown
+- multi-turn/tool-driven flows may continue after intermediate completion markers
 
 ---
 
 ## How streams stop
 
-A send thunk eventually dispatches:
-- `streamCompleted({ streamId, messageId, updatePath: true })`
+A send flow eventually dispatches:
+- `streamCompleted({ streamId, messageId, updatePath })`
 - `sendingCompleted({ streamId })`
-- and later `streamPruned({ streamId })` after `STREAM_PRUNE_DELAY` (30s)
-
-Reducer behavior:
+- `streamPruned({ streamId })` later for cleanup
 
 ### `streamCompleted(...)`
+Reducer behavior:
 - marks the stream inactive
 - marks it finished
 - stores `messageId`
-- removes `streamId` from `activeIds`
-- may update `conversation.currentPath`
+- removes the stream from `activeIds`
+- stores `lastCompletedId`
+- optionally updates `conversation.currentPath`
 - clears `primaryStreamId` if needed
-- for primary streams, also sets `composition.sending = false`
+- for primary streams, clears legacy `composition.sending`
+
+### Path update behavior in `streamCompleted(...)`
+This is more careful than the earlier doc implied.
+
+If `updatePath` is true, the reducer only updates `conversation.currentPath` when:
+- the current path is empty, or
+- the completed message is on the current branch
+
+Then it rebuilds the path to the completed message from the current conversation messages.
+
+That prevents unrelated streams from blindly hijacking the visible branch.
 
 ### `sendingCompleted(...)`
-- also marks the stream inactive/finished
+Reducer behavior:
+- marks the stream inactive
+- marks it finished
+- clears `streamingMessageId`
 - removes it from `activeIds`
 - clears `primaryStreamId` if needed
-- for primary streams, sets `composition.sending = false`
+- for primary streams, clears legacy `composition.sending`
+- also clears image drafts for primary streams
 
 ### `streamPruned(...)`
-- removes the old stream entry from `streaming.byId`
-- cleanup only; not part of visible "stop streaming" behavior
+Reducer behavior:
+- deletes `streaming.byId[streamId]`
+- removes the ID from `activeIds` as a safety cleanup
+- clears `lastCompletedId` if it points to that stream
+
+This is purely lifecycle cleanup, not visible streaming state.
 
 ---
 
 ## Abort handling
 
-`chatActions.ts` keeps abort controllers in module-level maps:
+`chatActions.ts` keeps controller maps for both top-level generation and subagents:
 - `generationAbortControllersByStream`
 - `subagentAbortControllersByStream`
 
-`abortGeneration({ streamId, messageId })`:
-- aborts subagent controllers for that stream
-- optionally asks server to stop streaming
-- aborts local controllers
-- dispatches `streamingAborted({ streamId })`
-- or `allStreamsAborted()` if no stream ID was provided
+Abort helpers can stop:
+- one stream,
+- one stream plus its subagent descendants,
+- or all streams.
 
-Reducer behavior for `streamingAborted(...)`:
+`abortGeneration(...)` eventually dispatches either:
+- `streamingAborted({ streamId })`
+- or `allStreamsAborted()`
+
+### `streamingAborted(...)`
+Reducer behavior:
 - marks that stream inactive
+- stores an abort error message
+- clears `streamingMessageId`
 - removes it from `activeIds`
 - clears `primaryStreamId` if needed
-- sets `composition.sending = false` for primary streams
+- clears legacy `composition.sending` for primary streams
+
+### `allStreamsAborted()`
+Reducer behavior:
+- marks all active streams inactive
+- sets their error to `Generation aborted`
+- clears all `streamingMessageId` values for active streams
+- empties `activeIds`
+- clears `primaryStreamId`
+- clears legacy `composition.sending`
 
 ---
 
-## How Chat.tsx reads streaming state
+## Selectors: global vs branch-aware
 
-In `src/containers/Chat.tsx`:
+Defined in `src/features/chats/chatSelectors.ts`.
+
+### Global selectors
+- `selectStreamingRoot`
+- `selectActiveStreamIds`
+- `selectIsAnyStreaming`
+- `selectPrimaryStreamId`
+- `selectPrimaryStreamState`
+- per-stream selector factories like `makeSelectStreamBuffer(streamId)`
+
+### Legacy compatibility selector
+`selectSendingState` still returns:
+
+```ts
+{
+  sending: chat.composition.sending,
+  compacting: chat.composition.compacting,
+  streaming: activeIds.length > 0,
+  error: null,
+}
+```
+
+So `selectSendingState.streaming` still means:
+- **some stream is active somewhere**
+- not necessarily that the currently viewed branch is streaming
+
+That selector remains useful for coarse status, but it is no longer the main source of truth for branch-visible streaming UI.
+
+---
+
+## `selectCurrentViewStream`: the implemented branch-aware selector
+
+`selectCurrentViewStream` is the key selector for the current UI.
+
+Inputs:
+- `streaming`
+- `conversation.currentPath`
+- `conversation.currentConversationId`
+
+Behavior:
+
+1. filters to **active streams in the current conversation**
+2. if there are no active streams, returns `null`
+3. if there is no selected path yet:
+   - returns active `primaryStreamId` if valid for the conversation
+   - otherwise returns the first active conversation-scoped stream
+4. if a path exists:
+   - ranks streams by how well they match the selected path
+   - considers these candidate IDs:
+     - `stream.streamingMessageId`
+     - `stream.messageId`
+     - `stream.lineage.rootMessageId`
+     - `stream.lineage.originMessageId`
+   - prefers matches near the **tail** of the selected path
+   - strongly boosts exact tip matches
+   - gives only a tiny bias to `primaryStreamId`
+5. if no stream matches the selected branch closely enough, returns `null`
+
+This is a major change from the stale description.
+
+The selector is now:
+- conversation-scoped,
+- path-ranked,
+- tail-biased,
+- and explicitly able to return `null` when the current branch has no relevant stream.
+
+It is **not** just:
+1. root match
+2. primary fallback
+3. any active fallback
+
+anymore.
+
+---
+
+## How `Chat.tsx` now consumes streaming state
+
+In `src/containers/Chat.tsx` the relevant pattern is now:
 
 ```ts
 const sendingState = useAppSelector(selectSendingState)
 const currentViewStream = useAppSelector(selectCurrentViewStream)
+const [pendingViewStreamId, setPendingViewStreamId] = useState<string | null>(null)
 ```
 
-Then it derives a local `streamState` from `currentViewStream`.
+Then `Chat.tsx` derives:
+- `pendingViewStream`
+- `effectiveViewStream`
+- `streamState`
 
-### `selectSendingState`
-Defined in `chatSelectors.ts`:
+### `effectiveViewStream`
+`effectiveViewStream` does this:
+- use `currentViewStream` if available
+- otherwise, temporarily fall back to `pendingViewStreamId` if that stream is still active and belongs to the current conversation
 
-```ts
-streaming: activeIds.length > 0
-```
+This fallback exists because there can be a brief period where:
+- a stream has started,
+- but branch/path metadata has not fully stabilized yet,
+- especially around top-level sends and branch creation.
 
-So `sendingState.streaming` means:
-- **any stream anywhere in chat Redux is active**
-- not necessarily the stream for the currently selected branch/path
+Without this fallback, the UI can flicker back to idle before the stream becomes selectable by branch-aware logic.
 
-### `selectCurrentViewStream`
-Also in `chatSelectors.ts`.
+### `streamState`
+`Chat.tsx` derives a local compatibility object from `effectiveViewStream`:
+- `active`
+- `buffer`
+- `thinkingBuffer`
+- `toolCalls`
+- `events`
+- `messageId`
+- `error`
+- `finished`
+- `streamingMessageId`
 
-It tries to choose the stream most relevant to the current branch view:
-1. find an active stream whose `lineage.rootMessageId` is included in `conversation.currentPath`
-2. else return `primaryStreamId` if active
-3. else return any active stream
-4. else return `null`
-
-This is branch-aware, but it still has global fallbacks.
+That local object is what most of the component uses.
 
 ---
 
-## Why the send button keeps animating after branch switch
+## Send button / loader behavior: what changed
 
-In `Chat.tsx` the loading button is controlled by:
+The stale version of this doc said the send button animation was driven by:
+
+```ts
+sendingState.compacting || sendingState.streaming || sendingState.sending
+```
+
+That is no longer the important behavior.
+
+In the implemented `Chat.tsx`, the loading animation is driven by:
 
 ```ts
 const showGenerationLoadingAnimation =
-  sendingState.compacting || sendingState.streaming || sendingState.sending
+  isCurrentConversationCompacting || streamState.active || hasRunningToolJobForCurrentBranch
 ```
 
-That means the send button animates if:
-- compaction is happening, or
-- **any stream is active globally**, or
-- the legacy primary `sending` flag is true
+This means the visible loader is now tied to:
+- compaction for the **current conversation**,
+- the **current/effective view stream**,
+- or running tool jobs associated with the **current branch / current stream**.
 
-So even if the user switches to a different branch where the current visible branch should not show streaming:
-- `sendingState.streaming` stays true while *some other stream* is active
-- the send button continues showing the loading animation
+So the core mismatch described in the stale note has largely been fixed in the main UI path:
+- branch-aware stream selection drives visible streaming state
+- the send button is no longer simply animated by any global active stream
 
-This is the main current mismatch between:
-- **branch-aware stream display selection** (`selectCurrentViewStream`)
-- **global loading state** (`selectSendingState`)
+---
 
-There is a second contributing factor:
-- `selectCurrentViewStream` falls back to primary stream, then to any active stream, so even branch switching may still surface another active stream instead of returning `null`
+## Branch-aware tool-job coupling in `Chat.tsx`
+
+`Chat.tsx` also computes `hasRunningToolJobForCurrentBranch`.
+
+That logic scopes jobs by:
+- current conversation,
+- current `streamState.id`, and/or
+- whether a job’s `messageId` is on `selectedPath`
+
+That means the loading state can remain visible for the current branch even when the stream is waiting on tool work, without showing unrelated jobs from another branch/conversation.
 
 ---
 
 ## Current branch switching behavior
 
-Branch selection updates:
+Branch selection still updates:
 - `conversation.currentPath`
-- often via `conversationPathSet(...)` / `selectedNodePathSet(...)`
-- for example from `handleNodeSelect(...)` in `Chat.tsx`
+- via actions like `conversationPathSet(...)` / `selectedNodePathSet(...)`
 
-Switching branch does **not** stop or detach active streams in Redux.
-It only changes which branch/path is selected.
-
-So the active stream continues to exist in:
+Switching branches does **not** kill streams. Streams continue to live in:
 - `streaming.byId`
 - `streaming.activeIds`
 
-The current UI issue is not that branch switching fails to mutate stream state. It is that the UI still treats global active streaming as if it belongs to the currently viewed branch.
+What changed is the selection/render model:
+- the UI no longer assumes every active stream belongs to the current branch
+- `selectCurrentViewStream` can return `null`
+- `Chat.tsx` shows streaming state from the current/effective branch stream only
+
+So the current system is:
+- **streams remain global in storage**,
+- but **visibility is branch-aware and conversation-aware**.
 
 ---
 
-## Important current-state takeaway
+## Practical takeaway
 
-Right now the app has two overlapping models:
+The app currently has two layers:
 
-1. **Global/legacy sending model**
+1. **Global compatibility layer**
    - `composition.sending`
    - `selectSendingState.streaming = activeIds.length > 0`
-   - drives the send button animation
+   - useful for coarse status and older call sites
 
-2. **Per-stream / branch-aware model**
+2. **Implemented multi-stream branch-aware layer**
    - `streaming.byId`
+   - `conversationId`
    - `lineage.rootMessageId`
+   - `lineage.originMessageId`
+   - `streamingMessageId`
    - `selectCurrentViewStream`
-   - used to decide which stream content to display
+   - `effectiveViewStream` fallback in `Chat.tsx`
+   - branch-scoped job/loading logic
 
-These two models are not aligned yet, which is why branch switching can still show the send button as streaming.
+If you are updating chat UI or streaming behavior, treat the second layer as the real current architecture.
 
 ---
 
-## Files most relevant for the next planning step
+## Files most relevant for this implementation
 
 - `src/features/chats/chatTypes.ts`
 - `src/features/chats/streamHelpers.ts`

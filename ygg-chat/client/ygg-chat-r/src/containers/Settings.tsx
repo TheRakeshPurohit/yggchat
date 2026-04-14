@@ -69,9 +69,11 @@ import {
   saveHermesRuntimeSettings,
 } from '../helpers/hermesRuntimeSettingsStorage'
 import {
+  DEFAULT_LMSTUDIO_BASE_URL,
   loadProviderSettings,
   MAX_OPENROUTER_TEMPERATURE,
   MIN_OPENROUTER_TEMPERATURE,
+  normalizeLmStudioBaseUrl,
   PROVIDER_SETTINGS_CHANGE_EVENT,
   ProviderSettings,
   saveProviderSettings,
@@ -174,7 +176,7 @@ interface LocalMergeResult {
 const Settings: React.FC = () => {
   const navigate = useNavigate()
   const dispatch = useAppDispatch()
-  const { accessToken, userId } = useAuth()
+  const { accessToken, userId, signOut } = useAuth()
   const providers = useAppSelector(selectProviderState)
   const htmlRegistry = useHtmlIframeRegistry()
   const htmlEntries = htmlRegistry?.entries.filter(entry => entry.kind === 'html') ?? []
@@ -228,6 +230,9 @@ const Settings: React.FC = () => {
     return typeof configured === 'number' ? String(configured) : ''
   })
   const [openRouterTemperatureTouched, setOpenRouterTemperatureTouched] = useState(false)
+  const [lmStudioBaseUrlInput, setLmStudioBaseUrlInput] = useState<string>(() => loadProviderSettings().lmStudioBaseUrl ?? '')
+  const [lmStudioBaseUrlTouched, setLmStudioBaseUrlTouched] = useState(false)
+  const [memoryBackfillRunning, setMemoryBackfillRunning] = useState(false)
   const [compactionSystemPromptInput, setCompactionSystemPromptInput] = useState<string>(
     () => loadProviderSettings().compactionSystemPrompt
   )
@@ -288,6 +293,10 @@ const Settings: React.FC = () => {
       ? agentSettings.model.trim()
       : 'openai/gpt-5.1-codex-mini'
   const isWindowsElectron = electronPlatform === 'win32'
+
+  const handleLogout = async () => {
+    await signOut()
+  }
 
   const readBraveApiKeyFromSecureStore = async (): Promise<string | null> => {
     const braveSecretsApi = window.electronAPI?.secrets?.braveSearch
@@ -506,6 +515,11 @@ const Settings: React.FC = () => {
     const configured = providerSettings.openRouterTemperature
     setOpenRouterTemperatureInput(typeof configured === 'number' ? String(configured) : '')
   }, [providerSettings.openRouterTemperature, openRouterTemperatureTouched])
+
+  useEffect(() => {
+    if (lmStudioBaseUrlTouched) return
+    setLmStudioBaseUrlInput(providerSettings.lmStudioBaseUrl ?? '')
+  }, [providerSettings.lmStudioBaseUrl, lmStudioBaseUrlTouched])
 
   useEffect(() => {
     if (compactionSystemPromptTouched) return
@@ -923,6 +937,98 @@ const Settings: React.FC = () => {
     }
 
     showStatus({ type: 'success', text: 'OpenRouter temperature updated.' })
+  }
+
+  const handleLmStudioBaseUrlInputChange = (value: string) => {
+    setLmStudioBaseUrlInput(value)
+    setLmStudioBaseUrlTouched(true)
+  }
+
+  const handleMemoryBackfill = async () => {
+    if (import.meta.env.VITE_ENVIRONMENT !== 'electron') {
+      showStatus({ type: 'info', text: 'Memory indexing is only available in the Electron app.' })
+      return
+    }
+
+    const effectiveUserId = userId || LOCAL_AUTH_USER_ID
+    if (!effectiveUserId) {
+      showStatus({ type: 'error', text: 'No local user is available for memory indexing.' })
+      return
+    }
+
+    setMemoryBackfillRunning(true)
+    try {
+      const response = await localApi.post<{
+        success: boolean
+        result?: {
+          processed: number
+          embedded: number
+          failed: number
+          skipped: number
+          dimensions: number | null
+          model: string | null
+        }
+      }>('/local/conversations/search/notes/backfill-missing', {
+        userId: effectiveUserId,
+        model: 'text-embedding-nomic-embed-text-v1.5',
+        batchSize: 8,
+        limit: 100,
+        includeStatuses: ['pending', 'stale', 'error'],
+      })
+
+      const result = response?.result
+      showStatus({
+        type: 'success',
+        text: result
+          ? `Memory backfill finished. Embedded ${result.embedded}/${result.processed} notes${result.failed ? `, ${result.failed} failed` : ''}${result.skipped ? `, ${result.skipped} skipped` : ''}.`
+          : 'Memory backfill finished.',
+      })
+    } catch (error) {
+      console.error('Failed to backfill memory embeddings:', error)
+      showStatus({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'Failed to backfill memory embeddings.',
+      })
+    } finally {
+      setMemoryBackfillRunning(false)
+    }
+  }
+
+  const commitLmStudioBaseUrlChange = (value: string) => {
+    const trimmed = value.trim()
+    if (!trimmed) {
+      const updated = {
+        ...providerSettings,
+        lmStudioBaseUrl: null,
+      }
+      saveProviderSettings(updated)
+      setProviderSettings(updated)
+      setLmStudioBaseUrlTouched(false)
+      setLmStudioBaseUrlInput('')
+      showStatus({ type: 'success', text: `LM Studio server reset to default (${DEFAULT_LMSTUDIO_BASE_URL}).` })
+      return
+    }
+
+    const normalized = normalizeLmStudioBaseUrl(trimmed)
+    if (!normalized) {
+      setLmStudioBaseUrlTouched(false)
+      setLmStudioBaseUrlInput(providerSettings.lmStudioBaseUrl ?? '')
+      showStatus({
+        type: 'error',
+        text: 'LM Studio server URL must start with http:// or https:// (example: http://127.0.0.1:1234).',
+      })
+      return
+    }
+
+    const updated = {
+      ...providerSettings,
+      lmStudioBaseUrl: normalized,
+    }
+    saveProviderSettings(updated)
+    setProviderSettings(updated)
+    setLmStudioBaseUrlTouched(false)
+    setLmStudioBaseUrlInput(normalized)
+    showStatus({ type: 'success', text: `LM Studio server URL saved: ${normalized}` })
   }
 
   const persistSubagentSettings = (nextSettings: SubagentToolSettings, successText: string) => {
@@ -1807,7 +1913,20 @@ const Settings: React.FC = () => {
               CHANGELOG
             </button>
             <Button variant='acrylic' onClick={() => navigate(-1)} className='group'>
-              <p className='transition-transform duration-100 group-active:scale-95'>Back</p>
+              <p className='transition-transform duration-100 group-active:scale-95'>Home</p>
+            </Button>
+            <Button
+              variant='acrylic'
+              size='circle'
+              onClick={handleLogout}
+              rounded='full'
+              title='Logout'
+              aria-label='Logout'
+            >
+              <i
+                className='bx transform -translate-x-0.5 bx-log-out text-lg sm:text-lg 2xl:text-2xl mx-0.5 my-1.5 transition-all hover:scale-96 duration-200'
+                aria-hidden='true'
+              ></i>
             </Button>
           </div>
         </header>
@@ -2113,6 +2232,38 @@ const Settings: React.FC = () => {
           </section>
         )}
 
+        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
+          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+            <div className='flex flex-col gap-1'>
+              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Memory</h2>
+              <p className='text-sm text-stone-500 dark:text-stone-200'>
+                Build note embeddings for local memory search using your LM Studio embedding model. This does not run automatically.
+              </p>
+            </div>
+
+            <div className='mt-4 flex flex-col gap-4'>
+              <div className='rounded-lg border border-stone-200 bg-stone-50/70 px-4 py-3 text-sm text-stone-600 dark:border-stone-700 dark:bg-stone-800/40 dark:text-stone-300'>
+                <p className='font-medium text-stone-800 dark:text-stone-100'>Manual memory indexing</p>
+                <p className='mt-1'>
+                  This sends note summaries to LM Studio using <code>text-embedding-nomic-embed-text-v1.5</code>, stores the returned vectors in the local sqlite-vec index, and marks indexed notes as ready for hybrid memory search.
+                </p>
+                <p className='mt-2 text-xs text-stone-500 dark:text-stone-400'>
+                  Use this after changing note content, after enabling LM Studio embeddings, or when you want to refresh missing/stale memory vectors on demand.
+                </p>
+              </div>
+
+              <div className='flex flex-wrap items-center gap-3'>
+                <Button variant='primary' size='small' onClick={handleMemoryBackfill} disabled={memoryBackfillRunning}>
+                  {memoryBackfillRunning ? 'Indexing Memory…' : 'Index Memory Notes'}
+                </Button>
+                <p className='text-xs text-stone-500 dark:text-stone-400'>
+                  Uses the LM Studio server configured below. Nothing runs until you click the button.
+                </p>
+              </div>
+            </div>
+          </section>
+        )}
+
         {/* Provider Settings Section */}
         {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
           <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
@@ -2218,6 +2369,43 @@ const Settings: React.FC = () => {
                     className='w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
                   />
                 </div>
+              </div>
+
+              <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+                <div>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>LM Studio Server URL</p>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    Local override for the LM Studio server address. Leave blank to use the default.
+                  </p>
+                </div>
+                <div className='flex flex-wrap items-center gap-2'>
+                  <input
+                    type='url'
+                    value={lmStudioBaseUrlInput}
+                    placeholder={DEFAULT_LMSTUDIO_BASE_URL}
+                    onChange={e => handleLmStudioBaseUrlInputChange(e.target.value)}
+                    onBlur={e => commitLmStudioBaseUrlChange(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.currentTarget.blur()
+                      }
+                    }}
+                    className='w-full max-w-xl rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                  />
+                  {providerSettings.lmStudioBaseUrl && (
+                    <Button
+                      variant='outline2'
+                      size='small'
+                      onClick={() => commitLmStudioBaseUrlChange('')}
+                      className='h-[36px]'
+                    >
+                      Reset
+                    </Button>
+                  )}
+                </div>
+                <p className='text-xs text-stone-500 dark:text-stone-400'>
+                  Used for LM Studio model listing and chat requests. Current default: {DEFAULT_LMSTUDIO_BASE_URL}
+                </p>
               </div>
 
               <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
