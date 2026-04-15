@@ -31,11 +31,12 @@ A custom tool has two parts:
 
 ```txt
 custom-tools/
+├── resources/
+│   └── my_tool/
+│       └── state.json
 └── my_tool/
     ├── definition.json
     ├── index.js
-    ├── resources/
-    │   └── state.json
     └── ui/
         ├── index.html
         ├── main.js
@@ -67,12 +68,21 @@ custom-tools/
 - not `input_schema`
 
 ## Resources
-Store mutable app data under `resources/`
+Store mutable app data under the shared custom-tools resource root:
 
-Examples:
-- `resources/state.json`
-- `resources/cache/`
-- `resources/output/`
+- `custom-tools/resources/<appname>/state.json`
+- `custom-tools/resources/<appname>/cache/`
+- `custom-tools/resources/<appname>/output/`
+
+For example, for `my_tool` use:
+- `custom-tools/resources/my_tool/state.json`
+- `custom-tools/resources/my_tool/cache/`
+- `custom-tools/resources/my_tool/output/`
+
+Why this design:
+- generated data/artifacts live outside the tool's install folder
+- deleting or reinstalling a custom tool does not automatically delete its artifacts
+- tool code stays separate from mutable app data
 
 ---
 
@@ -127,7 +137,9 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const TOOL_DIR = __dirname
-const RESOURCES_DIR = path.join(TOOL_DIR, 'resources')
+const CUSTOM_TOOLS_DIR = path.dirname(TOOL_DIR)
+const APP_NAME = path.basename(TOOL_DIR)
+const RESOURCES_DIR = path.join(CUSTOM_TOOLS_DIR, 'resources', APP_NAME)
 const STATE_PATH = path.join(RESOURCES_DIR, 'state.json')
 
 function ensureResources() {
@@ -173,6 +185,10 @@ module.exports = {
 ## Why return placeholder HTML for `mode: 'ui'`?
 Because the **recommended UI path is now `ui.entry`**, not injected HTML.
 The host should serve the UI from `ui/index.html`.
+
+## Why is `RESOURCES_DIR` outside the tool folder?
+Because app state and generated artifacts should survive tool removal/reinstall.
+Use the shared path `custom-tools/resources/<appname>/` as the durable storage location.
 
 ---
 
@@ -410,19 +426,21 @@ This is the preferred mental model:
 # 14. Minimal example structure
 
 ```txt
-normal_app_test/
-  definition.json
-  index.js
+custom-tools/
   resources/
-    state.json
-  ui/
-    index.html
-    main.js
-    lib/
-      bridge.js
-      api.js
-    styles/
-      app.css
+    normal_app_test/
+      state.json
+  normal_app_test/
+    definition.json
+    index.js
+    ui/
+      index.html
+      main.js
+      lib/
+        bridge.js
+        api.js
+      styles/
+        app.css
 ```
 
 That is now the recommended baseline.

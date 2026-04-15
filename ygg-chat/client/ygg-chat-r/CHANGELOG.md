@@ -12,6 +12,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+## [0.1.89]
+
+### Added
+
+- Added a shared custom-tools `resources/` directory and loader safeguards.
+
+### Changed
+
+- Disabled vector search in fetch notes for now.
+
+### Fixed
+
+- Fixed tool colors in light mode.
+
 ## [0.1.88] - 2026-04-14
 
 ### Added

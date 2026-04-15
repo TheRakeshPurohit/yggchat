@@ -445,15 +445,13 @@ export const ToolsSettings: React.FC = () => {
                     <div className='min-w-0'>
                       <h3
                         className='truncate text-xs font-medium text-neutral-800 sm:text-[13px] lg:text-[15px] dark:text-neutral-200'
-                        style={
-                          tool.enabled ? { color: sectionThemeColors?.primaryButtonText ?? undefined } : titleStyle
-                        }
+                        style={titleStyle}
                       >
                         {tool.name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
                       </h3>
                       <p
                         className='mt-0 max-w-[150px] truncate text-[10px] text-neutral-500 sm:mt-0.5 sm:max-w-[250px] sm:text-[11px] lg:max-w-[400px] lg:text-xs dark:text-neutral-500'
-                        style={tool.enabled ? { color: sectionThemeColors?.primaryButtonText ?? undefined } : bodyStyle}
+                        style={bodyStyle}
                       >
                         {tool.description}
                       </p>

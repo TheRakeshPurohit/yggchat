@@ -10,7 +10,8 @@ import path from 'path'
 import { pathToFileURL } from 'url'
 
 const CUSTOM_TOOLS_DIR_NAME = 'custom-tools'
-const CUSTOM_TOOLS_GUIDE_FILE = 'CUSTOM_TOOLS_GUIIDE.md'
+const CUSTOM_TOOLS_RESOURCES_DIR_NAME = 'resources'
+const CUSTOM_TOOLS_GUIDE_FILE = 'CUSTOM_TOOLS_GUIDE.md'
 const CUSTOM_TOOLS_STATE_FILE = 'custom-tools-state.json'
 const DEFINITION_FILE = 'definition.json'
 const IMPLEMENTATION_FILE = 'index.js'
@@ -80,6 +81,47 @@ function getCustomToolsDirectory(): string {
   return path.join(resolveBaseDir(), CUSTOM_TOOLS_DIR_NAME)
 }
 
+function getCustomToolsResourcesDirectory(): string {
+  return path.join(getCustomToolsDirectory(), CUSTOM_TOOLS_RESOURCES_DIR_NAME)
+}
+
+async function ensureManagedCustomToolsDirectories(): Promise<void> {
+  await fsPromises.mkdir(getCustomToolsDirectory(), { recursive: true })
+  await fsPromises.mkdir(getCustomToolsResourcesDirectory(), { recursive: true })
+}
+
+async function ensureManagedCustomToolsGuideFile(): Promise<void> {
+  const targetPath = path.join(getCustomToolsDirectory(), CUSTOM_TOOLS_GUIDE_FILE)
+
+  try {
+    await fsPromises.access(targetPath)
+    return
+  } catch {
+    // File does not exist; seed it below.
+  }
+
+  const sourcePath = resolveGuideSourcePath()
+  try {
+    await fsPromises.access(sourcePath)
+  } catch (error) {
+    console.warn('[CustomToolLoader] Guide file not found at:', sourcePath, error)
+    return
+  }
+
+  try {
+    await fsPromises.copyFile(sourcePath, targetPath)
+    console.log('[CustomToolLoader] Seeded custom tools guide at:', targetPath)
+  } catch (error) {
+    console.error('[CustomToolLoader] Failed to seed guide file:', error)
+  }
+}
+
+export async function ensureManagedCustomToolsInitialized(): Promise<string> {
+  await ensureManagedCustomToolsDirectories()
+  await ensureManagedCustomToolsGuideFile()
+  return getCustomToolsDirectory()
+}
+
 function getCustomToolsStatePath(): string {
   return path.join(resolveBaseDir(), CUSTOM_TOOLS_STATE_FILE)
 }
@@ -105,6 +147,23 @@ function resolveGuideSourcePath(): string {
 function isWithinDirectory(targetPath: string, parentPath: string): boolean {
   const relative = path.relative(parentPath, targetPath)
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
+}
+
+function normalizeCustomToolsRelativePath(relativePath: string): string {
+  return relativePath.replace(/\\/g, '/').replace(/^\/+/, '')
+}
+
+function shouldIgnoreCustomToolsEntry(name: string): boolean {
+  return name === CUSTOM_TOOLS_RESOURCES_DIR_NAME
+}
+
+function shouldIgnoreCustomToolsWatchPath(relativePath: string): boolean {
+  const normalized = normalizeCustomToolsRelativePath(relativePath)
+  return (
+    normalized === CUSTOM_TOOLS_RESOURCES_DIR_NAME ||
+    normalized.startsWith(`${CUSTOM_TOOLS_RESOURCES_DIR_NAME}/`) ||
+    normalized.endsWith(CUSTOM_TOOLS_GUIDE_FILE)
+  )
 }
 
 function normalizeDebounce(value: unknown): number {
@@ -356,47 +415,11 @@ class CustomToolRegistry extends EventEmitter {
     const customToolsDir = getCustomToolsDirectory()
     console.log('[CustomToolLoader] Initializing custom tools from:', customToolsDir)
 
-    await this.ensureDirectory()
-    await this.ensureGuideFile()
+    await ensureManagedCustomToolsInitialized()
     await this.loadStateFile()
     await this.loadAllTools(this.tools)
     this.updateWatchers()
     this.initialized = true
-  }
-
-  private async ensureDirectory(): Promise<void> {
-    const dir = getCustomToolsDirectory()
-    try {
-      await fsPromises.mkdir(dir, { recursive: true })
-    } catch (error) {
-      console.error('[CustomToolLoader] Failed to create directory:', error)
-    }
-  }
-
-  private async ensureGuideFile(): Promise<void> {
-    const targetPath = path.join(getCustomToolsDirectory(), CUSTOM_TOOLS_GUIDE_FILE)
-
-    try {
-      await fsPromises.access(targetPath)
-      return
-    } catch {
-      // File does not exist; seed it below.
-    }
-
-    const sourcePath = resolveGuideSourcePath()
-    try {
-      await fsPromises.access(sourcePath)
-    } catch (error) {
-      console.warn('[CustomToolLoader] Guide file not found at:', sourcePath, error)
-      return
-    }
-
-    try {
-      await fsPromises.copyFile(sourcePath, targetPath)
-      console.log('[CustomToolLoader] Seeded custom tools guide at:', targetPath)
-    } catch (error) {
-      console.error('[CustomToolLoader] Failed to seed guide file:', error)
-    }
   }
 
   private async loadStateFile(): Promise<void> {
@@ -458,7 +481,7 @@ class CustomToolRegistry extends EventEmitter {
 
     try {
       const entries = await fsPromises.readdir(dir, { withFileTypes: true })
-      const toolEntries = entries.filter(entry => entry.isDirectory())
+      const toolEntries = entries.filter(entry => entry.isDirectory() && !shouldIgnoreCustomToolsEntry(entry.name))
       await Promise.all(toolEntries.map(entry => this.loadTool(entry.name, nextTools, previousTools)))
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -689,7 +712,7 @@ class CustomToolRegistry extends EventEmitter {
     try {
       this.rootWatcher = fs.watch(dir, { recursive: true }, (_event, filename) => {
         const name = typeof filename === 'string' ? filename : filename?.toString()
-        if (name && name.endsWith(CUSTOM_TOOLS_GUIDE_FILE)) return
+        if (name && shouldIgnoreCustomToolsWatchPath(name)) return
         this.scheduleWatcherReload('root_recursive')
       })
       this.watcherMode = 'recursive'
@@ -697,7 +720,7 @@ class CustomToolRegistry extends EventEmitter {
     } catch {
       this.rootWatcher = fs.watch(dir, (_event, filename) => {
         const name = typeof filename === 'string' ? filename : filename?.toString()
-        if (name && name.endsWith(CUSTOM_TOOLS_GUIDE_FILE)) return
+        if (name && shouldIgnoreCustomToolsWatchPath(name)) return
         this.scheduleWatcherReload('root')
       })
       this.watcherMode = 'shallow'

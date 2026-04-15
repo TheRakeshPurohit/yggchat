@@ -806,6 +806,9 @@ function initializeBuiltInToolRegistry() {
         if (typeof searchTopLevelUserMessages !== 'function') return []
         return searchTopLevelUserMessages({ userId, projectId, query, limit })
       },
+      searchNotes: ({ userId, projectId, query, limit }) => {
+        return searchNotes({ userId, query, projectId, limit })
+      },
       listMessagesByConversationId: conversationId => {
         const getter = statements?.getMessagesByConversationId
         if (!getter || typeof getter.all !== 'function') return []
@@ -7897,9 +7900,6 @@ function setupServer() {
       const rawLimit = Number(req.query.limit ?? 20)
       const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 20, 1), 50)
       const queryEmbedding = req.query.embedding
-      const vectorWeight = req.query.vectorWeight !== undefined ? Number(req.query.vectorWeight) : undefined
-      const lexicalWeight = req.query.lexicalWeight !== undefined ? Number(req.query.lexicalWeight) : undefined
-      const recencyWeight = req.query.recencyWeight !== undefined ? Number(req.query.recencyWeight) : undefined
 
       if (!userId) {
         res.status(400).json({ error: 'userId required' })
@@ -7916,15 +7916,10 @@ function setupServer() {
         query: rawQuery,
         projectId,
         limit,
-        queryEmbedding,
-        vectorWeight,
-        lexicalWeight,
-        recencyWeight,
       })
 
       res.json({
         results,
-        sqlite_vec: getNoteVectorStatus(),
       })
     } catch (error) {
       console.error('[LocalServer] ❌ Error searching notes:', error)
@@ -7933,19 +7928,13 @@ function setupServer() {
   })
 
   // POST /api/local/conversations/search/notes/search
-  app.post('/api/local/conversations/search/notes/search', async (req, res) => {
+  app.post('/api/local/conversations/search/notes/search', (req, res) => {
     try {
       const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : ''
       const rawQuery = typeof req.body?.q === 'string' ? req.body.q : ''
       const projectId = typeof req.body?.projectId === 'string' && req.body.projectId.trim().length > 0 ? req.body.projectId.trim() : undefined
       const rawLimit = Number(req.body?.limit ?? 20)
       const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 20, 1), 50)
-      const vectorWeight = req.body?.vectorWeight !== undefined ? Number(req.body.vectorWeight) : undefined
-      const lexicalWeight = req.body?.lexicalWeight !== undefined ? Number(req.body.lexicalWeight) : undefined
-      const recencyWeight = req.body?.recencyWeight !== undefined ? Number(req.body.recencyWeight) : undefined
-      const model = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
-      const baseUrl = typeof req.body?.baseUrl === 'string' ? req.body.baseUrl.trim() : ''
-      const skipEmbedding = req.body?.skipEmbedding === true
 
       if (!userId) {
         res.status(400).json({ error: 'userId required' })
@@ -7957,76 +7946,19 @@ function setupServer() {
         return
       }
 
-      let queryEmbedding: number[] | undefined
-      let embeddingMeta: {
-        used: boolean
-        model: string | null
-        input_type: 'query'
-        dimensions: number | null
-        base_url: string | null
-        error: string | null
-      } = {
-        used: false,
-        model: null,
-        input_type: 'query',
-        dimensions: null,
-        base_url: null,
-        error: null,
-      }
-
-      const vectorStatus = getNoteVectorStatus()
-      const shouldTryEmbedding = !skipEmbedding && sqliteVecAvailable && vectorStatus.embedding_dimensions && vectorStatus.embedding_dimensions > 0
-
-      if (shouldTryEmbedding) {
-        try {
-          const embeddingResult = await embedTextWithLmStudio({
-            text: rawQuery,
-            model: model || vectorStatus.embedding_model || undefined,
-            inputType: 'query',
-            baseUrl: baseUrl || undefined,
-          })
-
-          queryEmbedding = embeddingResult.embedding
-          embeddingMeta = {
-            used: true,
-            model: embeddingResult.model,
-            input_type: 'query',
-            dimensions: embeddingResult.dimensions,
-            base_url: getLmStudioBaseUrl(baseUrl || undefined),
-            error: null,
-          }
-        } catch (embeddingError) {
-          embeddingMeta = {
-            used: false,
-            model: model || vectorStatus.embedding_model || null,
-            input_type: 'query',
-            dimensions: null,
-            base_url: getLmStudioBaseUrl(baseUrl || undefined),
-            error: embeddingError instanceof Error ? embeddingError.message : 'Failed to generate query embedding',
-          }
-          console.warn('[LocalServer] Note query embedding failed, falling back to lexical search only:', embeddingError)
-        }
-      }
-
       const results = searchNotes({
         userId,
         query: rawQuery,
         projectId,
         limit,
-        queryEmbedding,
-        vectorWeight,
-        lexicalWeight,
-        recencyWeight,
       })
 
       res.json({
         results,
         query: rawQuery,
-        embedding: embeddingMeta,
-        sqlite_vec: getNoteVectorStatus(),
       })
     } catch (error) {
-      console.error('[LocalServer] ❌ Error searching notes with server-side embeddings:', error)
+      console.error('[LocalServer] ❌ Error searching notes:', error)
       res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to search notes' })
     }
   })

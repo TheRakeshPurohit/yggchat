@@ -15,6 +15,7 @@ import {
 } from './keytarSecrets.js'
 import { ensureManagedHooksInitialized } from './hooks/hookStorage.js'
 import { startLocalServer, stopLocalServer } from './localServer.js'
+import { ensureManagedCustomToolsInitialized } from './tools/customToolLoader.js'
 import { ensureManagedThemesInitialized } from './tools/themeManager.js'
 import { detectPathType, getWSLCommandArgs, isWindows } from './utils/wslBridge.js'
 
@@ -867,6 +868,8 @@ app.whenReady().then(async () => {
     process.env.YGG_APP_USER_DATA = app.getPath('userData')
     const managedHooksDirectory = await ensureManagedHooksInitialized()
     console.log(`[Electron] Managed hooks directory ready at: ${managedHooksDirectory}`)
+    const managedCustomToolsDirectory = await ensureManagedCustomToolsInitialized()
+    console.log(`[Electron] Managed custom tools directory ready at: ${managedCustomToolsDirectory}`)
     const managedThemesDirectory = await ensureManagedThemesInitialized()
     console.log(`[Electron] Managed themes directory ready at: ${managedThemesDirectory}`)
 
