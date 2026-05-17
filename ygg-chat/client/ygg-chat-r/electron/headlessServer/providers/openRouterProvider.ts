@@ -26,6 +26,7 @@ export interface ProviderRailwayTurnInput {
   isElectron?: boolean
   imageConfig?: any
   reasoningConfig?: any
+  openaiHostedTools?: any
 }
 
 export interface ProviderGenerateInput {

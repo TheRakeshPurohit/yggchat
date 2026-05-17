@@ -2263,6 +2263,7 @@ ipcMain.handle('openai:chatgpt:stream-start', async (event, payload: any) => {
             attachmentsBase64: payload.attachmentsBase64 ?? null,
             imageConfig: payload.imageConfig,
             reasoningConfig: payload.reasoningConfig,
+            openaiHostedTools: payload.openaiHostedTools,
             isElectron: true,
           },
         },

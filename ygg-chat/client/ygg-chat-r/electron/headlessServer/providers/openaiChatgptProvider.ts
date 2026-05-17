@@ -8,6 +8,7 @@ import {
 } from '../../openaiChatgptOAuth.js'
 import type { ProviderTokenStore } from './tokenStore.js'
 import { openStreamingWithPreFirstByteRetry } from './streamResilience.js'
+import { createOpenAIHostedTools } from './openaiHostedTools.js'
 import { buildToolNameMap, sanitizeToolResultContentForModel } from './toolResultSanitizer.js'
 import type {
   HeadlessProvider,
@@ -715,6 +716,47 @@ function mapTools(tools: ProviderToolDefinition[]): any[] {
       description: tool.description || '',
       parameters: tool.inputSchema || { type: 'object', properties: {} },
     }))
+}
+
+function hasImageGenerationIntent(input: ProviderGenerateInput): boolean {
+  const imageConfig = input.railwayTurn?.imageConfig
+  if (imageConfig && typeof imageConfig === 'object' && Object.keys(imageConfig).length > 0) return true
+
+  const model = normalizeModel(input.modelName).toLowerCase()
+  if (model.includes('gpt-image') || model.includes('image')) return true
+
+  const text = `${input.userContent || ''}\n${(input.history || [])
+    .slice(-3)
+    .map(msg => (typeof msg?.content === 'string' ? msg.content : typeof msg?.content_plain_text === 'string' ? msg.content_plain_text : ''))
+    .join('\n')}`
+
+  return /\b(generate|create|make|draw|edit|render)\b[\s\S]{0,80}\b(image|picture|photo|illustration|icon|logo|sprite|asset)\b/i.test(text)
+}
+
+function extractImageDataUrlFromOutputItem(item: any): string | null {
+  if (!item || item.type !== 'image_generation_call') return null
+  const result = typeof item.result === 'string' ? item.result.trim() : ''
+  if (!result) return null
+  if (/^data:image\//i.test(result) || /^https?:\/\//i.test(result)) return result
+  return `data:image/png;base64,${result}`
+}
+
+function extractImageBlocksFromResponseItems(items: any[]): any[] {
+  const blocks: any[] = []
+  const seen = new Set<string>()
+
+  for (const item of items || []) {
+    const url = extractImageDataUrlFromOutputItem(item)
+    if (!url || seen.has(url)) continue
+    seen.add(url)
+    blocks.push({
+      type: 'image',
+      url,
+      mimeType: url.startsWith('data:image/') ? url.slice(5, url.indexOf(';') > 0 ? url.indexOf(';') : undefined) : 'image/png',
+    })
+  }
+
+  return blocks
 }
 
 function extractAssistantMessageTextFromReplayItem(item: any): string {
@@ -1477,7 +1519,11 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
   async generate(input: ProviderGenerateInput, emit?: ProviderStreamEventHandler): Promise<ProviderGenerateOutput> {
     const auth = await this.resolveAuth(input)
 
-    const requestTools = mapTools(input.tools || [])
+    const hostedTools = createOpenAIHostedTools({
+      config: input.railwayTurn?.openaiHostedTools,
+      enableImageGeneration: hasImageGenerationIntent(input),
+    })
+    const requestTools = [...mapTools(input.tools || []), ...hostedTools]
     const transformedInput = appendImageAttachmentsToLatestUserMessage(
       transformMessagesForCodex(input.history || [], input.userContent),
       input.railwayTurn?.attachmentsBase64 ?? null
@@ -1560,6 +1606,12 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
 
     if (parsed.text) {
       contentBlocks.push({ type: 'text', content: parsed.text })
+    }
+
+    const imageBlocks = extractImageBlocksFromResponseItems(parsed.responseOutputItems)
+    for (const imageBlock of imageBlocks) {
+      contentBlocks.push(imageBlock)
+      emit?.({ type: 'chunk', part: 'image', url: imageBlock.url, mimeType: imageBlock.mimeType })
     }
 
     for (const toolCall of parsed.toolCalls) {

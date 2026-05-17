@@ -860,8 +860,49 @@ export async function createOpenAIChatGPTStreamingRequest(
       throw new Error(started?.error || 'Failed to start Electron OpenAI ChatGPT stream')
     }
     let cleanup: (() => void) | null = null
+    let streamedText = ''
+    let streamedReasoning = ''
+    const streamedToolCalls = new Map<string, any>()
+    let completed = false
+
+    const emitPartialComplete = () => {
+      if (completed) return false
+      const hasContent = streamedText.trim().length > 0 || streamedReasoning.trim().length > 0 || streamedToolCalls.size > 0
+      if (!hasContent) return false
+
+      const contentBlocks: any[] = []
+      if (streamedReasoning) contentBlocks.push({ type: 'thinking', index: contentBlocks.length, content: streamedReasoning })
+      if (streamedText) contentBlocks.push({ type: 'text', index: contentBlocks.length, content: streamedText })
+      for (const toolCall of streamedToolCalls.values()) {
+        contentBlocks.push({
+          type: 'tool_use',
+          index: contentBlocks.length,
+          id: toolCall.id,
+          name: toolCall.name,
+          input: toolCall.arguments ?? {},
+        })
+      }
+
+      completed = true
+      onChunk({
+        type: 'complete',
+        message: buildAssistantMessage({
+          id: assistantMessageId,
+          conversationId: payload.conversationId,
+          parentId: payload.parentId,
+          modelName: payload.modelName,
+          text: streamedText,
+          toolCalls: Array.from(streamedToolCalls.values()),
+          contentBlocks,
+          partial: true,
+        }),
+      })
+      return true
+    }
+
     await new Promise<void>((resolve, reject) => {
       const abort = () => {
+        emitPartialComplete()
         void window.electronAPI?.openaiChatGPT?.streamAbort(started.streamId!)
         cleanup?.()
         resolve()
@@ -869,14 +910,27 @@ export async function createOpenAIChatGPTStreamingRequest(
       if (signal?.aborted) return abort()
       signal?.addEventListener('abort', abort, { once: true })
       cleanup = window.electronAPI!.openaiChatGPT.onStreamEvent(({ streamId, chunk }) => {
-        if (streamId !== started.streamId || signal?.aborted) return
+        if (streamId !== started.streamId) return
+        if (signal?.aborted) return
         if (chunk?.type === 'error') {
           cleanup?.()
           reject(new Error(chunk.error || 'OpenAI ChatGPT stream failed'))
           return
         }
+        if (chunk?.type === 'chunk') {
+          if (chunk.part === 'reasoning') {
+            streamedReasoning += chunk.delta ?? chunk.content ?? ''
+          } else if (chunk.part === 'tool_call' && chunk.toolCall?.id) {
+            streamedToolCalls.set(chunk.toolCall.id, chunk.toolCall)
+          } else if (!chunk.part || chunk.part === 'text') {
+            streamedText += chunk.delta ?? chunk.content ?? ''
+          }
+        } else if (chunk?.type === 'tool_call' && chunk.toolCall?.id) {
+          streamedToolCalls.set(chunk.toolCall.id, chunk.toolCall)
+        }
         onChunk(chunk)
         if (chunk?.type === 'complete') {
+          completed = true
           cleanup?.()
           resolve()
         }

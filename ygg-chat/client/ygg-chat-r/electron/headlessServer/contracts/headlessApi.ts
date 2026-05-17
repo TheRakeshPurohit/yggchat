@@ -59,6 +59,7 @@ export type HeadlessStreamEvent =
       error?: string
     }
   | { type: 'chunk'; part: 'text' | 'reasoning'; delta: string }
+  | { type: 'chunk'; part: 'image'; url: string; mimeType?: string }
   | { type: 'chunk'; part: 'tool_call'; toolCall: any }
   | { type: 'chunk'; part: 'tool_result'; toolResult: any }
   | { type: 'assistant_message_persisted'; message: any }
