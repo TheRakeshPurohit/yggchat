@@ -2408,6 +2408,14 @@ function createGeneratedImageShortId(): string {
   return `img-${String(next).padStart(4, '0')}`
 }
 
+function incrementGeneratedImageShortId(shortId: string): string {
+  const match = /^img-(\d+)$/.exec(shortId)
+  if (!match) return `img-${Date.now()}`
+  const width = match[1].length || 4
+  const next = Number.parseInt(match[1], 10) + 1
+  return `img-${String(next).padStart(width, '0')}`
+}
+
 function extractGeneratedImageFilePathsFromContentBlocks(contentBlocks: any): string[] {
   const parsed = typeof contentBlocks === 'string' ? (() => {
     try { return JSON.parse(contentBlocks) } catch { return [] }
@@ -2440,14 +2448,28 @@ async function saveGeneratedImage(
       sourceType: imageUrl.startsWith('data:') ? 'data-url' : 'url',
       sourceLength: imageUrl.length,
     })
-    // Download the image
-    const response = await fetch(imageUrl)
-    if (!response.ok) {
-      console.error('[LocalServer] Failed to download image:', imageUrl, response.statusText)
-      return null
-    }
+    let buffer: Buffer
+    if (typeof imageUrl === 'string' && imageUrl.startsWith('data:')) {
+      const commaIndex = imageUrl.indexOf(',')
+      if (commaIndex < 0) {
+        console.error('[LocalServer] Invalid generated image data URL')
+        return null
+      }
+      const header = imageUrl.slice(0, commaIndex)
+      const payload = imageUrl.slice(commaIndex + 1)
+      buffer = header.includes(';base64')
+        ? Buffer.from(payload, 'base64')
+        : Buffer.from(decodeURIComponent(payload), 'utf8')
+    } else {
+      // Download the image
+      const response = await fetch(imageUrl)
+      if (!response.ok) {
+        console.error('[LocalServer] Failed to download image:', imageUrl, response.statusText)
+        return null
+      }
 
-    const buffer = Buffer.from(await response.arrayBuffer())
+      buffer = Buffer.from(await response.arrayBuffer())
+    }
 
     // Calculate SHA256 for deduplication
     const sha256 = crypto.createHash('sha256').update(buffer).digest('hex')
@@ -2481,7 +2503,7 @@ async function saveGeneratedImage(
       }
     } else {
       while (fs.existsSync(filePath)) {
-        shortId = createGeneratedImageShortId()
+        shortId = incrementGeneratedImageShortId(shortId)
         filePath = path.join(imagesDir, `${shortId}.${ext}`)
       }
       fs.writeFileSync(filePath, buffer)

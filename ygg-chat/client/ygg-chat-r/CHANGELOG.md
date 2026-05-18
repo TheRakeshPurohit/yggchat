@@ -12,6 +12,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+## [0.1.95] - 2026-05-18
+
+### Fixed
+
+- Fixed OpenAI ChatGPT conversations stopping after the first tool call instead of continuing to the tool result and follow-up response.
+- Fixed generated-image follow-up turns creating a parallel branch instead of continuing from the saved-image context.
+- Fixed a freeze that could happen after image generation when local image filenames collided with existing files.
+- Improved generated-image save handling so follow-up messages can reliably reference the locally saved image path.
+
 ## [0.1.94] - 2026-05-17
 
 ### Added

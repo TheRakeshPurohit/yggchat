@@ -1225,6 +1225,29 @@ const syncAssistantMessageLocallyAndGetGeneratedImagePaths = async (params: {
   }
 }
 
+const syncAssistantMessageLocallyInBackground = (params: {
+  message: Message
+  conversationId: ConversationId
+  authUserId: string | null | undefined
+  selectedProjectId?: string | null
+  storageMode?: string | null
+  logPrefix: string
+}): void => {
+  void localApi
+    .post('/sync/message', {
+      ...params.message,
+      conversation_id: params.conversationId,
+      children_ids: params.message.children_ids || [],
+      content_blocks: params.message.content_blocks || [],
+      tool_calls: params.message.tool_calls || [],
+      user_id: params.authUserId,
+      owner_id: params.authUserId,
+      project_id: params.selectedProjectId || null,
+      storage_mode: params.storageMode,
+    })
+    .catch(err => console.error(`[${params.logPrefix}] Failed to sync assistant message:`, err))
+}
+
 const persistGeneratedImagePathHintMessage = async (
   params: {
     dispatch: any
@@ -1286,21 +1309,50 @@ const persistGeneratedImagePathHintMessage = async (
 
   return hintMessage
 }
+const trimHistoryToLatestCompaction = (messages: Array<Message | undefined>): Message[] => {
+  const resolved = messages.filter(Boolean) as Message[]
+  if (resolved.length === 0) return []
 
-const trimHistoryToLatestCompaction = (messages: Array<Message | undefined>): Message[] => {
-  const resolved = messages.filter(Boolean) as Message[]
-  if (resolved.length === 0) return []
+  let latestCompactionIndex = -1
+  for (let i = resolved.length - 1; i >= 0; i--) {
+    if (isAutoCompactionSummaryMessage(resolved[i])) {
+      latestCompactionIndex = i
+      break
+    }
+  }
 
-  let lastCompactionIdx = -1
-  for (let i = resolved.length - 1; i >= 0; i--) {
-    if (isAutoCompactionSummaryMessage(resolved[i])) {
-      lastCompactionIdx = i
-      break
-    }
-  }
+  return latestCompactionIndex >= 0 ? resolved.slice(latestCompactionIndex) : resolved
+}
 
-  if (lastCompactionIdx < 0) return resolved
-  return resolved.slice(lastCompactionIdx)
+const appendGeneratedImagePathHintsForHistory = (history: Message[], allMessages: Message[]): Message[] => {
+  if (!Array.isArray(history) || history.length === 0 || !Array.isArray(allMessages) || allMessages.length === 0) {
+    return history
+  }
+
+  const historyIds = new Set(history.map(message => String(message.id)))
+  const hintByParent = new Map<string, Message[]>()
+  for (const message of allMessages) {
+    if (!isGeneratedImagePathHintMessage(message) || message.parent_id == null) continue
+    if (historyIds.has(String(message.id))) continue
+    const key = String(message.parent_id)
+    const existing = hintByParent.get(key)
+    if (existing) existing.push(message)
+    else hintByParent.set(key, [message])
+  }
+
+  if (hintByParent.size === 0) return history
+
+  const expanded: Message[] = []
+  let changed = false
+  for (const message of history) {
+    expanded.push(message)
+    const hints = hintByParent.get(String(message.id))
+    if (!hints?.length) continue
+    changed = true
+    expanded.push(...hints.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()))
+  }
+
+  return changed ? expanded : history
 }
 
 /**
@@ -3151,8 +3203,9 @@ export const sendMessage = createAsyncThunk<
       const state = getState() as RootState
       const { messages: currentMessages } = state.chat.conversation
       const currentPathIds = state.chat.conversation.currentPath.filter(id => id !== 'root')
-      const currentPathMessages = trimHistoryToLatestCompaction(
-        currentPathIds.map(id => currentMessages.find(m => m.id === id))
+      const currentPathMessages = appendGeneratedImagePathHintsForHistory(
+        trimHistoryToLatestCompaction(currentPathIds.map(id => currentMessages.find(m => m.id === id))),
+        currentMessages
       )
       const latestCompactionMessage = currentPathMessages.find(isAutoCompactionSummaryMessage) ?? null
       if (latestCompactionMessage) {
@@ -3673,22 +3726,31 @@ const executionMode = 'client'
                     dispatch(chatSliceActions.messageAdded(assistantMsg))
                     dispatch(chatSliceActions.messageBranchCreated({ newMessage: assistantMsg }))
                     updateMessageCache(extra.queryClient, conversationId, assistantMsg)
-                    const syncGeneratedImagePaths = await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
-                      message: assistantMsg,
-                      conversationId,
-                      authUserId: auth.userId,
-                      selectedProjectId: selectedProject?.id || null,
-                      storageMode,
-                      logPrefix: 'sendMessage][openai-chatgpt repeat',
-                    })
                     messageId = assistantMsg.id
                     currentTurnHistory.push(assistantMsg)
-                    const generatedImagePaths = Array.isArray((assistantMsg as any).generatedImageFilePaths)
-                      ? Array.from(new Set([...((assistantMsg as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
-                      : syncGeneratedImagePaths
                     const imageBlocks = Array.isArray((assistantMsg as any).content_blocks)
                       ? (assistantMsg as any).content_blocks.filter((block: any) => block?.type === 'image')
                       : []
+                    const syncGeneratedImagePaths = imageBlocks.length > 0
+                      ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
+                          message: assistantMsg,
+                          conversationId,
+                          authUserId: auth.userId,
+                          selectedProjectId: selectedProject?.id || null,
+                          storageMode,
+                          logPrefix: 'sendMessage][openai-chatgpt repeat',
+                        })
+                      : (syncAssistantMessageLocallyInBackground({
+                          message: assistantMsg,
+                          conversationId,
+                          authUserId: auth.userId,
+                          selectedProjectId: selectedProject?.id || null,
+                          storageMode,
+                          logPrefix: 'sendMessage][openai-chatgpt repeat',
+                        }), [])
+                    const generatedImagePaths = Array.isArray((assistantMsg as any).generatedImageFilePaths)
+                      ? Array.from(new Set([...((assistantMsg as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
+                      : syncGeneratedImagePaths
                     if (imageBlocks.length > 0) {
                       const hintMessage = await persistGeneratedImagePathHintMessage({
                         dispatch,
@@ -3704,6 +3766,7 @@ const executionMode = 'client'
                       })
                       if (hintMessage) {
                         currentTurnHistory.push(hintMessage)
+                        messageId = hintMessage.id
                       }
                     }
                     // Keep current streaming UI until the next generation_started event clears it.
@@ -4212,23 +4275,32 @@ const executionMode = 'client'
                     // Sync to React Query cache
                     updateMessageCache(extra.queryClient, conversationId, chunk.message)
                     // Sync directly to local SQLite
-                    const syncGeneratedImagePaths = await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
-                      message: chunk.message,
-                      conversationId,
-                      authUserId: auth.userId,
-                      selectedProjectId: selectedProject?.id || null,
-                      storageMode,
-                      logPrefix: 'sendMessage][openai-chatgpt',
-                    })
-                      messageId = chunk.message.id
-                      currentTurnContent = ''
-                      currentTurnHistory.push(chunk.message)
-                      const generatedImagePaths = Array.isArray((chunk.message as any).generatedImageFilePaths)
-                        ? Array.from(new Set([...((chunk.message as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
-                        : syncGeneratedImagePaths
-                      const imageBlocks = Array.isArray((chunk.message as any).content_blocks)
-                        ? (chunk.message as any).content_blocks.filter((block: any) => block?.type === 'image')
-                        : []
+                    messageId = chunk.message.id
+                    currentTurnContent = ''
+                    currentTurnHistory.push(chunk.message)
+                    const imageBlocks = Array.isArray((chunk.message as any).content_blocks)
+                      ? (chunk.message as any).content_blocks.filter((block: any) => block?.type === 'image')
+                      : []
+                    const syncGeneratedImagePaths = imageBlocks.length > 0
+                      ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
+                          message: chunk.message,
+                          conversationId,
+                          authUserId: auth.userId,
+                          selectedProjectId: selectedProject?.id || null,
+                          storageMode,
+                          logPrefix: 'sendMessage][openai-chatgpt',
+                        })
+                      : (syncAssistantMessageLocallyInBackground({
+                          message: chunk.message,
+                          conversationId,
+                          authUserId: auth.userId,
+                          selectedProjectId: selectedProject?.id || null,
+                          storageMode,
+                          logPrefix: 'sendMessage][openai-chatgpt',
+                        }), [])
+                    const generatedImagePaths = Array.isArray((chunk.message as any).generatedImageFilePaths)
+                      ? Array.from(new Set([...((chunk.message as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
+                      : syncGeneratedImagePaths
                       if (imageBlocks.length > 0) {
                         const hintMessage = await persistGeneratedImagePathHintMessage({
                           dispatch,
@@ -4244,6 +4316,7 @@ const executionMode = 'client'
                         })
                         if (hintMessage) {
                           currentTurnHistory.push(hintMessage)
+                          messageId = hintMessage.id
                         }
                       }
                       // Keep current streaming UI until the next generation_started event clears it.
@@ -4256,7 +4329,20 @@ const executionMode = 'client'
             // After streaming, check for tool calls and execute them locally
             const lastMsg = currentTurnHistory[currentTurnHistory.length - 1]
             const pendingToolCalls = Array.isArray(lastMsg?.tool_calls) ? lastMsg.tool_calls : []
-            const isStreamActive = getState().chat.streaming.byId[streamId]?.active ?? false
+            const streamSnapshot = getState().chat.streaming.byId[streamId]
+            const isStreamActive = streamSnapshot?.active ?? false
+            console.log('[OpenAIChatGPTToolLoop][sendMessage] post-stream tool check', {
+              streamId,
+              active: isStreamActive,
+              streamStatus: streamSnapshot?.status,
+              historyLength: currentTurnHistory.length,
+              lastRole: lastMsg?.role,
+              lastId: lastMsg?.id,
+              lastPartial: lastMsg?.partial,
+              pendingToolCallCount: pendingToolCalls.length,
+              pendingToolCallNames: pendingToolCalls.map((tc: any) => tc?.name || tc?.function?.name || '<unnamed>'),
+              pendingToolCallIds: pendingToolCalls.map((tc: any) => tc?.id || '<no-id>'),
+            })
 
             if (pendingToolCalls.length > 0 && isStreamActive) {
               const rootPath = effectiveToolRootPath
@@ -4269,6 +4355,11 @@ const executionMode = 'client'
                 let isError = false
 
                 try {
+                  console.log('[OpenAIChatGPTToolLoop][sendMessage] executing tool call', {
+                    streamId,
+                    toolCallId: toolCall?.id,
+                    toolName: toolCall?.name || toolCall?.function?.name,
+                  })
                   const result = await executeToolWithPermissionCheck(
                     dispatch,
                     getState,
@@ -4293,6 +4384,12 @@ const executionMode = 'client'
                 } catch (error) {
                   isError = true
                   content = error instanceof Error ? error.message : String(error)
+                  console.error('[OpenAIChatGPTToolLoop][sendMessage] tool execution failed', {
+                    streamId,
+                    toolCallId: toolCall?.id,
+                    toolName: toolCall?.name || toolCall?.function?.name,
+                    error: content,
+                  })
                 }
 
                 const toolResultBlock = {
@@ -4351,8 +4448,23 @@ const executionMode = 'client'
               currentTurnContent = ''
               parent = lastMsg.id
               continueTurn = successfulTool
+              console.log('[OpenAIChatGPTToolLoop][sendMessage] tool loop continuation decision', {
+                streamId,
+                successfulTool,
+                continueTurn,
+                parent,
+                toolResultBlockCount: toolResultBlocks.length,
+              })
             } else {
               continueTurn = false
+              console.warn('[OpenAIChatGPTToolLoop][sendMessage] not executing tool calls', {
+                streamId,
+                pendingToolCallCount: pendingToolCalls.length,
+                isStreamActive,
+                streamStatus: streamSnapshot?.status,
+                lastRole: lastMsg?.role,
+                lastId: lastMsg?.id,
+              })
             }
 
             if (!continueTurn) {
@@ -5141,8 +5253,9 @@ export const editMessageWithBranching = createAsyncThunk<
       // Truncate path to only include messages strictly before the originalMessageId
       const idxOriginal = currentPathIds.indexOf(originalMessageId)
       const truncatedPathIds = idxOriginal >= 0 ? currentPathIds.slice(0, idxOriginal) : currentPathIds
-      const currentPathMessages = trimHistoryToLatestCompaction(
-        truncatedPathIds.map(id => currentMessages.find(m => m.id === id))
+      const currentPathMessages = appendGeneratedImagePathHintsForHistory(
+        trimHistoryToLatestCompaction(truncatedPathIds.map(id => currentMessages.find(m => m.id === id))),
+        currentMessages
       )
 
       // Read selected model from React Query cache
@@ -5817,22 +5930,31 @@ const executionMode = 'client' // Prefer client execution for tools
                   dispatch(chatSliceActions.messageAdded(assistantMsg))
                   dispatch(chatSliceActions.messageBranchCreated({ newMessage: assistantMsg }))
                   updateMessageCache(extra.queryClient, conversationId, assistantMsg)
-                  const syncGeneratedImagePaths = await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
-                    message: assistantMsg,
-                    conversationId,
-                    authUserId: auth.userId,
-                    selectedProjectId: selectedProject?.id || null,
-                    storageMode,
-                    logPrefix: 'editMessageWithBranching][openai-chatgpt',
-                  })
-                    messageId = assistantMsg.id
-                    currentTurnHistory.push(assistantMsg)
-                    const generatedImagePaths = Array.isArray((assistantMsg as any).generatedImageFilePaths)
-                      ? Array.from(new Set([...((assistantMsg as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
-                      : syncGeneratedImagePaths
-                    const imageBlocks = Array.isArray((assistantMsg as any).content_blocks)
-                      ? (assistantMsg as any).content_blocks.filter((block: any) => block?.type === 'image')
-                      : []
+                  messageId = assistantMsg.id
+                  currentTurnHistory.push(assistantMsg)
+                  const imageBlocks = Array.isArray((assistantMsg as any).content_blocks)
+                    ? (assistantMsg as any).content_blocks.filter((block: any) => block?.type === 'image')
+                    : []
+                  const syncGeneratedImagePaths = imageBlocks.length > 0
+                    ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
+                        message: assistantMsg,
+                        conversationId,
+                        authUserId: auth.userId,
+                        selectedProjectId: selectedProject?.id || null,
+                        storageMode,
+                        logPrefix: 'editMessageWithBranching][openai-chatgpt',
+                      })
+                    : (syncAssistantMessageLocallyInBackground({
+                        message: assistantMsg,
+                        conversationId,
+                        authUserId: auth.userId,
+                        selectedProjectId: selectedProject?.id || null,
+                        storageMode,
+                        logPrefix: 'editMessageWithBranching][openai-chatgpt',
+                      }), [])
+                  const generatedImagePaths = Array.isArray((assistantMsg as any).generatedImageFilePaths)
+                    ? Array.from(new Set([...((assistantMsg as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
+                    : syncGeneratedImagePaths
                     if (imageBlocks.length > 0) {
                       const hintMessage = await persistGeneratedImagePathHintMessage({
                         dispatch,
@@ -5848,6 +5970,7 @@ const executionMode = 'client' // Prefer client execution for tools
                       })
                       if (hintMessage) {
                         currentTurnHistory.push(hintMessage)
+                        messageId = hintMessage.id
                       }
                     }
                     // Keep current streaming UI until the next generation_started event clears it.
@@ -6648,7 +6771,7 @@ const executionMode = 'client'
         return history
       }
 
-      let currentTurnHistory = buildHistoryFromParent(parentId)
+      let currentTurnHistory = appendGeneratedImagePathHintsForHistory(buildHistoryFromParent(parentId), currentMessages)
       const shouldUseLmStudio = isElectronMode && isLmStudio
       const shouldUseOpenAIChatGPT = isElectronMode && isOpenAIChatGPT
 
@@ -7051,22 +7174,31 @@ const executionMode = 'client'
                   const assistantMsg = chunk.message
                   dispatch(chatSliceActions.messageBranchCreated({ newMessage: assistantMsg }))
                   updateMessageCache(extra.queryClient, conversationId, assistantMsg)
-                  const syncGeneratedImagePaths = await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
-                    message: assistantMsg,
-                    conversationId,
-                    authUserId: auth.userId,
-                    selectedProjectId: selectedProject?.id || null,
-                    storageMode,
-                    logPrefix: 'sendMessageToBranch][openai-chatgpt',
-                  })
-                    messageId = assistantMsg.id
-                    currentTurnHistory.push(assistantMsg)
-                    const generatedImagePaths = Array.isArray((assistantMsg as any).generatedImageFilePaths)
-                      ? Array.from(new Set([...((assistantMsg as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
-                      : syncGeneratedImagePaths
-                    const imageBlocks = Array.isArray((assistantMsg as any).content_blocks)
-                      ? (assistantMsg as any).content_blocks.filter((block: any) => block?.type === 'image')
-                      : []
+                  messageId = assistantMsg.id
+                  currentTurnHistory.push(assistantMsg)
+                  const imageBlocks = Array.isArray((assistantMsg as any).content_blocks)
+                    ? (assistantMsg as any).content_blocks.filter((block: any) => block?.type === 'image')
+                    : []
+                  const syncGeneratedImagePaths = imageBlocks.length > 0
+                    ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
+                        message: assistantMsg,
+                        conversationId,
+                        authUserId: auth.userId,
+                        selectedProjectId: selectedProject?.id || null,
+                        storageMode,
+                        logPrefix: 'sendMessageToBranch][openai-chatgpt',
+                      })
+                    : (syncAssistantMessageLocallyInBackground({
+                        message: assistantMsg,
+                        conversationId,
+                        authUserId: auth.userId,
+                        selectedProjectId: selectedProject?.id || null,
+                        storageMode,
+                        logPrefix: 'sendMessageToBranch][openai-chatgpt',
+                      }), [])
+                  const generatedImagePaths = Array.isArray((assistantMsg as any).generatedImageFilePaths)
+                    ? Array.from(new Set([...((assistantMsg as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
+                    : syncGeneratedImagePaths
                     if (imageBlocks.length > 0) {
                       const hintMessage = await persistGeneratedImagePathHintMessage({
                         dispatch,
@@ -7082,6 +7214,7 @@ const executionMode = 'client'
                       })
                       if (hintMessage) {
                         currentTurnHistory.push(hintMessage)
+                        messageId = hintMessage.id
                       }
                     }
                     // Keep current streaming UI until the next generation_started event clears it.

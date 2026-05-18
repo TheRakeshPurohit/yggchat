@@ -351,16 +351,14 @@ export const selectDisplayMessages = createSelector(
       }
 
       const expanded = [...selected]
-      let cursor = selected[selected.length - 1]
-      while (cursor) {
-        const children = (byParent.get(String(cursor.id)) || [])
+      for (const message of selected) {
+        const children = (byParent.get(String(message.id)) || [])
           .filter(child => !selectedIds.has(String(child.id)))
           .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-        if (children.length !== 1) break
-        const child = children[0]
-        expanded.push(child)
-        selectedIds.add(String(child.id))
-        cursor = child
+        for (const child of children) {
+          expanded.push(child)
+          selectedIds.add(String(child.id))
+        }
       }
       return expanded
     }

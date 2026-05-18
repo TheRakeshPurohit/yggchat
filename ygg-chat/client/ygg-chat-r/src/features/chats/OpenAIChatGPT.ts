@@ -231,7 +231,7 @@ function buildAssistantMessage(params: {
 }
 
 export interface OpenAIChatGPTStreamHandlers {
-  onChunk: (chunk: any) => void
+  onChunk: (chunk: any) => void | Promise<void>
   signal?: AbortSignal
 }
 
@@ -286,7 +286,8 @@ function extractImageUrlFromContentPart(part: any): string | null {
   }
 
   if (part.type === 'file') {
-    const mediaType = typeof part.mediaType === 'string' ? part.mediaType : typeof part.mime === 'string' ? part.mime : ''
+    const mediaType =
+      typeof part.mediaType === 'string' ? part.mediaType : typeof part.mime === 'string' ? part.mime : ''
     if (mediaType && mediaType.startsWith('image/')) {
       const direct = normalizeAttachmentImageUrl(part.url || part.dataUrl || part.image_url || null)
       if (direct) return direct
@@ -653,7 +654,12 @@ function transformMessagesForChatGPT(messages: any[]): any[] {
       let hasStoredAssistantMessages = false
 
       for (const item of storedResponseItems) {
-        if (item?.type === 'message' && item?.role === 'assistant' && Array.isArray(item?.content) && item.content.length > 0) {
+        if (
+          item?.type === 'message' &&
+          item?.role === 'assistant' &&
+          Array.isArray(item?.content) &&
+          item.content.length > 0
+        ) {
           hasStoredAssistantMessages = true
           input.push(item)
           continue
@@ -774,12 +780,7 @@ function normalizeAttachmentImageUrl(attachment: any): string | null {
   }
 
   const candidate =
-    attachment.dataUrl ||
-    attachment.dataURL ||
-    attachment.url ||
-    attachment.image_url ||
-    attachment.imageUrl ||
-    null
+    attachment.dataUrl || attachment.dataURL || attachment.url || attachment.image_url || attachment.imageUrl || null
 
   if (typeof candidate !== 'string') return null
   const trimmed = candidate.trim()
@@ -899,11 +900,13 @@ export async function createOpenAIChatGPTStreamingRequest(
 
     const emitPartialComplete = () => {
       if (completed) return false
-      const hasContent = streamedText.trim().length > 0 || streamedReasoning.trim().length > 0 || streamedToolCalls.size > 0
+      const hasContent =
+        streamedText.trim().length > 0 || streamedReasoning.trim().length > 0 || streamedToolCalls.size > 0
       if (!hasContent) return false
 
       const contentBlocks: any[] = []
-      if (streamedReasoning) contentBlocks.push({ type: 'thinking', index: contentBlocks.length, content: streamedReasoning })
+      if (streamedReasoning)
+        contentBlocks.push({ type: 'thinking', index: contentBlocks.length, content: streamedReasoning })
       if (streamedText) contentBlocks.push({ type: 'text', index: contentBlocks.length, content: streamedText })
       for (const toolCall of streamedToolCalls.values()) {
         contentBlocks.push({
@@ -959,13 +962,36 @@ export async function createOpenAIChatGPTStreamingRequest(
           }
         } else if (chunk?.type === 'tool_call' && chunk.toolCall?.id) {
           streamedToolCalls.set(chunk.toolCall.id, chunk.toolCall)
+        } else if (chunk?.type === 'complete') {
+          const completeToolCalls = Array.isArray(chunk.message?.tool_calls)
+            ? chunk.message.tool_calls
+            : Array.isArray(chunk.message?.toolCalls)
+              ? chunk.message.toolCalls
+              : []
+          for (const toolCall of completeToolCalls) {
+            if (toolCall?.id) streamedToolCalls.set(toolCall.id, toolCall)
+          }
+          console.log('[OpenAIChatGPTBridge] complete chunk received', {
+            messageId: chunk.message?.id,
+            toolCallsSnakeCount: Array.isArray(chunk.message?.tool_calls) ? chunk.message.tool_calls.length : 0,
+            toolCallsCamelCount: Array.isArray(chunk.message?.toolCalls) ? chunk.message.toolCalls.length : 0,
+            accumulatedToolCallCount: streamedToolCalls.size,
+            contentLength: typeof chunk.message?.content === 'string' ? chunk.message.content.length : 0,
+            partial: chunk.message?.partial,
+          })
         }
-        onChunk(chunk)
+        const onChunkHandled = Promise.resolve(onChunk(chunk)).catch(error => {
+          console.error('[OpenAIChatGPTBridge] async onChunk handler failed', error)
+        })
         if (chunk?.type === 'complete') {
-          completed = true
-          cleanup?.()
-          resolve()
+          void onChunkHandled.finally(() => {
+            completed = true
+            cleanup?.()
+            resolve()
+          })
+          return
         }
+        void onChunkHandled
       })
     })
     return
@@ -1072,7 +1098,6 @@ export async function createOpenAIChatGPTStreamingRequest(
   }
 
   emitChunk({ type: 'generation_started', messageId: assistantMessageId })
-
 
   // Accumulators for final message
   let assistantText = ''
@@ -1499,7 +1524,8 @@ export async function createOpenAIChatGPTStreamingRequest(
     const replayItems = getResponseOutputItemsForReplay()
     const replayArtifacts = buildFinalArtifactsFromReplayItems(replayItems)
     const legacyArtifacts = buildLegacyFinalToolCalls()
-    const finalToolCalls = replayArtifacts.toolCalls.length > 0 ? [...replayArtifacts.toolCalls] : [...legacyArtifacts.toolCalls]
+    const finalToolCalls =
+      replayArtifacts.toolCalls.length > 0 ? [...replayArtifacts.toolCalls] : [...legacyArtifacts.toolCalls]
     const finalContentBlocks =
       replayArtifacts.contentBlocks.length > 0 ? [...replayArtifacts.contentBlocks] : [...legacyArtifacts.contentBlocks]
     const seenToolIds = new Set(finalToolCalls.map(toolCall => toolCall.id))
@@ -1582,13 +1608,6 @@ export async function createOpenAIChatGPTStreamingRequest(
 
     if (replayItems.length > 0) {
       ;(message as any).responses_output_items = replayItems
-    }
-
-    if (finalToolCalls.length > 0) {
-      console.log(
-        '[OpenAI ChatGPT] Parsed tool calls from responses API:',
-        finalToolCalls.map(tc => tc.name)
-      )
     }
 
     completionEmitted = true
@@ -1739,7 +1758,10 @@ export async function createOpenAIChatGPTStreamingRequest(
           continue
         }
 
-        if (parsed.type === 'response.reasoning_text.delta' || parsed.type === 'response.reasoning_summary_text.delta') {
+        if (
+          parsed.type === 'response.reasoning_text.delta' ||
+          parsed.type === 'response.reasoning_summary_text.delta'
+        ) {
           const evt = parsed as any
           const delta = typeof evt.delta === 'string' ? evt.delta : ''
           if (!delta) continue

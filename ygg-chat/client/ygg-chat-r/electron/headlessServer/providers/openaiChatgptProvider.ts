@@ -183,9 +183,12 @@ function toInputTextContent(value: any): Array<{ type: 'input_text'; text: strin
     return value
       .map(item => {
         if (typeof item === 'string') return { type: 'input_text' as const, text: item }
-        if (item?.type === 'text' && typeof item?.content === 'string') return { type: 'input_text' as const, text: item.content }
-        if (item?.type === 'text' && typeof item?.text === 'string') return { type: 'input_text' as const, text: item.text }
-        if (item?.type === 'input_text' && typeof item?.text === 'string') return { type: 'input_text' as const, text: item.text }
+        if (item?.type === 'text' && typeof item?.content === 'string')
+          return { type: 'input_text' as const, text: item.content }
+        if (item?.type === 'text' && typeof item?.text === 'string')
+          return { type: 'input_text' as const, text: item.text }
+        if (item?.type === 'input_text' && typeof item?.text === 'string')
+          return { type: 'input_text' as const, text: item.text }
         return null
       })
       .filter((item): item is { type: 'input_text'; text: string } => Boolean(item && item.text.trim()))
@@ -207,12 +210,7 @@ function normalizeAttachmentImageUrl(attachment: any): string | null {
   }
 
   const candidate =
-    attachment.dataUrl ||
-    attachment.dataURL ||
-    attachment.url ||
-    attachment.image_url ||
-    attachment.imageUrl ||
-    null
+    attachment.dataUrl || attachment.dataURL || attachment.url || attachment.image_url || attachment.imageUrl || null
 
   if (typeof candidate !== 'string') return null
   const trimmed = candidate.trim()
@@ -242,7 +240,8 @@ function extractImageUrlFromContentPart(part: any): string | null {
     const direct = normalizeAttachmentImageUrl(part.url || part.dataUrl || part.image_url || part.imageUrl || null)
     if (direct) return direct
 
-    const mediaType = typeof part.mimeType === 'string' ? part.mimeType : typeof part.mime === 'string' ? part.mime : 'image/png'
+    const mediaType =
+      typeof part.mimeType === 'string' ? part.mimeType : typeof part.mime === 'string' ? part.mime : 'image/png'
     if (typeof part.data === 'string' && part.data.trim().length > 0 && mediaType.startsWith('image/')) {
       const trimmed = part.data.trim()
       if (/^data:image\//i.test(trimmed) || /^https?:\/\//i.test(trimmed)) return trimmed
@@ -251,7 +250,8 @@ function extractImageUrlFromContentPart(part: any): string | null {
   }
 
   if (part.type === 'file') {
-    const mediaType = typeof part.mediaType === 'string' ? part.mediaType : typeof part.mime === 'string' ? part.mime : ''
+    const mediaType =
+      typeof part.mediaType === 'string' ? part.mediaType : typeof part.mime === 'string' ? part.mime : ''
     if (mediaType && mediaType.startsWith('image/')) {
       const direct = normalizeAttachmentImageUrl(part.url || part.dataUrl || part.image_url || null)
       if (direct) return direct
@@ -420,10 +420,7 @@ function isAutoCompactionSummaryMessage(msg: any): boolean {
   if (!msg) return false
   if (msg.note === AUTO_COMPACTION_NOTE) return true
   const text = getMessageTextContent(msg).trim()
-  return (
-    (msg.role === 'system' || msg.role === 'developer') &&
-    text.startsWith(AUTO_COMPACTION_SUMMARY_RESUME_LINE)
-  )
+  return (msg.role === 'system' || msg.role === 'developer') && text.startsWith(AUTO_COMPACTION_SUMMARY_RESUME_LINE)
 }
 
 function isGeneratedImagePathHintMessage(msg: any): boolean {
@@ -706,7 +703,7 @@ function transformMessagesForCodex(history: any[], fallbackUserContent: string):
         input.push({
           type: 'function_call_output',
           call_id: callId,
-          output: typeof sanitized === 'string' ? sanitized : sanitized ?? null,
+          output: typeof sanitized === 'string' ? sanitized : (sanitized ?? null),
         })
       }
 
@@ -723,7 +720,7 @@ function transformMessagesForCodex(history: any[], fallbackUserContent: string):
       input.push({
         type: 'function_call_output',
         call_id: callId,
-        output: typeof sanitized === 'string' ? sanitized : sanitized ?? null,
+        output: typeof sanitized === 'string' ? sanitized : (sanitized ?? null),
       })
       continue
     }
@@ -768,10 +765,18 @@ function hasImageGenerationIntent(input: ProviderGenerateInput): boolean {
 
   const text = `${input.userContent || ''}\n${(input.history || [])
     .slice(-3)
-    .map(msg => (typeof msg?.content === 'string' ? msg.content : typeof msg?.content_plain_text === 'string' ? msg.content_plain_text : ''))
+    .map(msg =>
+      typeof msg?.content === 'string'
+        ? msg.content
+        : typeof msg?.content_plain_text === 'string'
+          ? msg.content_plain_text
+          : ''
+    )
     .join('\n')}`
 
-  return /\b(generate|create|make|draw|edit|render)\b[\s\S]{0,80}\b(image|picture|photo|illustration|icon|logo|sprite|asset)\b/i.test(text)
+  return /\b(generate|create|make|draw|edit|render)\b[\s\S]{0,80}\b(image|picture|photo|illustration|icon|logo|sprite|asset)\b/i.test(
+    text
+  )
 }
 
 function getMimeTypeFromDataUrl(url: string): string {
@@ -861,7 +866,11 @@ function extractToolCallsFromReplayItems(items: any[]): ProviderToolCall[] {
     })
 }
 
-function selectFinalTextFromReplayItems(replayItems: any[], fallbackText: string, useGPT53StrictTextAssembly: boolean): string {
+function selectFinalTextFromReplayItems(
+  replayItems: any[],
+  fallbackText: string,
+  useGPT53StrictTextAssembly: boolean
+): string {
   const assistantMessages = (replayItems || [])
     .filter(item => item?.type === 'message' && item?.role === 'assistant')
     .map((item: any) => {
@@ -903,8 +912,14 @@ function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; mod
   let streamedText = ''
   let streamedReasoning = ''
   let completedOutputItems: any[] | null = null
-  const callByItemId = new Map<string, { id: string; name: string; arguments: string; outputIndex?: number; seq: number }>()
-  const responseOutputItemsById = new Map<string, { id: string; type?: string; role?: string; phase?: string; outputIndex?: number; seq: number }>()
+  const callByItemId = new Map<
+    string,
+    { id: string; name: string; arguments: string; outputIndex?: number; seq: number }
+  >()
+  const responseOutputItemsById = new Map<
+    string,
+    { id: string; type?: string; role?: string; phase?: string; outputIndex?: number; seq: number }
+  >()
   const responseTextByItem = new Map<string, { text: string; outputIndex?: number; seq: number; fromDone: boolean }>()
   const imageGenerationItemsById = new Map<string, any>()
   const reasoningByKey = new Map<string, string>()
@@ -922,12 +937,29 @@ function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; mod
   const mergeOutputItem = (item: any) => {
     if (!item?.id || typeof item.id !== 'string') return
     const existing = responseOutputItemsById.get(item.id)
-    const outputIndex = typeof item.output_index === 'number' ? item.output_index : typeof item.outputIndex === 'number' ? item.outputIndex : existing?.outputIndex
-    responseOutputItemsById.set(item.id, { id: item.id, type: typeof item.type === 'string' ? item.type : existing?.type, role: typeof item.role === 'string' ? item.role : existing?.role, phase: typeof item.phase === 'string' ? item.phase : existing?.phase, outputIndex, seq: existing?.seq ?? responseSeq++ })
+    const outputIndex =
+      typeof item.output_index === 'number'
+        ? item.output_index
+        : typeof item.outputIndex === 'number'
+          ? item.outputIndex
+          : existing?.outputIndex
+    responseOutputItemsById.set(item.id, {
+      id: item.id,
+      type: typeof item.type === 'string' ? item.type : existing?.type,
+      role: typeof item.role === 'string' ? item.role : existing?.role,
+      phase: typeof item.phase === 'string' ? item.phase : existing?.phase,
+      outputIndex,
+      seq: existing?.seq ?? responseSeq++,
+    })
   }
   const upsertResponseText = (itemId: string, text: string, outputIndex?: number, fromDone: boolean = false) => {
     const existing = responseTextByItem.get(itemId)
-    responseTextByItem.set(itemId, { text: fromDone ? text : (existing?.text || '') + text, outputIndex: typeof outputIndex === 'number' ? outputIndex : existing?.outputIndex, seq: existing?.seq ?? responseSeq++, fromDone: fromDone || Boolean(existing?.fromDone) })
+    responseTextByItem.set(itemId, {
+      text: fromDone ? text : (existing?.text || '') + text,
+      outputIndex: typeof outputIndex === 'number' ? outputIndex : existing?.outputIndex,
+      seq: existing?.seq ?? responseSeq++,
+      fromDone: fromDone || Boolean(existing?.fromDone),
+    })
   }
   const shouldEmitTextForEvent = (evt: any): boolean => {
     if (!useGPT53StrictTextAssembly) return true
@@ -961,16 +993,59 @@ function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; mod
   const extractReasoningFromOutputItem = (item: any) => {
     if (!item || item.type !== 'reasoning') return
     const itemId = typeof item.id === 'string' ? item.id : 'unknown-reasoning-item'
-    if (Array.isArray(item.content)) item.content.forEach((part: any, i: number) => { if (part?.type === 'reasoning_text' && typeof part.text === 'string') applyReasoningDone(`reasoning_text:${itemId}:${i}`, part.text) })
-    if (Array.isArray(item.summary)) item.summary.forEach((part: any, i: number) => { if (typeof part?.text === 'string') applyReasoningDone(`reasoning_summary:${itemId}:${i}`, part.text) })
+    if (Array.isArray(item.content))
+      item.content.forEach((part: any, i: number) => {
+        if (part?.type === 'reasoning_text' && typeof part.text === 'string')
+          applyReasoningDone(`reasoning_text:${itemId}:${i}`, part.text)
+      })
+    if (Array.isArray(item.summary))
+      item.summary.forEach((part: any, i: number) => {
+        if (typeof part?.text === 'string') applyReasoningDone(`reasoning_summary:${itemId}:${i}`, part.text)
+      })
   }
   const buildFallbackResponseOutputItems = (): any[] => {
-    const fallbackMessages = Array.from(responseOutputItemsById.values()).filter(item => (!item.type || item.type === 'message') && (!item.role || item.role === 'assistant')).sort((a, b) => (typeof a.outputIndex === 'number' && typeof b.outputIndex === 'number') ? a.outputIndex - b.outputIndex : typeof a.outputIndex === 'number' ? -1 : typeof b.outputIndex === 'number' ? 1 : a.seq - b.seq).map(item => {
-      const text = responseTextByItem.get(item.id)?.text || ''
-      if (!text.trim()) return null
-      return { type: 'message', id: item.id, role: item.role || 'assistant', phase: item.phase, output_index: item.outputIndex, content: [{ type: 'output_text', text }] }
-    }).filter(Boolean)
-    const fallbackFunctionCalls = Array.from(callByItemId.values()).sort((a, b) => (typeof a.outputIndex === 'number' && typeof b.outputIndex === 'number') ? a.outputIndex - b.outputIndex : typeof a.outputIndex === 'number' ? -1 : typeof b.outputIndex === 'number' ? 1 : a.seq - b.seq).map(call => ({ type: 'function_call', call_id: call.id, name: call.name, arguments: call.arguments || '', output_index: call.outputIndex })).filter(call => call.call_id && call.name)
+    const fallbackMessages = Array.from(responseOutputItemsById.values())
+      .filter(item => (!item.type || item.type === 'message') && (!item.role || item.role === 'assistant'))
+      .sort((a, b) =>
+        typeof a.outputIndex === 'number' && typeof b.outputIndex === 'number'
+          ? a.outputIndex - b.outputIndex
+          : typeof a.outputIndex === 'number'
+            ? -1
+            : typeof b.outputIndex === 'number'
+              ? 1
+              : a.seq - b.seq
+      )
+      .map(item => {
+        const text = responseTextByItem.get(item.id)?.text || ''
+        if (!text.trim()) return null
+        return {
+          type: 'message',
+          id: item.id,
+          role: item.role || 'assistant',
+          phase: item.phase,
+          output_index: item.outputIndex,
+          content: [{ type: 'output_text', text }],
+        }
+      })
+      .filter(Boolean)
+    const fallbackFunctionCalls = Array.from(callByItemId.values())
+      .sort((a, b) =>
+        typeof a.outputIndex === 'number' && typeof b.outputIndex === 'number'
+          ? a.outputIndex - b.outputIndex
+          : typeof a.outputIndex === 'number'
+            ? -1
+            : typeof b.outputIndex === 'number'
+              ? 1
+              : a.seq - b.seq
+      )
+      .map(call => ({
+        type: 'function_call',
+        call_id: call.id,
+        name: call.name,
+        arguments: call.arguments || '',
+        output_index: call.outputIndex,
+      }))
+      .filter(call => call.call_id && call.name)
     const fallbackImages = Array.from(imageGenerationItemsById.values())
     return normalizeResponseOutputItemsForReplay([...fallbackMessages, ...fallbackFunctionCalls, ...fallbackImages])
   }
@@ -981,23 +1056,35 @@ function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; mod
       mergeOutputItem(item)
       if (item?.type === 'function_call' && item?.id) {
         const existing = callByItemId.get(item.id)
-        const outputIndex = typeof item.output_index === 'number' ? item.output_index : typeof item.outputIndex === 'number' ? item.outputIndex : existing?.outputIndex
-        if (existing) { existing.id = item.call_id || item.id; existing.name = item.name || existing.name; existing.arguments = item.arguments ?? existing.arguments; existing.outputIndex = outputIndex }
-        else callByItemId.set(item.id, { id: item.call_id || item.id, name: item.name || '', arguments: item.arguments || '', outputIndex, seq: callSeq++ })
+        const outputIndex =
+          typeof item.output_index === 'number'
+            ? item.output_index
+            : typeof item.outputIndex === 'number'
+              ? item.outputIndex
+              : existing?.outputIndex
+        if (existing) {
+          existing.id = item.call_id || item.id
+          existing.name = item.name || existing.name
+          existing.arguments = item.arguments ?? existing.arguments
+          existing.outputIndex = outputIndex
+        } else
+          callByItemId.set(item.id, {
+            id: item.call_id || item.id,
+            name: item.name || '',
+            arguments: item.arguments || '',
+            outputIndex,
+            seq: callSeq++,
+          })
       }
       if (item?.type === 'image_generation_call' && item?.id) {
         imageGenerationItemsById.set(item.id, item)
-        console.log('[OpenAI ChatGPT] image_generation_call output item', {
-          eventType: parsed.type,
-          id: item.id,
-          status: item.status,
-          hasResult: typeof item.result === 'string' && item.result.trim().length > 0,
-          resultLength: typeof item.result === 'string' ? item.result.length : 0,
-        })
       }
       if (parsed.type === 'response.output_item.done') {
         if (item?.type === 'message' && item?.id) {
-          const text = extractAssistantMessageTextFromReplayItem({ type: 'message', content: normalizeResponseMessageContent(item.content) })
+          const text = extractAssistantMessageTextFromReplayItem({
+            type: 'message',
+            content: normalizeResponseMessageContent(item.content),
+          })
           if (text) upsertResponseText(item.id, text, extractIndex(item, 'output_index', 'outputIndex'), true)
         }
         extractReasoningFromOutputItem(item)
@@ -1009,21 +1096,69 @@ function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; mod
       if (!delta) return
       const itemId = extractItemId(parsed)
       if (itemId) upsertResponseText(itemId, delta, extractIndex(parsed, 'output_index', 'outputIndex'), false)
-      if (shouldEmitTextForEvent(parsed)) { streamedText += delta; emit?.({ type: 'chunk', part: 'text', delta }) }
+      if (shouldEmitTextForEvent(parsed)) {
+        streamedText += delta
+        emit?.({ type: 'chunk', part: 'text', delta })
+      }
       return
     }
     if (parsed.type === 'response.output_text.done') {
       const itemId = extractItemId(parsed)
-      if (itemId && typeof parsed.text === 'string') upsertResponseText(itemId, parsed.text, extractIndex(parsed, 'output_index', 'outputIndex'), true)
+      if (itemId && typeof parsed.text === 'string')
+        upsertResponseText(itemId, parsed.text, extractIndex(parsed, 'output_index', 'outputIndex'), true)
       return
     }
-    if (parsed.type === 'response.reasoning_text.delta' && typeof parsed.delta === 'string') { const itemId = extractItemId(parsed) || 'reasoning'; applyReasoningDelta(`reasoning_text:${itemId}:${extractIndex(parsed, 'content_index', 'contentIndex') || 0}`, parsed.delta); return }
-    if (parsed.type === 'response.reasoning_summary_text.delta' && typeof parsed.delta === 'string') { const itemId = extractItemId(parsed) || 'reasoning'; applyReasoningDelta(`reasoning_summary:${itemId}:${extractIndex(parsed, 'summary_index', 'summaryIndex') || 0}`, parsed.delta); return }
-    if (parsed.type === 'response.function_call_arguments.delta') { const itemId = typeof parsed.item_id === 'string' ? parsed.item_id : null; if (!itemId) return; const existing = callByItemId.get(itemId); if (existing) existing.arguments += parsed.delta || ''; else callByItemId.set(itemId, { id: itemId, name: '', arguments: parsed.delta || '', seq: callSeq++ }); return }
-    if (parsed.type === 'response.function_call_arguments.done') { const itemId = typeof parsed.item_id === 'string' ? parsed.item_id : null; if (!itemId) return; const existing = callByItemId.get(itemId); if (existing) existing.arguments = parsed.arguments || existing.arguments; else callByItemId.set(itemId, { id: itemId, name: '', arguments: parsed.arguments || '', seq: callSeq++ }); return }
-    if (parsed.type === 'response.failed' || parsed.type === 'response.incomplete') { const responseError = parsed?.response?.error; throw new Error(typeof responseError?.message === 'string' && responseError.message.trim() ? responseError.message : parsed.type === 'response.incomplete' ? 'OpenAI response was incomplete.' : 'OpenAI response failed.') }
-    if (parsed.type === 'error') { const err = parsed.error; throw new Error(typeof err?.message === 'string' ? err.message : 'OpenAI websocket returned an error event.') }
-    if ((parsed.type === 'response.completed' || parsed.type === 'response.done') && Array.isArray(parsed?.response?.output)) completedOutputItems = parsed.response.output
+    if (parsed.type === 'response.reasoning_text.delta' && typeof parsed.delta === 'string') {
+      const itemId = extractItemId(parsed) || 'reasoning'
+      applyReasoningDelta(
+        `reasoning_text:${itemId}:${extractIndex(parsed, 'content_index', 'contentIndex') || 0}`,
+        parsed.delta
+      )
+      return
+    }
+    if (parsed.type === 'response.reasoning_summary_text.delta' && typeof parsed.delta === 'string') {
+      const itemId = extractItemId(parsed) || 'reasoning'
+      applyReasoningDelta(
+        `reasoning_summary:${itemId}:${extractIndex(parsed, 'summary_index', 'summaryIndex') || 0}`,
+        parsed.delta
+      )
+      return
+    }
+    if (parsed.type === 'response.function_call_arguments.delta') {
+      const itemId = typeof parsed.item_id === 'string' ? parsed.item_id : null
+      if (!itemId) return
+      const existing = callByItemId.get(itemId)
+      if (existing) existing.arguments += parsed.delta || ''
+      else callByItemId.set(itemId, { id: itemId, name: '', arguments: parsed.delta || '', seq: callSeq++ })
+      return
+    }
+    if (parsed.type === 'response.function_call_arguments.done') {
+      const itemId = typeof parsed.item_id === 'string' ? parsed.item_id : null
+      if (!itemId) return
+      const existing = callByItemId.get(itemId)
+      if (existing) existing.arguments = parsed.arguments || existing.arguments
+      else callByItemId.set(itemId, { id: itemId, name: '', arguments: parsed.arguments || '', seq: callSeq++ })
+      return
+    }
+    if (parsed.type === 'response.failed' || parsed.type === 'response.incomplete') {
+      const responseError = parsed?.response?.error
+      throw new Error(
+        typeof responseError?.message === 'string' && responseError.message.trim()
+          ? responseError.message
+          : parsed.type === 'response.incomplete'
+            ? 'OpenAI response was incomplete.'
+            : 'OpenAI response failed.'
+      )
+    }
+    if (parsed.type === 'error') {
+      const err = parsed.error
+      throw new Error(typeof err?.message === 'string' ? err.message : 'OpenAI websocket returned an error event.')
+    }
+    if (
+      (parsed.type === 'response.completed' || parsed.type === 'response.done') &&
+      Array.isArray(parsed?.response?.output)
+    )
+      completedOutputItems = parsed.response.output
   }
   const finish = (): CodexParsedOutput => {
     const normalizedCompletedOutputItems = normalizeResponseOutputItemsForReplay(completedOutputItems || [])
@@ -1040,12 +1175,12 @@ function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; mod
       normalizedCompletedOutputItems.length > 0
         ? [...normalizedCompletedOutputItems, ...missingFallbackImages]
         : fallbackOutputItems
-    console.log('[OpenAI ChatGPT] response output summary', {
-      completedOutputCount: completedOutputItems?.length || 0,
-      normalizedOutputTypes: responseOutputItems.map((item: any) => item?.type).filter(Boolean),
-      imageGenerationCount: responseOutputItems.filter((item: any) => item?.type === 'image_generation_call').length,
-    })
-    return { text: selectFinalTextFromReplayItems(responseOutputItems, streamedText, useGPT53StrictTextAssembly), reasoning: selectReasoningFromReplayItems(responseOutputItems, streamedReasoning), toolCalls: extractToolCallsFromReplayItems(responseOutputItems), responseOutputItems }
+    return {
+      text: selectFinalTextFromReplayItems(responseOutputItems, streamedText, useGPT53StrictTextAssembly),
+      reasoning: selectReasoningFromReplayItems(responseOutputItems, streamedReasoning),
+      toolCalls: extractToolCallsFromReplayItems(responseOutputItems),
+      responseOutputItems,
+    }
   }
   return { handle, finish }
 }
@@ -1056,7 +1191,7 @@ async function readCodexSseOutput(params: {
   emit?: ProviderStreamEventHandler
   modelName: string
 }): Promise<CodexParsedOutput> {
-/* legacy parser body retained but bypassed below */
+  /* legacy parser body retained but bypassed below */
   const parser = createCodexEventParser({ emit: params.emit, modelName: params.modelName })
   const decoder = new TextDecoder()
   let buffer = ''
@@ -1074,13 +1209,25 @@ async function readCodexSseOutput(params: {
       if (!trimmed.startsWith('data:')) continue
       const payload = trimmed.slice(5).trim()
       if (!payload || payload === '[DONE]') continue
-      try { parser.handle(JSON.parse(payload)) } catch (error) { if (error instanceof SyntaxError) continue; throw error }
+      try {
+        parser.handle(JSON.parse(payload))
+      } catch (error) {
+        if (error instanceof SyntaxError) continue
+        throw error
+      }
     }
   }
   return parser.finish()
 }
 
-async function readCodexWebSocketOutput(params: { endpoint: string; headers: Record<string, string>; body: any; emit?: ProviderStreamEventHandler; modelName: string; timeoutMs?: number }): Promise<CodexParsedOutput> {
+async function readCodexWebSocketOutput(params: {
+  endpoint: string
+  headers: Record<string, string>
+  body: any
+  emit?: ProviderStreamEventHandler
+  modelName: string
+  timeoutMs?: number
+}): Promise<CodexParsedOutput> {
   const parser = createCodexEventParser({ emit: params.emit, modelName: params.modelName })
   const wsEndpoint = params.endpoint.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:')
   return await new Promise<CodexParsedOutput>((resolve, reject) => {
@@ -1091,21 +1238,29 @@ async function readCodexWebSocketOutput(params: { endpoint: string; headers: Rec
       if (settled) return
       settled = true
       clearTimeout(timer)
-      try { ws.close() } catch {}
+      try {
+        ws.close()
+      } catch {}
       resolve(parser.finish())
     }
     const fail = (error: any) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      try { ws.close() } catch {}
+      try {
+        ws.close()
+      } catch {}
       reject(error instanceof Error ? error : new Error(String(error)))
     }
     const timer = setTimeout(() => fail(new Error('OpenAI websocket idle timeout')), params.timeoutMs ?? 120000)
-    const bumpTimer = () => { timer.refresh?.() }
+    const bumpTimer = () => {
+      timer.refresh?.()
+    }
     ws.on('open', () => {
       bumpTimer()
-      ws.send(JSON.stringify({ type: 'response.create', ...params.body }), err => { if (err) fail(err) })
+      ws.send(JSON.stringify({ type: 'response.create', ...params.body }), err => {
+        if (err) fail(err)
+      })
     })
     ws.on('message', data => {
       bumpTimer()
@@ -1433,13 +1588,19 @@ async function readCodexSseOutputLegacy_DISABLED(params: {
 
       if (parsed.type === 'response.reasoning_text.delta' && typeof parsed.delta === 'string') {
         const itemId = extractItemId(parsed) || 'reasoning'
-        applyReasoningDelta(`reasoning_text:${itemId}:${extractIndex(parsed, 'content_index', 'contentIndex') || 0}`, parsed.delta)
+        applyReasoningDelta(
+          `reasoning_text:${itemId}:${extractIndex(parsed, 'content_index', 'contentIndex') || 0}`,
+          parsed.delta
+        )
         continue
       }
 
       if (parsed.type === 'response.reasoning_summary_text.delta' && typeof parsed.delta === 'string') {
         const itemId = extractItemId(parsed) || 'reasoning'
-        applyReasoningDelta(`reasoning_summary:${itemId}:${extractIndex(parsed, 'summary_index', 'summaryIndex') || 0}`, parsed.delta)
+        applyReasoningDelta(
+          `reasoning_summary:${itemId}:${extractIndex(parsed, 'summary_index', 'summaryIndex') || 0}`,
+          parsed.delta
+        )
         continue
       }
 
@@ -1535,7 +1696,9 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
     if (input.accessToken) {
       const accountId = input.accountId || extractAccountId(input.accessToken)
       if (!accountId) {
-        throw new Error('ChatGPT account ID missing. Provide accountId or use a token that includes chatgpt_account_id claim.')
+        throw new Error(
+          'ChatGPT account ID missing. Provide accountId or use a token that includes chatgpt_account_id claim.'
+        )
       }
       return {
         accessToken: input.accessToken,
@@ -1588,7 +1751,9 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
       return { accessToken: envToken, accountId: derived }
     }
 
-    throw new Error('OpenAI ChatGPT auth missing. Provide token+account_id or store OAuth tokens via provider-auth route.')
+    throw new Error(
+      'OpenAI ChatGPT auth missing. Provide token+account_id or store OAuth tokens via provider-auth route.'
+    )
   }
 
   async generate(input: ProviderGenerateInput, emit?: ProviderStreamEventHandler): Promise<ProviderGenerateOutput> {
@@ -1599,29 +1764,11 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
       enableImageGeneration: hasImageGenerationIntent(input),
     })
     const requestTools = [...mapTools(input.tools || []), ...hostedTools]
-    console.log('[OpenAI ChatGPT] request setup', {
-      model: normalizeModel(input.modelName),
-      hostedTools: hostedTools.map((tool: any) => tool?.type).filter(Boolean),
-      functionToolCount: (input.tools || []).length,
-      totalToolCount: requestTools.length,
-      imageIntent: hasImageGenerationIntent(input),
-      imageConfig: input.railwayTurn?.imageConfig,
-    })
     const transformedInput = appendImageAttachmentsToLatestUserMessage(
       transformMessagesForCodex(input.history || [], input.userContent),
       input.railwayTurn?.attachmentsBase64 ?? null
     )
-    console.log('[OpenAI ChatGPT] transformed input summary', {
-      itemCount: transformedInput.length,
-      itemTypes: transformedInput.map((item: any) => item?.type).filter(Boolean),
-      imageGenerationCount: transformedInput.filter((item: any) => item?.type === 'image_generation_call').length,
-      imageGenerationResultLengths: transformedInput
-        .filter((item: any) => item?.type === 'image_generation_call')
-        .map((item: any) => (typeof item.result === 'string' ? item.result.length : 0)),
-      hasGeneratedImagePathHint: transformedInput.some(
-        (item: any) => item?.type === 'message' && item?.role === 'developer' && JSON.stringify(item?.content || '').includes('generated_images')
-      ),
-    })
+
     const requestBody = {
       model: normalizeModel(input.modelName),
       instructions: input.systemPrompt && input.systemPrompt.trim() ? input.systemPrompt : 'You are ChatGPT.',
@@ -1637,7 +1784,6 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
       },
       stream: true,
     }
-
 
     const endpoint = `${CHATGPT_BASE_URL}${CHATGPT_CODEX_ENDPOINT}`
     let parsed: CodexParsedOutput
@@ -1693,13 +1839,6 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
       })
     }
     const contentBlocks: any[] = []
-    console.log('[OpenAI ChatGPT] parsed result summary', {
-      textLength: parsed.text?.length || 0,
-      reasoningLength: parsed.reasoning?.length || 0,
-      toolCallCount: parsed.toolCalls?.length || 0,
-      responseOutputTypes: parsed.responseOutputItems.map((item: any) => item?.type).filter(Boolean),
-      imageGenerationCount: parsed.responseOutputItems.filter((item: any) => item?.type === 'image_generation_call').length,
-    })
 
     if (parsed.reasoning) {
       contentBlocks.push({ type: 'thinking', content: parsed.reasoning })
@@ -1710,11 +1849,6 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
     }
 
     const imageBlocks = extractImageBlocksFromResponseItems(parsed.responseOutputItems)
-    console.log('[OpenAI ChatGPT] normalized image blocks', {
-      count: imageBlocks.length,
-      mimeTypes: imageBlocks.map(block => block.mimeType),
-      urlLengths: imageBlocks.map(block => (typeof block.url === 'string' ? block.url.length : 0)),
-    })
     for (const imageBlock of imageBlocks) {
       contentBlocks.push(imageBlock)
       emit?.({ type: 'chunk', part: 'image', url: imageBlock.url, mimeType: imageBlock.mimeType })
