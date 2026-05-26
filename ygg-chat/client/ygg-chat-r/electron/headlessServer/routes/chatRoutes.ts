@@ -48,6 +48,8 @@ function buildHeadlessMessageRequest(req: Request, operation: HeadlessChatOperat
     isElectron: typeof body.isElectron === 'boolean' ? body.isElectron : undefined,
     imageConfig: body.imageConfig ?? body.image_config,
     reasoningConfig: body.reasoningConfig ?? body.reasoning_config,
+    serviceTier: body.serviceTier ?? body.service_tier,
+    promptCacheRetention: body.promptCacheRetention ?? body.prompt_cache_retention,
     tools: Array.isArray(body.tools) ? body.tools : undefined,
     rootPath: body.rootPath ?? body.root_path ?? body.cwd ?? null,
     operationMode: body.operationMode ?? body.operation_mode ?? 'execute',

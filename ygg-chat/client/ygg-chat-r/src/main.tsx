@@ -127,6 +127,30 @@ initClientTelemetry()
   })
 })()
 
+// Edit diff expansion animation preference: default off for virtualized-list scrolling performance.
+;(function initEditDiffAnimationPreference() {
+  if (typeof window === 'undefined') return
+  const w = window as any
+  if (w.__yggEditDiffAnimationPreferenceInit) return
+  w.__yggEditDiffAnimationPreferenceInit = true
+
+  const storageKey = 'chat:editDiffAnimationsEnabled'
+  const apply = () => {
+    try {
+      const enabled = localStorage.getItem(storageKey) === 'true'
+      document.documentElement.classList.toggle('edit-diff-animations-disabled', !enabled)
+    } catch {
+      document.documentElement.classList.add('edit-diff-animations-disabled')
+    }
+  }
+
+  apply()
+
+  window.addEventListener('storage', event => {
+    if (event.key === storageKey) apply()
+  })
+})()
+
 // Global font manager: applies saved app font preferences across routes.
 ;(function initFontManager() {
   if (typeof window === 'undefined') return

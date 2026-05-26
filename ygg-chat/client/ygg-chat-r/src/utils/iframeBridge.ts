@@ -30,7 +30,7 @@ type BridgeContext = {
   getToolContext?: () => ToolContext | null
 }
 
-type GenerationProvider = 'openrouter' | 'openaichatgpt' | 'lmstudio'
+type GenerationProvider = 'openrouter' | 'openaichatgpt' | 'lmstudio' | 'zai'
 
 type GenerationStreamResult = {
   text: string
@@ -41,6 +41,7 @@ function normalizeGenerationProvider(provider: string): GenerationProvider | nul
   const normalized = provider.trim().toLowerCase()
   if (normalized === 'openrouter') return 'openrouter'
   if (normalized === 'lmstudio') return 'lmstudio'
+  if (normalized === 'zai' || normalized === 'z.ai' || normalized === 'glm') return 'zai'
   if (normalized === 'openai' || normalized === 'openaichatgpt' || normalized === 'openai(chatgpt)') {
     return 'openaichatgpt'
   }
@@ -54,6 +55,7 @@ function resolveGenerationProvider(modelName: string, provider?: string): Genera
   if (modelName.includes('/')) return 'openrouter'
   if (/^(gpt-|o1|o3|o4)/i.test(modelName)) return 'openaichatgpt'
   if (/lmstudio|local-model/i.test(modelName)) return 'lmstudio'
+  if (/^(glm-|zai|z\.ai)/i.test(modelName)) return 'zai'
   return 'openrouter'
 }
 

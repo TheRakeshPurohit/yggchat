@@ -80,7 +80,7 @@ const normalizeCwd = (value: string | null | undefined): string | null => {
 }
 
 const normalizeProviderName = (value: string | null | undefined): MobileProviderName => {
-  if (value === 'openrouter' || value === 'lmstudio' || value === 'openaichatgpt') return value
+  if (value === 'openrouter' || value === 'lmstudio' || value === 'openaichatgpt' || value === 'zai') return value
   return DEFAULT_PROVIDER
 }
 
@@ -345,6 +345,7 @@ export const App: React.FC = () => {
   const [composerBlockModal, setComposerBlockModal] = useState<{ title: string; message: string } | null>(null)
   const [openAiConnected, setOpenAiConnected] = useState(false)
   const [openRouterConnected, setOpenRouterConnected] = useState(false)
+  const [zaiConnected, setZaiConnected] = useState(false)
   const [openAiBusy, setOpenAiBusy] = useState(false)
   const [pendingOpenAiState, setPendingOpenAiState] = useState<string | null>(null)
 
@@ -408,9 +409,15 @@ export const App: React.FC = () => {
     return models.length > 0 ? models : [modelName]
   }, [providerModels, selectedProvider, modelName])
 
-  const selectedProviderRequiresAuth = selectedProvider === 'openaichatgpt' || selectedProvider === 'openrouter'
+  const selectedProviderRequiresAuth = selectedProvider === 'openaichatgpt' || selectedProvider === 'openrouter' || selectedProvider === 'zai'
   const selectedProviderAuthenticated =
-    selectedProvider === 'openaichatgpt' ? openAiConnected : selectedProvider === 'openrouter' ? openRouterConnected : true
+    selectedProvider === 'openaichatgpt'
+      ? openAiConnected
+      : selectedProvider === 'openrouter'
+        ? openRouterConnected
+        : selectedProvider === 'zai'
+          ? zaiConnected
+          : true
 
   const composerDisabledReason = useMemo(() => {
     if (!selectedUserId) {
@@ -429,7 +436,7 @@ export const App: React.FC = () => {
     }
 
     if (selectedProviderRequiresAuth && !selectedProviderAuthenticated) {
-      const providerLabel = selectedProvider === 'openaichatgpt' ? 'OpenAI' : 'OpenRouter'
+      const providerLabel = selectedProvider === 'openaichatgpt' ? 'OpenAI' : selectedProvider === 'zai' ? 'Z.AI' : 'OpenRouter'
       return {
         title: `${providerLabel} is not connected`,
         message: `This provider requires authentication. Open Settings and sign in to ${providerLabel}, then try again.`,
@@ -615,6 +622,15 @@ export const App: React.FC = () => {
     }
   }
 
+  const refreshZaiStatus = async (userId: string) => {
+    try {
+      const status = await mobileApi.getZaiTokenStatus(userId)
+      setZaiConnected(Boolean(status.hasToken))
+    } catch {
+      setZaiConnected(false)
+    }
+  }
+
   const loadCustomTools = async () => {
     setCustomToolsLoading(true)
     try {
@@ -724,6 +740,39 @@ export const App: React.FC = () => {
       setStatusText(error instanceof Error ? error.message : String(error))
     } finally {
       setOpenAiBusy(false)
+    }
+  }
+
+  const handleZaiTokenSet = async () => {
+    if (!selectedUserId) {
+      setStatusText('Select a user profile first')
+      return
+    }
+
+    const apiKey = window.prompt('Enter your Z.AI API key. It will be stored locally for this user.')?.trim()
+    if (!apiKey) return
+
+    try {
+      await mobileApi.storeZaiToken({ userId: selectedUserId, accessToken: apiKey })
+      setZaiConnected(true)
+      setStatusText('Z.AI connected')
+    } catch (error) {
+      setStatusText(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const handleZaiTokenClear = async () => {
+    if (!selectedUserId) {
+      setStatusText('Select a user profile first')
+      return
+    }
+
+    try {
+      await mobileApi.clearZaiToken(selectedUserId)
+      setZaiConnected(false)
+      setStatusText('Z.AI disconnected')
+    } catch (error) {
+      setStatusText(error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -991,6 +1040,7 @@ export const App: React.FC = () => {
       setBranchSourceMessage(null)
       setOpenAiConnected(false)
       setOpenRouterConnected(false)
+      setZaiConnected(false)
       setPendingOpenAiState(null)
       setConversationSystemPromptInput('')
       setConversationContextInput('')
@@ -1010,6 +1060,9 @@ export const App: React.FC = () => {
         if (cancelled) return
 
         await refreshOpenRouterStatus(selectedUserId)
+        if (cancelled) return
+
+        await refreshZaiStatus(selectedUserId)
         if (cancelled) return
 
         const listedProviderModels = await mobileApi.getProviderModels(selectedUserId)
@@ -1293,7 +1346,7 @@ export const App: React.FC = () => {
     <main className='mobile-app-shell'>
       <MobileHeader
         providerName={selectedProvider}
-        providerOptions={providerModels.length > 0 ? providerModels.map(provider => provider.name) : ['openaichatgpt', 'openrouter', 'lmstudio']}
+        providerOptions={providerModels.length > 0 ? providerModels.map(provider => provider.name) : ['openaichatgpt', 'openrouter', 'lmstudio', 'zai']}
         modelName={modelName}
         modelOptions={availableModelOptions}
         statusText={statusText}
@@ -1309,11 +1362,14 @@ export const App: React.FC = () => {
         selectorsDisabled={sending}
         openAiAuthenticated={openAiConnected}
         openRouterAuthenticated={openRouterConnected}
+        zaiAuthenticated={zaiConnected}
         openAiBusy={openAiBusy}
         hasPendingOpenAiFlow={Boolean(pendingOpenAiState)}
         onOpenAiLoginStart={handleOpenAiLoginStart}
         onOpenAiLoginComplete={handleOpenAiLoginComplete}
         onOpenAiLogout={handleOpenAiLogout}
+        onZaiTokenSet={handleZaiTokenSet}
+        onZaiTokenClear={handleZaiTokenClear}
         customTools={customTools}
         customToolBusyNames={customToolBusyNames}
         customToolsLoading={customToolsLoading}

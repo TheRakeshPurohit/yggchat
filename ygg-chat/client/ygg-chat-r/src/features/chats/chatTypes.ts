@@ -1,4 +1,4 @@
-import { BaseMessage, BaseModel, ConversationId, ImageConfig, MessageId, ReasoningConfig } from '../../../../../shared/types'
+import { BaseMessage, BaseModel, ConversationId, ImageConfig, MessageId, OpenAIServiceTier, ReasoningConfig } from '../../../../../shared/types'
 
 // Message types (shared with conversations)
 export interface Message extends BaseMessage {
@@ -362,6 +362,7 @@ export interface SendMessagePayload {
   retrigger?: boolean
   imageConfig?: ImageConfig
   reasoningConfig?: ReasoningConfig
+  serviceTier?: OpenAIServiceTier
   cwd?: string | null
 }
 
@@ -372,6 +373,7 @@ export interface EditMessagePayload {
   modelOverride?: string
   systemPrompt?: string
   think: boolean
+  serviceTier?: OpenAIServiceTier
   cwd?: string | null
 }
 
@@ -382,6 +384,7 @@ export interface BranchMessagePayload {
   modelOverride?: string
   systemPrompt?: string
   think: boolean
+  serviceTier?: OpenAIServiceTier
   cwd?: string | null
 }
 

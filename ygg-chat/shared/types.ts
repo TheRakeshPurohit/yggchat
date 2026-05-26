@@ -72,6 +72,8 @@ export interface ImageConfig {
   imageSize?: '1K' | '2K' | '4K'
 }
 
+export type OpenAIServiceTier = 'priority'
+
 export interface ReasoningConfig {
   effort: 'low' | 'medium' | 'high' | 'xhigh'
 }
@@ -96,6 +98,7 @@ export interface SendMessageRequest {
   isElectron?: boolean
   imageConfig?: ImageConfig
   reasoningConfig?: ReasoningConfig
+  serviceTier?: OpenAIServiceTier
   tools?: ToolDefinition[]
 }
 

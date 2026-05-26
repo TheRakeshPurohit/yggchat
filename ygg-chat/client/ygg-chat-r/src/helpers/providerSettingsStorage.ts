@@ -11,6 +11,8 @@ export const DEFAULT_COMPACTION_SYSTEM_PROMPT =
   'You compact chat history. Return detailed markdown that preserves goals, hard requirements, key facts, decisions, pending tasks, and unresolved questions. Do not include tool protocol chatter, but include general context around changes made instead. Include full absolute paths of files touched/edited, and brief summary of what changed.'
 export const DEFAULT_LMSTUDIO_BASE_URL = import.meta.env.VITE_LMSTUDIO_BASE || 'http://172.31.32.1:1234'
 
+export type OpenAIPromptCacheRetention = 'in_memory' | '24h'
+
 export interface ProviderSettings {
   /** Whether the provider selector is visible in the chat UI */
   showProviderSelector: boolean
@@ -26,6 +28,8 @@ export interface ProviderSettings {
   compactionSystemPrompt: string
   /** Optional LM Studio server base URL override. Null = use app default. */
   lmStudioBaseUrl: string | null
+  /** OpenAI Responses API prompt cache retention policy. */
+  openAiPromptCacheRetention: OpenAIPromptCacheRetention
 }
 
 const DEFAULT_SETTINGS: ProviderSettings = {
@@ -36,9 +40,10 @@ const DEFAULT_SETTINGS: ProviderSettings = {
   compactionModel: null,
   compactionSystemPrompt: DEFAULT_COMPACTION_SYSTEM_PROMPT,
   lmStudioBaseUrl: null,
+  openAiPromptCacheRetention: 'in_memory',
 }
 
-const COMMUNITY_ALLOWED_PROVIDERS = new Set(['LM Studio', 'OpenAI (ChatGPT)'])
+const COMMUNITY_ALLOWED_PROVIDERS = new Set(['LM Studio', 'OpenAI (ChatGPT)', 'Z.AI / GLM'])
 const COMMUNITY_FALLBACK_PROVIDER = 'LM Studio'
 
 function normalizeOpenRouterTemperature(value: unknown): number | null {
@@ -52,6 +57,10 @@ function normalizeCompactionSystemPrompt(value: unknown): string {
   if (typeof value !== 'string') return DEFAULT_COMPACTION_SYSTEM_PROMPT
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : DEFAULT_COMPACTION_SYSTEM_PROMPT
+}
+
+function normalizeOpenAiPromptCacheRetention(value: unknown): OpenAIPromptCacheRetention {
+  return value === '24h' ? '24h' : 'in_memory'
 }
 
 export function normalizeLmStudioBaseUrl(value: unknown): string | null {
@@ -112,6 +121,7 @@ export function loadProviderSettings(): ProviderSettings {
       compactionModel: parsed.compactionModel ?? DEFAULT_SETTINGS.compactionModel,
       compactionSystemPrompt: normalizeCompactionSystemPrompt(parsed.compactionSystemPrompt),
       lmStudioBaseUrl: normalizeLmStudioBaseUrl(parsed.lmStudioBaseUrl),
+      openAiPromptCacheRetention: normalizeOpenAiPromptCacheRetention(parsed.openAiPromptCacheRetention),
     }
   } catch {
     return {
@@ -130,6 +140,7 @@ export function saveProviderSettings(settings: ProviderSettings): void {
     openRouterTemperature: normalizeOpenRouterTemperature(settings.openRouterTemperature),
     compactionSystemPrompt: normalizeCompactionSystemPrompt(settings.compactionSystemPrompt),
     lmStudioBaseUrl: normalizeLmStudioBaseUrl(settings.lmStudioBaseUrl),
+    openAiPromptCacheRetention: normalizeOpenAiPromptCacheRetention(settings.openAiPromptCacheRetention),
   }
 
   try {

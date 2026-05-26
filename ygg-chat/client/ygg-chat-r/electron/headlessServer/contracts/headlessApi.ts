@@ -25,6 +25,8 @@ export interface HeadlessMessageRequest {
   isElectron?: boolean
   imageConfig?: any
   reasoningConfig?: any
+  serviceTier?: 'priority'
+  promptCacheRetention?: 'in_memory' | '24h'
   tools?: Array<{ name: string; description?: string; inputSchema?: Record<string, any> }>
   rootPath?: string | null
   operationMode?: 'plan' | 'execute'

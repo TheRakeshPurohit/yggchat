@@ -345,8 +345,8 @@ export const createDefaultCustomChatTheme = (): CustomChatTheme => ({
       dark: '#ffffff',
     },
     streamingAnimationColor: {
-      light: '#ef4444',
-      dark: '#ffffff',
+      light: '#3b82f6',
+      dark: '#f97316',
     },
     composerToggleActiveBg: {
       light: '#fff7ed',

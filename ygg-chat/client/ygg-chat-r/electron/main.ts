@@ -469,6 +469,15 @@ function syncLmStudioBaseUrlFromStore(): void {
   delete process.env.LMSTUDIO_BASE_URL
 }
 
+function getOpenAiPromptCacheRetentionFromStore(): 'in_memory' | '24h' {
+  try {
+    const providerSettings = getFromStore('ygg_provider_settings')
+    return providerSettings?.openAiPromptCacheRetention === '24h' ? '24h' : 'in_memory'
+  } catch {
+    return 'in_memory'
+  }
+}
+
 // Helper to get icon path
 
 function getIconPath(_isDark?: boolean) {
@@ -2263,6 +2272,8 @@ ipcMain.handle('openai:chatgpt:stream-start', async (event, payload: any) => {
             attachmentsBase64: payload.attachmentsBase64 ?? null,
             imageConfig: payload.imageConfig,
             reasoningConfig: payload.reasoningConfig,
+            serviceTier: payload.serviceTier,
+            promptCacheRetention: payload.promptCacheRetention ?? getOpenAiPromptCacheRetentionFromStore(),
             openaiHostedTools: payload.openaiHostedTools,
             isElectron: true,
           },

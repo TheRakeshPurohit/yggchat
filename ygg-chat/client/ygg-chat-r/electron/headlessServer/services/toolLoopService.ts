@@ -6,7 +6,7 @@ import type {
   ProviderToolCall,
   ProviderToolDefinition,
 } from '../providers/openRouterProvider.js'
-import { ProviderRouter } from './providerRouter.js'
+import { ProviderRouter, normalizeProviderRoute } from './providerRouter.js'
 import { persistWithFallback, type ToolResultPersistencePolicy } from './toolResultPersistenceService.js'
 
 export interface ToolExecutionContext {
@@ -52,6 +52,8 @@ export interface ToolLoopRunInput {
   isElectron?: boolean
   imageConfig?: any
   reasoningConfig?: any
+  serviceTier?: 'priority'
+  promptCacheRetention?: 'in_memory' | '24h'
   tools?: ProviderToolDefinition[]
   streamId?: string | null
   rootPath?: string | null
@@ -180,6 +182,7 @@ export class ToolLoopService {
     let currentUserContent = input.userContent
     let history = [...(input.history || [])]
     let lastAssistantMessage: any = null
+    let previousOpenAiResponseId: string | null = null
 
     for (let turn = 1; turn <= this.maxTurns; turn++) {
       emit({
@@ -189,6 +192,7 @@ export class ToolLoopService {
         maxTurns: this.maxTurns,
       })
 
+      const providerRoute = normalizeProviderRoute(input.provider)
       const providerInput: ProviderGenerateInput = {
         modelName: input.modelName,
         systemPrompt: input.systemPrompt ?? null,
@@ -198,8 +202,10 @@ export class ToolLoopService {
         accessToken: input.accessToken ?? null,
         accountId: input.accountId ?? null,
         tools: input.tools,
+        think: input.think,
+        temperature: input.temperature,
         railwayTurn:
-          input.provider === 'openrouter'
+          providerRoute === 'openrouter' || providerRoute === 'openaichatgpt'
             ? {
                 conversationId: input.conversationId,
                 parentId: currentParentId,
@@ -216,6 +222,9 @@ export class ToolLoopService {
                 isElectron: input.isElectron ?? true,
                 imageConfig: input.imageConfig,
                 reasoningConfig: input.reasoningConfig,
+                serviceTier: input.serviceTier,
+                promptCacheRetention: input.promptCacheRetention,
+                previousResponseId: providerRoute === 'openaichatgpt' ? previousOpenAiResponseId : null,
               }
             : null,
       }
@@ -253,6 +262,10 @@ export class ToolLoopService {
       }
       if (output.content && !streamedTextDuringTurn) {
         emit({ type: 'chunk', part: 'text', delta: output.content })
+      }
+
+      if (providerRoute === 'openaichatgpt') {
+        previousOpenAiResponseId = typeof output.raw?.response_id === 'string' ? output.raw.response_id : null
       }
 
       const assistantToolCalls = Array.isArray(output.toolCalls)

@@ -1,5 +1,6 @@
 import * as Diff from 'diff'
 import React, { useMemo, useState } from 'react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
 
@@ -214,11 +215,11 @@ const InlineDiffView: React.FC<InlineDiffViewProps> = ({ original, replacement, 
   )
 }
 
-export const EditFileDiffView: React.FC<EditFileDiffViewProps> = ({ args, result, className = '' }) => {
+const EditFileDiffViewComponent: React.FC<EditFileDiffViewProps> = ({ args, result, className = '' }) => {
   const [viewMode, setViewMode] = useState<ViewMode>('inline')
+  const [expanded, setExpanded] = useState(false)
 
   const parsedResult = useMemo(() => parseResult(result), [result])
-  const language = useMemo(() => getLanguageFromPath(args.path || ''), [args.path])
   const filename = useMemo(() => getFilename(args.path || ''), [args.path])
 
   const isSuccess = parsedResult.success === true
@@ -227,19 +228,26 @@ export const EditFileDiffView: React.FC<EditFileDiffViewProps> = ({ args, result
   const lineInfo = parsedResult.lineInfo
 
   const originalMarkdown = useMemo(() => {
+    if (!expanded || isAppendOperation || viewMode === 'inline') return ''
+    const language = getLanguageFromPath(args.path || '')
     return `\`\`\`${language}\n${args.searchPattern || ''}\n\`\`\``
-  }, [args.searchPattern, language])
+  }, [args.path, args.searchPattern, expanded, isAppendOperation, viewMode])
 
   const replacementMarkdown = useMemo(() => {
+    if (!expanded || isAppendOperation || viewMode === 'inline') return ''
+    const language = getLanguageFromPath(args.path || '')
     return `\`\`\`${language}\n${args.replacement || ''}\n\`\`\``
-  }, [args.replacement, language])
+  }, [args.path, args.replacement, expanded, isAppendOperation, viewMode])
 
   const codeBlockStyles =
     '[&_pre]:!m-0 [&_pre]:!p-2 [&_pre]:!bg-transparent [&_pre]:!border-0 [&_code]:!text-[10px] [&_code]:!leading-snug [&_code]:!font-mono [&_code]:!bg-transparent [&_.hljs]:!bg-transparent [&_pre_code]:!p-0'
 
   return (
     <div className={`leading-none overflow-hidden ${className}`}>
-      <div className='flex rounded-[14px] items-center justify-between gap-2 px-2 py-1 bg-neutral-100 dark:bg-neutral-900/80'>
+      <div
+        className='flex rounded-[4px] items-center justify-between gap-2 px-2 py-1 cursor-pointer select-none'
+        onClick={() => setExpanded(prev => !prev)}
+      >
         <div className='flex min-w-0 flex-1 items-center gap-2'>
           <span className='text-[9px] font-bold uppercase tracking-wide rounded text-blue-600 dark:text-blue-400'>
             {args.operation || 'replace'}
@@ -256,31 +264,16 @@ export const EditFileDiffView: React.FC<EditFileDiffViewProps> = ({ args, result
         </div>
 
         <div className='flex shrink-0 items-center gap-1'>
-          {hasChanges && (
+          {hasChanges && parsedResult.replacements > 1 && (
             <span className='px-1.5 py-0.5 text-[9px] ml-1 font-medium rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'>
               {parsedResult.replacements}
             </span>
           )}
 
-          {lineInfo && (
-            <span
-              className='px-1.5 py-0.5 text-[9px] font-medium rounded bg-blue-500/10 text-blue-600 dark:text-blue-400'
-              title='Real file line anchors (old/new)'
-            >
-              L{lineInfo.oldStartLine} → L{lineInfo.newStartLine}
-            </span>
-          )}
-
-          {lineInfo?.scope === 'first_of_many' && (
-            <span className='px-1.5 py-0.5 text-[8px] uppercase rounded bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400'>
-              first hunk
-            </span>
-          )}
-
-          {!isAppendOperation && (
-            <div className='flex items-center rounded bg-neutral-200 dark:bg-neutral-700/50 p-0.5'>
+          {expanded && !isAppendOperation && (
+            <div className='flex items-center rounded p-0.5' onClick={e => e.stopPropagation()}>
               <button
-                className={`px-1 py-0.5 rounded text-[10px] transition-all ${viewMode === 'inline' ? 'bg-white dark:bg-neutral-600 text-neutral-800 dark:text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300'}`}
+                className={`px-1 py-0.5 rounded text-[10px] transition-all ${viewMode === 'inline' ? 'bg-white dark:bg-neutral-700 text-neutral-800 dark:text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300'}`}
                 onClick={() => setViewMode('inline')}
                 title='Inline diff (git-style merged)'
               >
@@ -302,92 +295,90 @@ export const EditFileDiffView: React.FC<EditFileDiffViewProps> = ({ args, result
               </button>
             </div>
           )}
+
+          <span className='text-neutral-400 dark:text-neutral-500'>
+            {expanded ? <ChevronUp className='w-3 h-3' /> : <ChevronDown className='w-3 h-3' />}
+          </span>
         </div>
       </div>
+      {expanded && (
+        <div className='p-1 rounded-[10px] origin-top edit-diff-slide-down'>
+          {isAppendOperation ? (
+            <div className='rounded-[10px] overflow-hidden pb-1'>
+              <div className='bg-neutral-50 dark:bg-neutral-900'>
+                <InlineDiffView original='' replacement={args.content || ''} lineInfo={lineInfo} />
+              </div>
+            </div>
+          ) : viewMode === 'inline' ? (
+            <div className='rounded-[10px] overflow-hidden pb-1'>
+              <div className='bg-neutral-50 dark:bg-neutral-900'>
+                <InlineDiffView
+                  original={args.searchPattern || ''}
+                  replacement={args.replacement || ''}
+                  lineInfo={lineInfo}
+                />
+              </div>
+            </div>
+          ) : viewMode === 'unified' ? (
+            <div className='space-y-1'>
+              <div className='rounded-[10px] overflow-hidden'>
+                <div className='flex items-center gap-1 px-2 py-0.5 bg-red-100 dark:bg-red-500/10 border-b border-red-200 dark:border-red-500/20'>
+                  <i className='bx bx-minus text-[10px] text-red-600 dark:text-red-400' />
+                </div>
+                <div className={`bg-red-50 dark:bg-red-500/5 ${codeBlockStyles} overflow-x-auto`}>
+                  <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
+                    {originalMarkdown}
+                  </ReactMarkdown>
+                </div>
+              </div>
 
-      <div className='p-1 rounded-[10px]'>
-        {isAppendOperation ? (
-          <div className='rounded-[10px] overflow-hidden pb-1'>
-            <div className='bg-neutral-50 dark:bg-neutral-900'>
-              <InlineDiffView original='' replacement={args.content || ''} lineInfo={lineInfo} />
-            </div>
-          </div>
-        ) : viewMode === 'inline' ? (
-          <div className='rounded-[10px] overflow-hidden pb-1'>
-            <div className='bg-neutral-50 dark:bg-neutral-900'>
-              <InlineDiffView
-                original={args.searchPattern || ''}
-                replacement={args.replacement || ''}
-                lineInfo={lineInfo}
-              />
-            </div>
-          </div>
-        ) : viewMode === 'unified' ? (
-          <div className='space-y-1'>
-            <div className='rounded-[10px] overflow-hidden'>
-              <div className='flex items-center gap-1 px-2 py-0.5 bg-red-100 dark:bg-red-500/10 border-b border-red-200 dark:border-red-500/20'>
-                <i className='bx bx-minus text-[10px] text-red-600 dark:text-red-400' />
-              </div>
-              <div className={`bg-red-50 dark:bg-red-500/5 ${codeBlockStyles} overflow-x-auto`}>
-                <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
-                  {originalMarkdown}
-                </ReactMarkdown>
+              <div className='rounded-[10px] overflow-hidden'>
+                <div className='flex items-center gap-1 px-2 py-0.5 bg-emerald-100 dark:bg-emerald-500/10 border-b border-emerald-200 dark:border-emerald-500/20'>
+                  <i className='bx bx-plus text-[10px] text-emerald-600 dark:text-emerald-400' />
+                </div>
+                <div className={`bg-emerald-50 dark:bg-emerald-500/5 ${codeBlockStyles} overflow-x-auto`}>
+                  <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
+                    {replacementMarkdown}
+                  </ReactMarkdown>
+                </div>
               </div>
             </div>
+          ) : (
+            <div className='grid grid-cols-2 gap-1'>
+              <div className='rounded-[10px] overflow-hidden'>
+                <div className='flex items-center gap-1 px-2 py-0.5 bg-red-100 dark:bg-red-500/10 border-b border-red-200 dark:border-red-500/20'>
+                  <i className='bx bx-minus text-[10px] text-red-600 dark:text-red-400' />
+                  <span className='text-[9px] font-medium text-red-700 dark:text-red-400/80'>Original</span>
+                </div>
+                <div
+                  className={`bg-red-50 dark:bg-red-500/5 ${codeBlockStyles} overflow-x-auto max-h-[250px] overflow-y-auto`}
+                >
+                  <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
+                    {originalMarkdown}
+                  </ReactMarkdown>
+                </div>
+              </div>
 
-            <div className='rounded-[10px] overflow-hidden'>
-              <div className='flex items-center gap-1 px-2 py-0.5 bg-emerald-100 dark:bg-emerald-500/10 border-b border-emerald-200 dark:border-emerald-500/20'>
-                <i className='bx bx-plus text-[10px] text-emerald-600 dark:text-emerald-400' />
-              </div>
-              <div className={`bg-emerald-50 dark:bg-emerald-500/5 ${codeBlockStyles} overflow-x-auto`}>
-                <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
-                  {replacementMarkdown}
-                </ReactMarkdown>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className='grid grid-cols-2 gap-1'>
-            <div className='rounded-[10px] overflow-hidden'>
-              <div className='flex items-center gap-1 px-2 py-0.5 bg-red-100 dark:bg-red-500/10 border-b border-red-200 dark:border-red-500/20'>
-                <i className='bx bx-minus text-[10px] text-red-600 dark:text-red-400' />
-                <span className='text-[9px] font-medium text-red-700 dark:text-red-400/80'>Original</span>
-              </div>
-              <div
-                className={`bg-red-50 dark:bg-red-500/5 ${codeBlockStyles} overflow-x-auto max-h-[250px] overflow-y-auto`}
-              >
-                <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
-                  {originalMarkdown}
-                </ReactMarkdown>
+              <div className='rounded-[10px] overflow-hidden'>
+                <div className='flex items-center gap-1 px-2 py-0.5 bg-emerald-100 dark:bg-emerald-500/10 border-b border-emerald-200 dark:border-emerald-500/20'>
+                  <i className='bx bx-plus text-[10px] text-emerald-600 dark:text-emerald-400' />
+                  <span className='text-[9px] font-medium text-emerald-700 dark:text-emerald-400/80'>Replacement</span>
+                </div>
+                <div
+                  className={`bg-emerald-50 dark:bg-emerald-500/5 ${codeBlockStyles} overflow-x-auto max-h-[250px] overflow-y-auto`}
+                >
+                  <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
+                    {replacementMarkdown}
+                  </ReactMarkdown>
+                </div>
               </div>
             </div>
-
-            <div className='rounded-[10px] overflow-hidden'>
-              <div className='flex items-center gap-1 px-2 py-0.5 bg-emerald-100 dark:bg-emerald-500/10 border-b border-emerald-200 dark:border-emerald-500/20'>
-                <i className='bx bx-plus text-[10px] text-emerald-600 dark:text-emerald-400' />
-                <span className='text-[9px] font-medium text-emerald-700 dark:text-emerald-400/80'>Replacement</span>
-              </div>
-              <div
-                className={`bg-emerald-50 dark:bg-emerald-500/5 ${codeBlockStyles} overflow-x-auto max-h-[250px] overflow-y-auto`}
-              >
-                <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
-                  {replacementMarkdown}
-                </ReactMarkdown>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {parsedResult.message && (
-        <div
-          className={`rounded-[10px] flex items-center gap-1.5 px-2 py-1 text-[9px] border font-mono ${
-            isSuccess
-              ? 'bg-emerald-50 dark:bg-emerald-500/5 border-emerald-200 dark:border-emerald-500/20 text-emerald-700 dark:text-emerald-400/90'
-              : 'bg-red-50 dark:bg-red-500/5 border-red-200 dark:border-red-500/20 text-red-700 dark:text-red-400/90'
-          }`}
-        >
-          <i className={`bx ${isSuccess ? 'bx-check' : 'bx-x'} text-xs`} />
+          )}
+        </div>
+      )}
+      {expanded && !isSuccess && parsedResult.message && (
+        <div className='rounded-[10px] flex items-center gap-1.5 px-2 py-1 text-[9px] border font-mono bg-red-50 dark:bg-red-500/5 border-red-200 dark:border-red-500/20 text-red-700 dark:text-red-400/90'>
+          <i className='bx bx-x text-xs' />
           <span className='flex-1 truncate'>{parsedResult.message}</span>
           {parsedResult.matchStrategy && parsedResult.matchStrategy !== 'exact' && (
             <span className='px-1 py-0.5 text-[8px] uppercase rounded bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400'>
@@ -399,5 +390,8 @@ export const EditFileDiffView: React.FC<EditFileDiffViewProps> = ({ args, result
     </div>
   )
 }
+
+export const EditFileDiffView = React.memo(EditFileDiffViewComponent)
+EditFileDiffView.displayName = 'EditFileDiffView'
 
 export default EditFileDiffView

@@ -255,6 +255,14 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
     }
   })
 
+  const [editDiffAnimationsEnabled, setEditDiffAnimationsEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('chat:editDiffAnimationsEnabled') === 'true'
+    } catch {
+      return false
+    }
+  })
+
   const handleFontSizeChange = useCallback((value: number) => {
     const next = Math.max(-8, Math.min(16, value)) // Clamp between -8 and +16
     setFontSizeOffset(next)
@@ -272,8 +280,18 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
       localStorage.setItem('chat:groupToolReasoningRuns', String(enabled))
       window.dispatchEvent(new CustomEvent('groupToolReasoningRunsChange', { detail: enabled }))
     } catch {
-      // Ignore localStorage errors
+      // localStorage unavailable; keep in-memory state only
     }
+  }, [])
+
+  const handleEditDiffAnimationsEnabledChange = useCallback((enabled: boolean) => {
+    setEditDiffAnimationsEnabled(enabled)
+    try {
+      localStorage.setItem('chat:editDiffAnimationsEnabled', String(enabled))
+    } catch {
+      // localStorage unavailable; keep in-memory state only
+    }
+    document.documentElement.classList.toggle('edit-diff-animations-disabled', !enabled)
   }, [])
 
   // Use the custom hook for system prompt management
@@ -1479,6 +1497,77 @@ ${block}`
                       className={`bx ${groupToolReasoningRuns ? 'bx-toggle-right' : 'bx-toggle-left'} text-2xl`}
                       style={
                         groupToolReasoningRuns && savedCustomThemesColors
+                          ? { color: savedCustomThemesColors.primaryButtonBg }
+                          : undefined
+                      }
+                    ></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Edit Diff Expansion Animation Section */}
+            <div className='space-y-2'>
+              <div
+                className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
+                style={
+                  savedCustomThemesColors
+                    ? {
+                        backgroundColor: savedCustomThemesColors.cardBg,
+                        borderColor: savedCustomThemesColors.cardBorder,
+                      }
+                    : undefined
+                }
+              >
+                <div className='flex items-start justify-between gap-3 px-3 py-3'>
+                  <div className='flex min-w-0 items-start gap-3'>
+                    <div
+                      className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300'
+                      style={
+                        savedCustomThemesColors
+                          ? {
+                              backgroundColor: savedCustomThemesColors.accentBg,
+                              color: savedCustomThemesColors.accentText,
+                            }
+                          : undefined
+                      }
+                    >
+                      <i className='bx bx-expand-vertical text-lg' />
+                    </div>
+                    <div className='min-w-0 pr-3'>
+                      <p
+                        className='text-sm font-medium text-stone-700 dark:text-neutral-100'
+                        style={savedCustomThemesColors ? { color: savedCustomThemesColors.titleText } : undefined}
+                      >
+                        Edit diff expansion animation
+                      </p>
+                      <p
+                        className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-100'
+                        style={savedCustomThemesColors ? { color: savedCustomThemesColors.bodyText } : undefined}
+                      >
+                        Animate edit diff expansion. Keep disabled for best scrolling performance in large virtualized chats.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type='button'
+                    onClick={() => handleEditDiffAnimationsEnabledChange(!editDiffAnimationsEnabled)}
+                    className='rounded-lg p-1.5 text-neutral-500 dark:text-neutral-100 transition-all duration-150 hover:bg-neutral-200/90 active:scale-95 active:bg-neutral-300/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-neutral-700/80 dark:active:bg-neutral-700 dark:focus-visible:ring-violet-500/40'
+                    style={
+                      savedCustomThemesColors
+                        ? {
+                            backgroundColor: savedCustomThemesColors.buttonBg,
+                            color: savedCustomThemesColors.buttonText,
+                          }
+                        : undefined
+                    }
+                    title={editDiffAnimationsEnabled ? 'Disable edit diff expansion animation' : 'Enable edit diff expansion animation'}
+                    aria-pressed={editDiffAnimationsEnabled}
+                  >
+                    <i
+                      className={`bx ${editDiffAnimationsEnabled ? 'bx-toggle-right' : 'bx-toggle-left'} text-2xl`}
+                      style={
+                        editDiffAnimationsEnabled && savedCustomThemesColors
                           ? { color: savedCustomThemesColors.primaryButtonBg }
                           : undefined
                       }

@@ -142,6 +142,8 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
         isElectron: request.isElectron ?? true,
         imageConfig: request.imageConfig,
         reasoningConfig: request.reasoningConfig,
+        serviceTier: request.serviceTier,
+        promptCacheRetention: request.promptCacheRetention,
         tools: resolvedTools,
         streamId: request.streamId ?? null,
         rootPath: request.rootPath ?? conversation?.cwd ?? null,

@@ -979,6 +979,26 @@ export function useModels(provider: string | null) {
         }
       }
 
+      if (normalizedSlug === 'z.ai/glm' || normalizedSlug === 'zai/glm' || normalizedSlug === 'zai' || normalizedSlug === 'glm') {
+        const models = ['glm-5.1', 'glm-4.6'].map(name => ({
+          ...stringToModel(name),
+          contextLength: 128000,
+          inputTokenLimit: 128000,
+          outputTokenLimit: 8192,
+          thinking: true,
+        }))
+        const defaultModel = models[0] || stringToModel('glm-5.1')
+        const storedSelection = getStoredSelectedModel()
+        const selectedModel = storedSelection ? models.find(m => m.name === storedSelection.name) || defaultModel : defaultModel
+
+        return {
+          models,
+          default: defaultModel,
+          selected: selectedModel,
+          userIsFreeTier: false,
+        }
+      }
+
       // OpenAI ChatGPT - local models (uses user's ChatGPT Plus/Pro subscription)
       if (normalizedSlug === 'openai(chatgpt)' || normalizedSlug === 'openaichatgpt') {
         const models = getOpenAIChatGPTModels() as Model[]

@@ -320,7 +320,13 @@ export const mobileApi = {
       ? payload.providers
           .filter(
             (provider): provider is { name: MobileProviderName; models?: string[] } =>
-              Boolean(provider && (provider.name === 'openaichatgpt' || provider.name === 'openrouter' || provider.name === 'lmstudio'))
+              Boolean(
+                provider &&
+                  (provider.name === 'openaichatgpt' ||
+                    provider.name === 'openrouter' ||
+                    provider.name === 'lmstudio' ||
+                    provider.name === 'zai')
+              )
           )
           .map(provider => ({
             name: provider.name,
@@ -361,7 +367,7 @@ export const mobileApi = {
     })
   },
 
-  async getProviderTokenStatus(provider: 'openai' | 'openrouter', userId: string): Promise<{ hasToken: boolean }> {
+  async getProviderTokenStatus(provider: 'openai' | 'openrouter' | 'zai', userId: string): Promise<{ hasToken: boolean }> {
     const payload = await jsonFetch<{ success: boolean; hasToken?: boolean }>(
       `/api/provider-auth/${provider}/token?userId=${encodeURIComponent(userId)}`,
       { method: 'GET' }
@@ -377,6 +383,10 @@ export const mobileApi = {
     return this.getProviderTokenStatus('openrouter', userId)
   },
 
+  async getZaiTokenStatus(userId: string): Promise<{ hasToken: boolean }> {
+    return this.getProviderTokenStatus('zai', userId)
+  },
+
   async getRuntimeAppAuth(): Promise<{ hasToken: boolean; accessToken: string | null; userId: string | null }> {
     const session = await readRuntimeAppSession()
     return {
@@ -386,7 +396,7 @@ export const mobileApi = {
     }
   },
 
-  async clearProviderToken(provider: 'openai' | 'openrouter', userId: string): Promise<void> {
+  async clearProviderToken(provider: 'openai' | 'openrouter' | 'zai', userId: string): Promise<void> {
     await jsonFetch(`/api/provider-auth/${provider}/token?userId=${encodeURIComponent(userId)}`, {
       method: 'DELETE',
     })
@@ -398,6 +408,10 @@ export const mobileApi = {
 
   async clearOpenRouterToken(userId: string): Promise<void> {
     await this.clearProviderToken('openrouter', userId)
+  },
+
+  async clearZaiToken(userId: string): Promise<void> {
+    await this.clearProviderToken('zai', userId)
   },
 
   async startOpenAiOAuth(): Promise<{ authUrl: string; state: string }> {
@@ -480,6 +494,19 @@ export const mobileApi = {
     accessToken: string
   }): Promise<void> {
     await jsonFetch('/api/provider-auth/openrouter/token', {
+      method: 'POST',
+      body: JSON.stringify({
+        userId: params.userId,
+        accessToken: params.accessToken,
+      }),
+    })
+  },
+
+  async storeZaiToken(params: {
+    userId: string
+    accessToken: string
+  }): Promise<void> {
+    await jsonFetch('/api/provider-auth/zai/token', {
       method: 'POST',
       body: JSON.stringify({
         userId: params.userId,

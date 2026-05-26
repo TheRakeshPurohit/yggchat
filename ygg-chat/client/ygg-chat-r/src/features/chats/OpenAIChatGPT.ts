@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { ConversationId, MessageId, ToolDefinition as SharedToolDefinition } from '../../../../../shared/types'
 import { ContentBlock, Message, ToolCall } from './chatTypes'
 import { CHATGPT_BASE_URL, CHATGPT_CODEX_ENDPOINT, getValidTokens } from './openaiOAuth'
+import { loadProviderSettings } from '../../helpers/providerSettingsStorage'
 import { openStreamingWithPreFirstByteRetry } from './streamResilience'
 import { getToolsForAI } from './toolDefinitions'
 
@@ -246,6 +247,8 @@ export interface OpenAIChatGPTRequestPayload {
   think?: boolean
   imageConfig?: any
   reasoningConfig?: any
+  serviceTier?: 'priority'
+  promptCacheRetention?: 'in_memory' | '24h'
   tools?: SharedToolDefinition[]
 }
 
@@ -852,7 +855,10 @@ function buildCodexRequestBody(
   tools: any[],
   instructions: string,
   reasoningConfig?: { effort?: string; summary?: string },
-  thinkEnabled: boolean = true
+  thinkEnabled: boolean = true,
+  serviceTier?: 'priority',
+  promptCacheKey?: string,
+  promptCacheRetention?: 'in_memory' | '24h'
 ) {
   const normalizedModel = normalizeModel(model)
   const reasoning = thinkEnabled ? reasoningConfig || getReasoningConfig(model) : undefined
@@ -873,6 +879,9 @@ function buildCodexRequestBody(
           summary: reasoning.summary || 'auto',
         }
       : undefined,
+    service_tier: serviceTier,
+    prompt_cache_key: promptCacheKey || undefined,
+    ...(promptCacheRetention === '24h' ? { prompt_cache_retention: '24h' } : {}),
     // Stream mode
     stream: true,
   }
@@ -971,14 +980,6 @@ export async function createOpenAIChatGPTStreamingRequest(
           for (const toolCall of completeToolCalls) {
             if (toolCall?.id) streamedToolCalls.set(toolCall.id, toolCall)
           }
-          console.log('[OpenAIChatGPTBridge] complete chunk received', {
-            messageId: chunk.message?.id,
-            toolCallsSnakeCount: Array.isArray(chunk.message?.tool_calls) ? chunk.message.tool_calls.length : 0,
-            toolCallsCamelCount: Array.isArray(chunk.message?.toolCalls) ? chunk.message.toolCalls.length : 0,
-            accumulatedToolCallCount: streamedToolCalls.size,
-            contentLength: typeof chunk.message?.content === 'string' ? chunk.message.content.length : 0,
-            partial: chunk.message?.partial,
-          })
         }
         const onChunkHandled = Promise.resolve(onChunk(chunk)).catch(error => {
           console.error('[OpenAIChatGPTBridge] async onChunk handler failed', error)
@@ -1023,7 +1024,10 @@ export async function createOpenAIChatGPTStreamingRequest(
     tools,
     payload.systemPrompt || '',
     payload.reasoningConfig,
-    payload.think !== false
+    payload.think !== false,
+    payload.serviceTier,
+    String(payload.conversationId || ''),
+    payload.promptCacheRetention ?? loadProviderSettings().openAiPromptCacheRetention
   )
 
   // Build URL for Codex endpoint

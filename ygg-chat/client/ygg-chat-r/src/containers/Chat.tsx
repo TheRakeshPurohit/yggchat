@@ -7,7 +7,7 @@ import { MoreVertical, RefreshCw, Settings } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { batch } from 'react-redux'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
-import { ConversationId, ImageConfig, MessageId, ReasoningConfig } from '../../../../shared/types'
+import { ConversationId, ImageConfig, MessageId, OpenAIServiceTier, ReasoningConfig } from '../../../../shared/types'
 import {
   ActionPopover,
   Button,
@@ -86,6 +86,7 @@ import {
   sendMessage,
   syncConversationToLocal,
   updateConversationTitle,
+  updateMessage,
 } from '../features/chats'
 import type { ContentBlock, ToolCall } from '../features/chats/chatTypes'
 import { estimateContentBlocksForContext, safeEstimateTokenCount } from '../features/chats/contextTokenEstimate'
@@ -305,6 +306,23 @@ const BENCH_MAX_EVENTS = 1200
 const BENCH_SCROLL_ACTIVE_WINDOW_MS = 140
 const THEME_DEMO_INTERVAL_MS = 500
 
+const parseCreatedAtMs = (createdAt: string | Date | null | undefined): number | null => {
+  if (!createdAt) return null
+
+  const value = createdAt instanceof Date ? createdAt.getTime() : Date.parse(createdAt)
+  return Number.isFinite(value) ? value : null
+}
+
+const formatWorkedDurationLabel = (durationMs: number): string => {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  const minuteLabel = `${minutes} minute${minutes === 1 ? '' : 's'}`
+  const secondLabel = `${seconds} second${seconds === 1 ? '' : 's'}`
+
+  return `worked for ${minuteLabel} ${secondLabel}`
+}
+
 const VIRTUAL_ROW_BASE_STYLE: React.CSSProperties = {
   position: 'absolute',
   top: 0,
@@ -352,78 +370,76 @@ type EmptyChatStateProps = {
 }
 
 const EmptyChatState = ({ onSelectProjectFolder, projectFolderPath }: EmptyChatStateProps) => {
-  const projectFolderName = projectFolderPath?.trim()
-    ? getWorkspaceFileBaseName(projectFolderPath.trim())
-    : ''
+  const projectFolderName = projectFolderPath?.trim() ? getWorkspaceFileBaseName(projectFolderPath.trim()) : ''
 
   return (
-  <div className='flex min-h-[420px] flex-1 items-center justify-center px-6 py-12 sm:px-10'>
-    <div className='mx-auto flex max-w-sm flex-col items-center text-center'>
-      <div className='mb-5 rounded-[28px] border border-stone-200/80 bg-white/75 p-5 shadow-[0_16px_40px_-24px_rgba(0,0,0,0.35)] backdrop-blur-xl dark:border-white/10 dark:bg-neutral-900/70'>
-        <svg
-          aria-hidden='true'
-          viewBox='0 0 180 128'
-          className='h-28 w-40 text-stone-700 dark:text-stone-200'
-          fill='none'
-          xmlns='http://www.w3.org/2000/svg'
-        >
-          <circle cx='148' cy='26' r='10' fill='currentColor' opacity='0.12' />
-          <circle cx='38' cy='98' r='14' fill='currentColor' opacity='0.08' />
-          <path
-            d='M35 38C35 28.6112 42.6112 21 52 21H99C108.389 21 116 28.6112 116 38V57C116 66.3888 108.389 74 99 74H72.5L55 89V74H52C42.6112 74 35 66.3888 35 57V38Z'
-            fill='currentColor'
-            opacity='0.12'
-          />
-          <path d='M69 52H96' stroke='currentColor' strokeWidth='6' strokeLinecap='round' opacity='0.55' />
-          <path d='M55 52H58' stroke='currentColor' strokeWidth='6' strokeLinecap='round' opacity='0.55' />
-          <path
-            d='M92 88C92 79.1634 99.1634 72 108 72H128C136.837 72 144 79.1634 144 88V101C144 109.837 136.837 117 128 117H113L98 127V117H108C99.1634 117 92 109.837 92 101V88Z'
-            fill='currentColor'
-            opacity='0.18'
-          />
-          <path d='M108 94H128' stroke='currentColor' strokeWidth='5' strokeLinecap='round' opacity='0.7' />
-          <path d='M108 104H122' stroke='currentColor' strokeWidth='5' strokeLinecap='round' opacity='0.4' />
-          <path
-            d='M126 33L130 41L138 45L130 49L126 57L122 49L114 45L122 41L126 33Z'
-            fill='currentColor'
-            opacity='0.3'
-          />
-        </svg>
-      </div>
-      <h3 className='text-lg font-semibold tracking-tight text-stone-900 dark:text-stone-100'>Start building</h3>
-      <p className='mt-2 max-w-xs text-sm leading-6 text-stone-600 dark:text-stone-400'>
-        Ask a question, drop in some context, or sketch an idea to make it real.
-      </p>
-      <div className='mt-4 flex items-center gap-3'>
-        <span className='text-sm font-medium text-stone-700 dark:text-stone-300'>
-          {projectFolderName ? `Working in ${projectFolderName}` : 'Open project folder'}
-        </span>
-        <button
-          type='button'
-          onClick={() => {
-            void onSelectProjectFolder?.()
-          }}
-          className='inline-flex items-center justify-center rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800 transition hover:bg-stone-100 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:bg-neutral-800 dark:focus:ring-orange-500/60'
-          title='Select project folder'
-        >
+    <div className='flex min-h-[420px] flex-1 items-center justify-center px-6 py-12 sm:px-10'>
+      <div className='mx-auto flex max-w-sm flex-col items-center text-center'>
+        <div className='mb-5 rounded-[28px] border border-stone-200/80 bg-white/75 p-5 shadow-[0_16px_40px_-24px_rgba(0,0,0,0.35)] backdrop-blur-xl dark:border-white/10 dark:bg-neutral-900/70'>
           <svg
-            xmlns='http://www.w3.org/2000/svg'
-            className='h-4 w-4'
+            aria-hidden='true'
+            viewBox='0 0 180 128'
+            className='h-28 w-40 text-stone-700 dark:text-stone-200'
             fill='none'
-            viewBox='0 0 24 24'
-            stroke='currentColor'
+            xmlns='http://www.w3.org/2000/svg'
           >
+            <circle cx='148' cy='26' r='10' fill='currentColor' opacity='0.12' />
+            <circle cx='38' cy='98' r='14' fill='currentColor' opacity='0.08' />
             <path
-              strokeLinecap='round'
-              strokeLinejoin='round'
-              strokeWidth={2}
-              d='M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z'
+              d='M35 38C35 28.6112 42.6112 21 52 21H99C108.389 21 116 28.6112 116 38V57C116 66.3888 108.389 74 99 74H72.5L55 89V74H52C42.6112 74 35 66.3888 35 57V38Z'
+              fill='currentColor'
+              opacity='0.12'
+            />
+            <path d='M69 52H96' stroke='currentColor' strokeWidth='6' strokeLinecap='round' opacity='0.55' />
+            <path d='M55 52H58' stroke='currentColor' strokeWidth='6' strokeLinecap='round' opacity='0.55' />
+            <path
+              d='M92 88C92 79.1634 99.1634 72 108 72H128C136.837 72 144 79.1634 144 88V101C144 109.837 136.837 117 128 117H113L98 127V117H108C99.1634 117 92 109.837 92 101V88Z'
+              fill='currentColor'
+              opacity='0.18'
+            />
+            <path d='M108 94H128' stroke='currentColor' strokeWidth='5' strokeLinecap='round' opacity='0.7' />
+            <path d='M108 104H122' stroke='currentColor' strokeWidth='5' strokeLinecap='round' opacity='0.4' />
+            <path
+              d='M126 33L130 41L138 45L130 49L126 57L122 49L114 45L122 41L126 33Z'
+              fill='currentColor'
+              opacity='0.3'
             />
           </svg>
-        </button>
+        </div>
+        <h3 className='text-lg font-semibold tracking-tight text-stone-900 dark:text-stone-100'>Start building</h3>
+        <p className='mt-2 max-w-xs text-sm leading-6 text-stone-600 dark:text-stone-400'>
+          Ask a question, drop in some context, or sketch an idea to make it real.
+        </p>
+        <div className='mt-4 flex items-center gap-3'>
+          <span className='text-sm font-medium text-stone-700 dark:text-stone-300'>
+            {projectFolderName ? `Working in ${projectFolderName}` : 'Open project folder'}
+          </span>
+          <button
+            type='button'
+            onClick={() => {
+              void onSelectProjectFolder?.()
+            }}
+            className='inline-flex items-center justify-center rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800 transition hover:bg-stone-100 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:bg-neutral-800 dark:focus:ring-orange-500/60'
+            title='Select project folder'
+          >
+            <svg
+              xmlns='http://www.w3.org/2000/svg'
+              className='h-4 w-4'
+              fill='none'
+              viewBox='0 0 24 24'
+              stroke='currentColor'
+            >
+              <path
+                strokeLinecap='round'
+                strokeLinejoin='round'
+                strokeWidth={2}
+                d='M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z'
+              />
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
-  </div>
   )
 }
 
@@ -473,6 +489,24 @@ const setLimitedCacheEntry = <T,>(cache: Map<string, T>, key: string, value: T, 
     const oldestKey = cache.keys().next().value
     if (oldestKey == null) break
     cache.delete(oldestKey)
+  }
+}
+
+const hashStringForRenderCache = (value: string): string => {
+  let hash = 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) | 0
+  }
+  return hash.toString(36)
+}
+
+const hashUnknownForRenderCache = (value: unknown): string => {
+  if (value == null) return ''
+  if (typeof value === 'string') return hashStringForRenderCache(value)
+  try {
+    return hashStringForRenderCache(JSON.stringify(value))
+  } catch {
+    return hashStringForRenderCache(String(value))
   }
 }
 
@@ -919,6 +953,13 @@ function Chat() {
   const [reasoningConfig, setReasoningConfig] = useState<ReasoningConfig>(() => ({
     effort: chatReasoningSettings.defaultReasoningEffort,
   }))
+  const [fastServiceTierEnabled, setFastServiceTierEnabled] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('chat:openaiFastServiceTier') === 'true'
+    } catch {
+      return false
+    }
+  })
 
   // Hermes mode is available in desktop builds
   const hermesModeAvailable = import.meta.env.VITE_ENVIRONMENT !== 'web'
@@ -941,6 +982,10 @@ function Chat() {
   // Redux selectors
   const currentUser = useAppSelector(selectCurrentUser)
   const providers = useAppSelector(selectProviderState)
+  const currentProviderSlug = (providers.currentProvider || '').toLowerCase().replace(/\s+/g, '')
+  const isOpenAIChatGPTProvider = currentProviderSlug === 'openaichatgpt' || currentProviderSlug === 'openai(chatgpt)'
+  const openAIServiceTier: OpenAIServiceTier | undefined =
+    isOpenAIChatGPTProvider && fastServiceTierEnabled ? 'priority' : undefined
   const messageInput = useAppSelector(selectMessageInput)
   const operationMode = useAppSelector(selectOperationMode)
   // const canSendFromRedux = useAppSelector(selectCanSend)
@@ -1961,7 +2006,12 @@ function Chat() {
         .map(msg => {
           const updatedAt = (msg as Message & { updated_at?: string }).updated_at ?? msg.created_at
           const artifactCount = Array.isArray(msg.artifacts) ? msg.artifacts.length : 0
-          return `${msg.id}:${updatedAt}:a${artifactCount}`
+          const contentHash = hashStringForRenderCache(msg.content ?? '')
+          const contentBlocksHash = hashUnknownForRenderCache(msg.content_blocks)
+          const toolCallsHash = hashUnknownForRenderCache(msg.tool_calls)
+          const thinkingHash = hashStringForRenderCache(msg.thinking_block ?? '')
+          const noteHash = hashStringForRenderCache(`${msg.note ?? ''}:${msg.note_color ?? ''}`)
+          return `${msg.id}:${updatedAt}:a${artifactCount}:c${contentHash}:b${contentBlocksHash}:t${toolCallsHash}:r${thinkingHash}:n${noteHash}`
         })
         .join('|'),
     [renderableMessages]
@@ -2277,9 +2327,7 @@ function Chat() {
               ? '!rounded-none !rounded-b-md'
               : '!rounded-none'
 
-      const containerClassName = [startsAssistantBlock ? 'pt-4' : '', endsAssistantBlock ? 'pb-4' : '', radiusClassName]
-        .filter(Boolean)
-        .join(' ')
+      const containerClassName = [endsAssistantBlock ? 'pb-4' : '', radiusClassName].filter(Boolean).join(' ')
 
       if (containerClassName) {
         classByMessageId.set(String(row.message.id), containerClassName)
@@ -2343,13 +2391,13 @@ function Chat() {
     Boolean(streamState.thinkingBuffer) ||
     streamState.toolCalls.length > 0 ||
     streamState.events.length > 0
-  const shouldPreserveProcessStreamRow =
-    streamState.status === 'waiting_for_tool' || hasRunningToolJobForCurrentBranch
+  const shouldPreserveProcessStreamRow = streamState.status === 'waiting_for_tool' || hasRunningToolJobForCurrentBranch
   const liveDuplicateSuppressionMessageId = streamState.liveMessageId ?? streamState.streamingMessageId
   const completedDuplicateSuppressionMessageId =
     streamState.lastCompletedMessageId ?? streamState.messageId ?? streamState.finalMessageId
   const isLiveStreamingMessageAlreadyRendered =
-    liveDuplicateSuppressionMessageId != null && messageRowIndexByMessageId.has(String(liveDuplicateSuppressionMessageId))
+    liveDuplicateSuppressionMessageId != null &&
+    messageRowIndexByMessageId.has(String(liveDuplicateSuppressionMessageId))
   const isCompletedStreamMessageAlreadyRendered =
     completedDuplicateSuppressionMessageId != null &&
     messageRowIndexByMessageId.has(String(completedDuplicateSuppressionMessageId))
@@ -2359,7 +2407,8 @@ function Chat() {
   // suppress the transient streaming row once that completed turn is already rendered.
   const isStreamingMessageAlreadyRendered =
     isLiveStreamingMessageAlreadyRendered ||
-    ((shouldPreserveProcessStreamRow || liveDuplicateSuppressionMessageId == null) && isCompletedStreamMessageAlreadyRendered)
+    ((shouldPreserveProcessStreamRow || liveDuplicateSuppressionMessageId == null) &&
+      isCompletedStreamMessageAlreadyRendered)
   const showStreamingMessage = !isStreamingMessageAlreadyRendered && hasStreamingMessageContent
   const showGenerationLoaderRow = showGenerationLoadingAnimation
 
@@ -2415,6 +2464,49 @@ function Chat() {
     showGenerationLoaderRow,
     virtualRowsV2Enabled,
   ])
+
+  const userTurnElapsedLabelByMessageId = useMemo(() => {
+    const labels = new Map<string, string>()
+    let activeUserMessage: Message | null = null
+    let latestAgentMessageAfterActiveUser: Message | null = null
+
+    const setCompletedTurnLabel = (targetUserMessageId: MessageId | string | number | null | undefined) => {
+      if (!activeUserMessage || !latestAgentMessageAfterActiveUser || targetUserMessageId == null) return
+
+      const userCreatedAtMs = parseCreatedAtMs(activeUserMessage.created_at)
+      const agentCreatedAtMs = parseCreatedAtMs(latestAgentMessageAfterActiveUser.created_at)
+      if (userCreatedAtMs == null || agentCreatedAtMs == null) return
+
+      labels.set(String(targetUserMessageId), formatWorkedDurationLabel(agentCreatedAtMs - userCreatedAtMs))
+    }
+
+    for (const row of virtualRows) {
+      const message =
+        row.kind === 'message_row' && row.row.kind === 'message'
+          ? row.row.message
+          : row.kind === 'optimistic_message' || row.kind === 'optimistic_branch_message'
+            ? row.message
+            : null
+
+      if (!message) continue
+
+      if (message.role === 'user') {
+        // Render the completed previous turn's separator before this user message,
+        // while calculating only the actual work window: previous user -> latest agent.
+        setCompletedTurnLabel(message.id)
+
+        activeUserMessage = message
+        latestAgentMessageAfterActiveUser = null
+        continue
+      }
+
+      if ((message.role === 'assistant' || message.role === 'ex_agent') && activeUserMessage) {
+        latestAgentMessageAfterActiveUser = message
+      }
+    }
+
+    return labels
+  }, [virtualRows])
 
   useEffect(() => {
     benchLatestMessageCountRef.current = renderableMessages.length
@@ -4317,6 +4409,7 @@ function Chat() {
                 retrigger: true,
                 imageConfig: isImageGenerationModel ? imageConfig : undefined,
                 reasoningConfig: think ? reasoningConfig : undefined,
+                serviceTier: openAIServiceTier,
                 cwd: ccCwd || undefined,
                 streamId,
               })
@@ -4408,6 +4501,7 @@ function Chat() {
                   think: think,
                   imageConfig: isImageGenerationModel ? imageConfig : undefined,
                   reasoningConfig: think ? reasoningConfig : undefined,
+                  serviceTier: openAIServiceTier,
                   cwd: ccCwd || undefined,
                   streamId,
                 })
@@ -4576,6 +4670,7 @@ function Chat() {
       isImageGenerationModel,
       imageConfig,
       reasoningConfig,
+      openAIServiceTier,
       findLastHermesSession,
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
@@ -4677,6 +4772,7 @@ function Chat() {
           newContent: contentWithCwdAnnouncement,
           modelOverride: selectedModel?.name,
           think: think,
+          serviceTier: openAIServiceTier,
           cwd: ccCwd || undefined,
           streamId,
         })
@@ -4702,6 +4798,7 @@ function Chat() {
       currentConversationId,
       selectedModel?.name,
       think,
+      openAIServiceTier,
       hermesMode,
       ccCwd,
       hermesModeAvailable,
@@ -4718,9 +4815,26 @@ function Chat() {
 
   const handleMessageEdit = useCallback(
     (id: string, newContent: string, newContentBlocks?: any) => {
-      submitMessageAsBranch(id, newContent, newContentBlocks)
+      dispatch(
+        updateMessage({
+          id: parseId(id),
+          content: newContent,
+          content_blocks: newContentBlocks,
+        })
+      )
+        .unwrap()
+        .then(() => {
+          if (!currentConversationId) return
+          queryClient.invalidateQueries({
+            queryKey: ['conversations', currentConversationId, 'messages'],
+            refetchType: 'active',
+          })
+        })
+        .catch(error => {
+          console.error('Failed to update message:', error)
+        })
     },
-    [submitMessageAsBranch]
+    [currentConversationId, dispatch, queryClient]
   )
 
   const handleMessageBranch = useCallback(
@@ -4778,6 +4892,7 @@ function Chat() {
           think: think,
           imageConfig: isImageGenerationModel ? imageConfig : undefined,
           reasoningConfig: think ? reasoningConfig : undefined,
+          serviceTier: openAIServiceTier,
           cwd: ccCwd || undefined,
           streamId,
         })
@@ -4807,6 +4922,7 @@ function Chat() {
       isImageGenerationModel,
       imageConfig,
       reasoningConfig,
+      openAIServiceTier,
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
     ]
@@ -5778,6 +5894,7 @@ function Chat() {
                                 customThemeEnabled={customThemeEnabled}
                                 isDarkMode={isDarkMode}
                                 className='opacity-70'
+                                userTurnElapsedLabel={userTurnElapsedLabelByMessageId.get(String(message.id))}
                                 onOpenToolHtmlModal={openToolHtmlModal}
                               />
                             </VirtualizedRowContainer>
@@ -5808,6 +5925,7 @@ function Chat() {
                                 customThemeEnabled={customThemeEnabled}
                                 isDarkMode={isDarkMode}
                                 className='opacity-70'
+                                userTurnElapsedLabel={userTurnElapsedLabelByMessageId.get(String(message.id))}
                                 onOpenToolHtmlModal={openToolHtmlModal}
                               />
                             </VirtualizedRowContainer>
@@ -6051,6 +6169,7 @@ function Chat() {
                               customThemeEnabled={customThemeEnabled}
                               isDarkMode={isDarkMode}
                               className={assistantContainerClassName}
+                              userTurnElapsedLabel={userTurnElapsedLabelByMessageId.get(String(msg.id))}
                               onEdit={handleMessageEdit}
                               onBranch={handleMessageBranch}
                               onDelete={handleRequestDelete}
@@ -6588,6 +6707,7 @@ function Chat() {
                       hermesMode ||
                       !!imageConfig.aspectRatio ||
                       !!imageConfig.imageSize ||
+                      (isOpenAIChatGPTProvider && fastServiceTierEnabled) ||
                       (think && reasoningConfig.effort !== 'medium')
                     }
                     footer={
@@ -6735,6 +6855,50 @@ function Chat() {
                                 size='small'
                                 dropdownZIndex={ACTION_POPOVER_SELECT_DROPDOWN_Z_INDEX}
                               />
+                            </div>
+                            <div className='flex items-center justify-between gap-3'>
+                              <div className='flex flex-col'>
+                                <span className='text-xs text-neutral-500 dark:text-neutral-400'>Fast mode</span>
+                                <span className='text-[11px] text-neutral-400 dark:text-neutral-500'>
+                                  {isOpenAIChatGPTProvider
+                                    ? 'Use OpenAI priority service tier'
+                                    : 'Only sent for OpenAI ChatGPT provider'}
+                                </span>
+                              </div>
+                              <button
+                                type='button'
+                                disabled={!isOpenAIChatGPTProvider}
+                                onClick={() => {
+                                  if (!isOpenAIChatGPTProvider) return
+                                  setFastServiceTierEnabled(prev => {
+                                    const next = !prev
+                                    try {
+                                      window.localStorage.setItem('chat:openaiFastServiceTier', String(next))
+                                    } catch {}
+                                    return next
+                                  })
+                                }}
+                                className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                                  isOpenAIChatGPTProvider && fastServiceTierEnabled
+                                    ? 'bg-blue-600'
+                                    : 'bg-neutral-300 dark:bg-neutral-600'
+                                } ${!isOpenAIChatGPTProvider ? 'cursor-not-allowed opacity-50' : ''}`}
+                                title={
+                                  !isOpenAIChatGPTProvider
+                                    ? 'Fast service tier is only sent for OpenAI ChatGPT, not OpenRouter'
+                                    : fastServiceTierEnabled
+                                      ? 'Fast OpenAI service tier enabled'
+                                      : 'Use standard OpenAI service tier'
+                                }
+                              >
+                                <span
+                                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                    isOpenAIChatGPTProvider && fastServiceTierEnabled
+                                      ? 'translate-x-4'
+                                      : 'translate-x-0.5'
+                                  }`}
+                                />
+                              </button>
                             </div>
                           </>
                         )}

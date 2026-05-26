@@ -212,15 +212,10 @@ export function useIdeContext(): UseIdeContextReturn {
             case 'extensions_overview': {
               const overview = message.data?.extensions || []
               if (Array.isArray(overview)) {
-                console.log('[MonacoIdeSelection][useIdeContext] extensions_overview', {
-                  total: overview.length,
-                  connectedIds: overview
-                    .filter((extension: { id?: string; isConnected?: boolean } | null | undefined) => extension?.isConnected)
-                    .map((extension: { id?: string }) => extension.id || '(unknown)'),
-                })
                 globalDispatch(setExtensions(overview))
-                if (!overview.some((extension: { isConnected?: boolean } | null | undefined) => extension?.isConnected)) {
-                  console.log('[MonacoIdeSelection][useIdeContext] no connected extensions; forcing extensionConnected=false')
+                if (
+                  !overview.some((extension: { isConnected?: boolean } | null | undefined) => extension?.isConnected)
+                ) {
                   globalDispatch(setExtensionStatus(false))
                 }
               }
@@ -262,16 +257,6 @@ export function useIdeContext(): UseIdeContextReturn {
                   projectState.currentSelection)
               )
 
-              console.log('[MonacoIdeSelection][useIdeContext] context_response/project_state_update evaluated extension status', {
-                messageType: message.type,
-                hasWorkspaceIdentity,
-                allFiles: Array.isArray(projectState?.allFiles) ? projectState.allFiles.length : null,
-                openFiles: Array.isArray(projectState?.openFiles) ? projectState.openFiles.length : null,
-                hasActiveFile: Boolean(projectState?.activeFile),
-                hasCurrentSelection: Boolean(projectState?.currentSelection?.selectedText?.trim?.()),
-                isRealExtensionResponse,
-              })
-
               globalDispatch(setExtensionStatus(isRealExtensionResponse))
 
               if (projectState.workspace) {
@@ -305,14 +290,6 @@ export function useIdeContext(): UseIdeContextReturn {
               if ('currentSelection' in projectState) {
                 if (isRealExtensionResponse) {
                   globalDispatch(setCurrentSelection(projectState.currentSelection || null))
-                } else {
-                  console.log(
-                    '[MonacoIdeSelection][useIdeContext] ignoring fallback currentSelection update from non-extension context response',
-                    {
-                      messageType: message.type,
-                      hasCurrentSelection: Boolean(projectState?.currentSelection?.selectedText?.trim?.()),
-                    }
-                  )
                 }
               }
               break

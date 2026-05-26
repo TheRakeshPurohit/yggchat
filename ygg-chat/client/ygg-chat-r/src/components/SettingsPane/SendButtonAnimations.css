@@ -196,7 +196,7 @@
 
 /* Streaming Animations */
 .streaming-anim {
-  --stream-anim-color: #ef4444;
+  --stream-anim-color: #3b82f6;
   --stream-duration: 1.4s;
   --stream-cell-size: 10px;
   --stream-gap: 5px;

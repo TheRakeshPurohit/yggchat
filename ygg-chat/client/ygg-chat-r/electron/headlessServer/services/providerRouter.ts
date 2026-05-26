@@ -1,3 +1,4 @@
+import { HyperRouterZaiProvider } from '../providers/hyperRouterZaiProvider.js'
 import { LmStudioProvider } from '../providers/lmStudioProvider.js'
 import { OpenAiChatgptProvider } from '../providers/openaiChatgptProvider.js'
 import {
@@ -9,7 +10,7 @@ import {
 } from '../providers/openRouterProvider.js'
 import type { ProviderTokenStore } from '../providers/tokenStore.js'
 
-export type ProviderRoute = 'openrouter' | 'openaichatgpt' | 'lmstudio'
+export type ProviderRoute = 'openrouter' | 'openaichatgpt' | 'lmstudio' | 'zai'
 
 export function normalizeProviderRoute(providerName: string): ProviderRoute {
   const normalized = providerName.trim().toLowerCase().replace(/\s+/g, '')
@@ -17,6 +18,7 @@ export function normalizeProviderRoute(providerName: string): ProviderRoute {
     return 'openaichatgpt'
   }
   if (normalized === 'lmstudio') return 'lmstudio'
+  if (normalized === 'zai' || normalized === 'z.ai' || normalized === 'glm' || normalized === 'glmprovider' || normalized === 'z.ai/glm' || normalized === 'zai/glm') return 'zai'
   if (normalized === 'openrouter') return 'openrouter'
   // MVP default path is OpenAI ChatGPT.
   return 'openaichatgpt'
@@ -34,6 +36,7 @@ export class ProviderRouter {
       openrouter: new OpenRouterProvider({ tokenStore: deps.tokenStore }),
       openaichatgpt: new OpenAiChatgptProvider({ tokenStore: deps.tokenStore }),
       lmstudio: new LmStudioProvider(),
+      zai: new HyperRouterZaiProvider({ tokenStore: deps.tokenStore }),
     }
   }
 

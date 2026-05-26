@@ -1,4 +1,5 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import { EditFileDiffView, type EditFileArgs, type EditFileResult } from './EditFileDiffView'
 
 interface EditToolDiffViewProps {
@@ -27,7 +28,8 @@ interface EditToolViewModel {
 
 type UnknownRecord = Record<string, unknown>
 
-const isRecord = (value: unknown): value is UnknownRecord => typeof value === 'object' && value !== null && !Array.isArray(value)
+const isRecord = (value: unknown): value is UnknownRecord =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const normalizeToolName = (name: string | null | undefined): string =>
   String(name || '')
@@ -124,8 +126,9 @@ const buildViewModel = (
   }
 }
 
-export const EditToolDiffView: React.FC<EditToolDiffViewProps> = ({ toolName, args, result, className = '' }) => {
+const EditToolDiffViewComponent: React.FC<EditToolDiffViewProps> = ({ toolName, args, result, className = '' }) => {
   const viewModel = useMemo(() => buildViewModel(toolName, args, result), [toolName, args, result])
+  const [expanded, setExpanded] = useState(false)
 
   if (!viewModel || viewModel.items.length === 0) return null
 
@@ -134,35 +137,52 @@ export const EditToolDiffView: React.FC<EditToolDiffViewProps> = ({ toolName, ar
     return <EditFileDiffView args={item.args} result={item.result} className={className} />
   }
 
-  const summaryTone = viewModel.success === false
-    ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/5 dark:text-red-300'
-    : 'border-neutral-200 bg-neutral-50 text-neutral-700 dark:border-neutral-700 dark:bg-neutral-900/60 dark:text-neutral-300'
+  const summaryTone =
+    viewModel.success === false
+      ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/5 dark:text-red-300'
+      : 'text-neutral-700 dark:text-neutral-300'
   const showSummaryMessage = Boolean(viewModel.message) && (viewModel.success === false || viewModel.stoppedEarly)
 
   return (
     <div className={`space-y-2 ${className}`}>
-      <div className={`flex flex-wrap items-center gap-1.5 rounded-[12px] border px-2 py-1 text-[10px] font-mono ${summaryTone}`}>
-        <span className='font-semibold'>multi-edit summary</span>
-        <span>{viewModel.items.length} edit{viewModel.items.length === 1 ? '' : 's'}</span>
+      <div
+        className={`flex flex-wrap items-center gap-1.5 rounded-[4px] px-2 py-1 text-[10px] cursor-pointer select-none ${summaryTone}`}
+        onClick={() => setExpanded(prev => !prev)}
+      >
+        <span>
+          {viewModel.items.length} edit{viewModel.items.length === 1 ? '' : 's'}
+        </span>
         {typeof viewModel.applied === 'number' ? <span>applied {viewModel.applied}</span> : null}
-        {typeof viewModel.failed === 'number' ? <span>failed {viewModel.failed}</span> : null}
+        {typeof viewModel.failed === 'number' && viewModel.failed > 0 ? <span>failed {viewModel.failed}</span> : null}
         {viewModel.stoppedEarly ? <span>stopped early</span> : null}
+        <span className='ml-auto'>
+          {expanded ? <ChevronUp className='w-3 h-3' /> : <ChevronDown className='w-3 h-3' />}
+        </span>
       </div>
 
-      {viewModel.items.map(item => (
-        <div key={item.key} className='rounded-[12px] border border-neutral-200/70 p-1 dark:border-neutral-800/80'>
-          <div className='px-1.5 pb-1 text-[10px] font-mono text-neutral-500 dark:text-neutral-400'>edit {item.index + 1}</div>
-          <EditFileDiffView args={item.args} result={item.result} />
-        </div>
-      ))}
+      {expanded && (
+        <div className='origin-top edit-diff-slide-down'>
+          {viewModel.items.map(item => (
+            <div key={item.key} className='p-1'>
+              <div className='px-1.5 pb-1 text-[10px] font-mono text-neutral-500 dark:text-neutral-400'>
+                edit {item.index + 1}
+              </div>
+              <EditFileDiffView args={item.args} result={item.result} />
+            </div>
+          ))}
 
-      {showSummaryMessage ? (
-        <div className={`rounded-[10px] border px-2 py-1 text-[10px] font-mono ${summaryTone}`}>
-          {viewModel.message}
+          {showSummaryMessage ? (
+            <div className={`rounded-[10px] border px-2 py-1 text-[10px] font-mono ${summaryTone}`}>
+              {viewModel.message}
+            </div>
+          ) : null}
         </div>
-      ) : null}
+      )}
     </div>
   )
 }
+
+export const EditToolDiffView = React.memo(EditToolDiffViewComponent)
+EditToolDiffView.displayName = 'EditToolDiffView'
 
 export default EditToolDiffView

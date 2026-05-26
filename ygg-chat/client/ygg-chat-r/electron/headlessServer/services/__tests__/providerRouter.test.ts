@@ -10,6 +10,8 @@ describe('provider routing', () => {
     expect(normalizeProviderRoute('OpenAIChatGPT')).toBe('openaichatgpt')
     expect(normalizeProviderRoute('openai(chatgpt)')).toBe('openaichatgpt')
     expect(normalizeProviderRoute('openai')).toBe('openaichatgpt')
+    expect(normalizeProviderRoute('z.ai')).toBe('zai')
+    expect(normalizeProviderRoute('glm')).toBe('zai')
     expect(normalizeProviderRoute('unknown-provider')).toBe('openaichatgpt')
   })
 
@@ -40,6 +42,18 @@ describe('provider routing', () => {
         userContent: 'hi',
       })
     ).rejects.toThrow('LM Studio request failed (503): offline')
+  })
+
+  it('routes zai through hyper-router provider and fails fast when auth is missing', async () => {
+    const router = new ProviderRouter()
+
+    await expect(
+      router.generate('zai', {
+        modelName: 'glm-5.1',
+        history: [],
+        userContent: 'hi',
+      })
+    ).rejects.toThrow('Z.AI API key missing')
   })
 
   it('openai provider fails fast when auth is missing', async () => {

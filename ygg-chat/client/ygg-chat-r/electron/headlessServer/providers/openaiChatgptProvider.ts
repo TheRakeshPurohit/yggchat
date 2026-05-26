@@ -608,6 +608,21 @@ function collectToolOutputCallIds(messages: any[]): Set<string> {
   return ids
 }
 
+function getFinalFunctionCallOutputDelta(history: any[]): any[] | null {
+  const last = Array.isArray(history) && history.length > 0 ? history[history.length - 1] : null
+  if (!last || last.role !== 'tool' || typeof last.tool_call_id !== 'string' || !last.tool_call_id) return null
+
+  const toolNameById = buildToolNameMap(history)
+  const sanitized = sanitizeToolResultContentForModel(last.content, toolNameById.get(last.tool_call_id) || null)
+  return [
+    {
+      type: 'function_call_output',
+      call_id: last.tool_call_id,
+      output: typeof sanitized === 'string' ? sanitized : (sanitized ?? null),
+    },
+  ]
+}
+
 function transformMessagesForCodex(history: any[], fallbackUserContent: string): any[] {
   const input: any[] = []
   const toolCallIds = new Set<string>()
@@ -899,11 +914,73 @@ function selectReasoningFromReplayItems(replayItems: any[], fallbackReasoning: s
   return reasoningSegments.join('\n\n').trim() || fallbackReasoning
 }
 
+type OpenAiResponseUsage = {
+  input_tokens?: number
+  input_tokens_details?: { cached_tokens?: number } | null
+  output_tokens?: number
+  output_tokens_details?: { reasoning_tokens?: number } | null
+  total_tokens?: number
+}
+
 type CodexParsedOutput = {
   text: string
   reasoning: string
   toolCalls: ProviderToolCall[]
   responseOutputItems: any[]
+  responseId?: string
+  responseItemsAdded: any[]
+  usage?: OpenAiResponseUsage
+}
+
+function numberOrZero(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function isOpenAiPromptCacheLoggingEnabled(): boolean {
+  return /^(1|true|yes|on)$/i.test(process.env.YGG_OPENAI_PROMPT_CACHE_LOGS || '')
+}
+
+function logOpenAiPromptCacheUsage(params: {
+  model: string
+  responseId?: string
+  promptCacheKey?: string
+  promptCacheRetention: 'in_memory' | '24h'
+  usage?: OpenAiResponseUsage
+}) {
+  if (!isOpenAiPromptCacheLoggingEnabled()) return
+
+  const usage = params.usage
+  if (!usage) {
+    console.info('[OpenAI Prompt Cache] usage missing', {
+      model: params.model,
+      responseId: params.responseId,
+      promptCacheKey: params.promptCacheKey,
+      promptCacheRetention: params.promptCacheRetention,
+    })
+    return
+  }
+
+  const inputTokens = numberOrZero(usage.input_tokens)
+  const cachedInputTokens = numberOrZero(usage.input_tokens_details?.cached_tokens)
+  const outputTokens = numberOrZero(usage.output_tokens)
+  const reasoningTokens = numberOrZero(usage.output_tokens_details?.reasoning_tokens)
+  const totalTokens = numberOrZero(usage.total_tokens)
+  const uncachedInputTokens = Math.max(inputTokens - cachedInputTokens, 0)
+  const cacheHitRate = inputTokens > 0 ? cachedInputTokens / inputTokens : 0
+
+  console.info('[OpenAI Prompt Cache]', {
+    model: params.model,
+    responseId: params.responseId,
+    promptCacheKey: params.promptCacheKey,
+    promptCacheRetention: params.promptCacheRetention,
+    inputTokens,
+    cachedInputTokens,
+    uncachedInputTokens,
+    cacheHitRate: `${(cacheHitRate * 100).toFixed(2)}%`,
+    outputTokens,
+    reasoningTokens,
+    totalTokens,
+  })
 }
 
 function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; modelName: string }) {
@@ -912,6 +989,8 @@ function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; mod
   let streamedText = ''
   let streamedReasoning = ''
   let completedOutputItems: any[] | null = null
+  let completedResponseId: string | undefined
+  let completedUsage: OpenAiResponseUsage | undefined
   const callByItemId = new Map<
     string,
     { id: string; name: string; arguments: string; outputIndex?: number; seq: number }
@@ -920,6 +999,7 @@ function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; mod
     string,
     { id: string; type?: string; role?: string; phase?: string; outputIndex?: number; seq: number }
   >()
+  const addedResponseItems: any[] = []
   const responseTextByItem = new Map<string, { text: string; outputIndex?: number; seq: number; fromDone: boolean }>()
   const imageGenerationItemsById = new Map<string, any>()
   const reasoningByKey = new Map<string, string>()
@@ -1054,6 +1134,9 @@ function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; mod
     if (parsed.type === 'response.output_item.added' || parsed.type === 'response.output_item.done') {
       const item = parsed.item
       mergeOutputItem(item)
+      if (parsed.type === 'response.output_item.done' && item && typeof item === 'object') {
+        addedResponseItems.push(item)
+      }
       if (item?.type === 'function_call' && item?.id) {
         const existing = callByItemId.get(item.id)
         const outputIndex =
@@ -1154,11 +1237,13 @@ function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; mod
       const err = parsed.error
       throw new Error(typeof err?.message === 'string' ? err.message : 'OpenAI websocket returned an error event.')
     }
-    if (
-      (parsed.type === 'response.completed' || parsed.type === 'response.done') &&
-      Array.isArray(parsed?.response?.output)
-    )
-      completedOutputItems = parsed.response.output
+    if (parsed.type === 'response.completed' || parsed.type === 'response.done') {
+      if (typeof parsed?.response?.id === 'string') completedResponseId = parsed.response.id
+      if (parsed?.response?.usage && typeof parsed.response.usage === 'object') {
+        completedUsage = parsed.response.usage as OpenAiResponseUsage
+      }
+      if (Array.isArray(parsed?.response?.output)) completedOutputItems = parsed.response.output
+    }
   }
   const finish = (): CodexParsedOutput => {
     const normalizedCompletedOutputItems = normalizeResponseOutputItemsForReplay(completedOutputItems || [])
@@ -1180,6 +1265,9 @@ function createCodexEventParser(params: { emit?: ProviderStreamEventHandler; mod
       reasoning: selectReasoningFromReplayItems(responseOutputItems, streamedReasoning),
       toolCalls: extractToolCallsFromReplayItems(responseOutputItems),
       responseOutputItems,
+      responseId: completedResponseId,
+      responseItemsAdded: normalizeResponseOutputItemsForReplay(addedResponseItems),
+      usage: completedUsage,
     }
   }
   return { handle, finish }
@@ -1764,11 +1852,18 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
       enableImageGeneration: hasImageGenerationIntent(input),
     })
     const requestTools = [...mapTools(input.tools || []), ...hostedTools]
-    const transformedInput = appendImageAttachmentsToLatestUserMessage(
-      transformMessagesForCodex(input.history || [], input.userContent),
-      input.railwayTurn?.attachmentsBase64 ?? null
-    )
+    const previousResponseId = input.railwayTurn?.previousResponseId?.trim() || undefined
+    const incrementalToolOutput = previousResponseId ? getFinalFunctionCallOutputDelta(input.history || []) : null
+    const transformedInput = incrementalToolOutput
+      ? incrementalToolOutput
+      : appendImageAttachmentsToLatestUserMessage(
+          transformMessagesForCodex(input.history || [], input.userContent),
+          input.railwayTurn?.attachmentsBase64 ?? null
+        )
 
+    const serviceTier = input.railwayTurn?.serviceTier === 'priority' ? 'priority' : undefined
+    const promptCacheKey = input.railwayTurn?.conversationId?.trim() || undefined
+    const promptCacheRetention = input.railwayTurn?.promptCacheRetention === '24h' ? '24h' : 'in_memory'
     const requestBody = {
       model: normalizeModel(input.modelName),
       instructions: input.systemPrompt && input.systemPrompt.trim() ? input.systemPrompt : 'You are ChatGPT.',
@@ -1782,8 +1877,18 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
         effort: 'medium',
         summary: 'auto',
       },
+      service_tier: serviceTier,
+      prompt_cache_key: promptCacheKey,
+      ...(promptCacheRetention === '24h' ? { prompt_cache_retention: '24h' } : {}),
       stream: true,
     }
+    const effectiveRequestBody = incrementalToolOutput
+      ? {
+          ...requestBody,
+          previous_response_id: previousResponseId,
+          input: incrementalToolOutput,
+        }
+      : requestBody
 
     const endpoint = `${CHATGPT_BASE_URL}${CHATGPT_CODEX_ENDPOINT}`
     let parsed: CodexParsedOutput
@@ -1798,7 +1903,7 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
           originator: 'opencode',
           'x-client-request-id': input.railwayTurn?.conversationId || 'ygg-chat',
         },
-        body: requestBody,
+        body: effectiveRequestBody,
         emit,
         modelName: input.modelName,
       })
@@ -1817,7 +1922,7 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
               originator: 'opencode',
               accept: 'text/event-stream',
             },
-            body: JSON.stringify(requestBody),
+            body: JSON.stringify(effectiveRequestBody),
             signal,
           }),
       })
@@ -1838,6 +1943,23 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
         modelName: input.modelName,
       })
     }
+
+    if (incrementalToolOutput && isOpenAiPromptCacheLoggingEnabled()) {
+      console.info('[OpenAI Responses Continuation]', {
+        model: requestBody.model,
+        previousResponseId,
+        inputItems: incrementalToolOutput.length,
+      })
+    }
+
+    logOpenAiPromptCacheUsage({
+      model: requestBody.model,
+      responseId: parsed.responseId,
+      promptCacheKey,
+      promptCacheRetention,
+      usage: parsed.usage,
+    })
+
     const contentBlocks: any[] = []
 
     if (parsed.reasoning) {
@@ -1877,6 +1999,11 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
       contentBlocks,
       raw: {
         responses_output_items: parsed.responseOutputItems,
+        response_items_added: parsed.responseItemsAdded,
+        response_id: parsed.responseId,
+        used_previous_response_id: previousResponseId,
+        used_incremental_tool_output: Boolean(incrementalToolOutput),
+        usage: parsed.usage,
         generatedImagesDirectoryHint: getGeneratedImagesDirectoryHint(),
       },
     }

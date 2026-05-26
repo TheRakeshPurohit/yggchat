@@ -3,7 +3,6 @@ import type { ToolDefinition } from '@/features/chats/toolDefinitions'
 import type { RootState } from '@/store/store'
 import 'boxicons' // Types
 import 'boxicons/css/boxicons.min.css'
-import { AnimatePresence, motion } from 'framer-motion'
 import 'katex/dist/katex.min.css'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -36,7 +35,6 @@ import {
 import { HtmlIframe } from './HtmlIframe'
 import {
   AGENT_RUN_CHEVRON_BASE_CLASS,
-  AGENT_RUN_PIP_CLASS,
   buildToolCallGroupsFromBlocks,
   buildToolCallGroupsFromStream,
   COLLAPSED_CONTENT_WORD_LIMIT,
@@ -54,19 +52,17 @@ import {
   parseMcpQualifiedName,
   PROCESS_CARD_REASONING_WRAPPER_CLASS,
   PROCESS_CARD_WRAPPER_CLASS,
-  PROCESS_PIP_BASE_CLASS,
   PROCESS_RUN_GROUP_MIN_ITEMS,
   REASONING_CHEVRON_BASE_CLASS,
-  REASONING_PIP_CLASS,
   REASONING_TEXT_MARKDOWN_CLASS,
   SHARED_TEXT_MARKDOWN_CLASS,
   TOOL_CHEVRON_BASE_CLASS,
   TOOL_HEADER_BUTTON_CLASS,
-  TOOL_NAME_BADGE_CLASS,
-  TOOL_SUCCESS_PIP_CLASS,
+  TOOL_NAME_ERROR_CLASS,
+  TOOL_NAME_RUNNING_CLASS,
+  TOOL_NAME_SUCCESS_CLASS,
   type ToolCallRenderGroup,
 } from './chatMessageShared'
-
 type MessageRole = 'user' | 'assistant' | 'system' | 'ex_agent' | 'tool'
 // Updated to use valid Tailwind classes
 type ChatMessageWidth =
@@ -114,6 +110,7 @@ interface ChatMessageProps {
   isDarkMode?: boolean
   onEditingStateChange?: (id: string, isEditing: boolean, mode: 'edit' | 'branch' | null) => void
   onLayoutChange?: () => void
+  userTurnElapsedLabel?: string
 }
 
 interface MessageActionsProps {
@@ -176,10 +173,12 @@ const MessageActions: React.FC<MessageActionsProps> = ({
     ? 'flex items-center gap-2 px-3 py-2 rounded-xl bg-transparent border-none cursor-pointer transition-all duration-200'
     : 'p-2 rounded-full bg-transparent border-none cursor-pointer transition-all duration-200'
 
+  const shouldShow = isVisible || isEditing
+
   return (
     <div
       className={`${containerClassName} transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
-        isVisible
+        shouldShow
           ? 'opacity-100 translate-y-0 scale-100 pointer-events-auto'
           : 'opacity-0 translate-y-2 scale-[0.98] pointer-events-none'
       }`}
@@ -482,6 +481,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
     isDarkMode: isDarkModeProp,
     onEditingStateChange,
     onLayoutChange,
+    userTurnElapsedLabel,
   }) => {
     const dispatch = useAppDispatch()
     const navigate = useNavigate()
@@ -1247,16 +1247,13 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
 
       return (
         <div
-          className='my-3 not-prose overflow-hidden rounded-2xl border shadow-[0px_0px_6px_0px_rgba(0,0,0,0.15)] dark:shadow-[0px_0px_16px_2px_rgba(0,0,0,0.45)]'
+          className='my-3 not-prose overflow-hidden rounded-xl border'
           style={{
             backgroundColor: markdownCodeBlockBackgroundColor,
             borderColor: markdownCodeBlockBorderColor,
           }}
         >
-          <div
-            className='flex items-center justify-end px-2 py-2 border-b'
-            style={{ borderColor: markdownCodeBlockBorderColor }}
-          >
+          <div className='flex items-center justify-end px-2' style={{ borderColor: markdownCodeBlockBorderColor }}>
             <Button
               type='button'
               onMouseDown={event => {
@@ -1267,7 +1264,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 event.stopPropagation()
                 void handleCopyCode()
               }}
-              className='shrink-0 text-slate-900 dark:text-white dark:hover:bg-neutral-700'
+              className='shrink-0 py-1 px-2 mt-1 text-slate-900 dark:text-white dark:hover:bg-neutral-700'
               size='smaller'
               variant='outline2'
             >
@@ -1276,7 +1273,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
           </div>
           <pre
             ref={preRef}
-            className={`not-prose thin-scrollbar m-0 overflow-auto bg-transparent p-3 text-[0.8em] ring-0 outline-none select-text ${className ?? ''}`}
+            className={`not-prose thin-scrollbar m-0 overflow-auto bg-transparent px-3 py-2.5 text-[0.85em] leading-[1.5] ring-0 outline-none select-text ${className ?? ''}`}
             style={{ color: markdownCodeBlockTextColor, backgroundColor: 'transparent' }}
             {...props}
           >
@@ -1411,6 +1408,17 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       const words = content.split(/\s+/)
       if (words.length <= maxWords) return content
       return words.slice(0, maxWords).join(' ') + '...'
+    }
+
+    const getCollapsedReasoningSummary = (text: string | any): string => {
+      const content = typeof text === 'object' ? JSON.stringify(text) : String(text)
+      const firstBoldSection = content.match(/\*\*([\s\S]*?)\*\*/)?.[1]?.trim()
+
+      if (firstBoldSection) {
+        return firstBoldSection.replace(/\s+/g, ' ')
+      }
+
+      return truncateWords(content)
     }
 
     const isProcessRunSeparatorText = (text: string): boolean => {
@@ -1637,12 +1645,9 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         const htmlPreviewKey = `${id}-html-renderer-${group.id}`
         return (
           <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
-            {/* Green pip indicator */}
-            <div className={TOOL_SUCCESS_PIP_CLASS} />
-
             {/* Tool header */}
             <div className='flex items-center gap-2 mb-2'>
-              <span className='rounded-[10px] font-mono text-xs bg-neutral-100 dark:bg-neutral-900 px-1.5 py-0.5 rounded border border-neutral-300 dark:border-neutral-700 text-neutral-600 dark:text-neutral-400'>
+              <span className={group.results.length > 0 ? TOOL_NAME_SUCCESS_CLASS : TOOL_NAME_RUNNING_CLASS}>
                 {group.name || 'html_renderer'}
               </span>
               {renderHtmlViewerButton(htmlPreviewKey)}
@@ -1659,8 +1664,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       const normalizedToolCardName = String(group.name ?? '')
         .toLowerCase()
         .replace(/[-\s]/g, '_')
-      const isInternalLinkTool =
-        normalizedToolCardName === 'internallink' || normalizedToolCardName === 'internal_link'
+      const isInternalLinkTool = normalizedToolCardName === 'internallink' || normalizedToolCardName === 'internal_link'
 
       if (isInternalLinkTool) {
         const resultPayload = group.results.length > 0 ? group.results[group.results.length - 1].content : null
@@ -1702,22 +1706,17 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
               ? `Open chat ${conversationIdLabel}`
               : 'Open chat')
         const warnings = Array.isArray(parsedPayload?.warnings)
-          ? parsedPayload.warnings.filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+          ? parsedPayload.warnings.filter(
+              (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0
+            )
           : []
         const errorText = typeof parsedPayload?.error === 'string' ? parsedPayload.error : null
         const linkFailed = parsedPayload?.success === false || !route
 
         return (
           <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
-            <div
-              className={`${PROCESS_PIP_BASE_CLASS} ${
-                linkFailed
-                  ? 'bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.4)]'
-                  : 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.4)]'
-              }`}
-            />
             <div className='flex items-center gap-2 mb-2 flex-wrap'>
-              <span className='rounded-[10px] font-mono text-xs bg-neutral-100 dark:bg-neutral-900 px-1.5 py-0.5 rounded border border-neutral-300 dark:border-neutral-700 text-neutral-600 dark:text-neutral-400'>
+              <span className={linkFailed ? TOOL_NAME_ERROR_CLASS : TOOL_NAME_SUCCESS_CLASS}>
                 {group.name || 'internalLink'}
               </span>
               <Button
@@ -1762,9 +1761,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 </div>
               )}
               {warnings.length > 0 && (
-                <div className='mt-1 text-[10px] text-amber-600 dark:text-amber-400'>
-                  {warnings.join(' • ')}
-                </div>
+                <div className='mt-1 text-[10px] text-amber-600 dark:text-amber-400'>{warnings.join(' • ')}</div>
               )}
             </div>
           </div>
@@ -1796,9 +1793,16 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
           }
           return (
             <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
-              <div className={TOOL_SUCCESS_PIP_CLASS} />
               <div className='flex items-center gap-2 mb-2 flex-wrap'>
-                <span className='font-mono text-xs bg-neutral-100  px-1.5 py-0.5 rounded border border-neutral-300 dark:border-neutral-700 text-neutral-600 dark:text-neutral-400'>
+                <span
+                  className={
+                    latestResult?.is_error
+                      ? TOOL_NAME_ERROR_CLASS
+                      : latestResult
+                        ? TOOL_NAME_SUCCESS_CLASS
+                        : TOOL_NAME_RUNNING_CLASS
+                  }
+                >
                   {group.name || 'mcp_app'}
                 </span>
                 <span className='text-[10px] uppercase tracking-[0.15em] text-emerald-600 dark:text-emerald-400'>
@@ -1849,6 +1853,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       // Check for failure: either structured failure response OR is_error flag on any result
       const hasResults = group.results.length > 0
       const hasError = group.results.some(r => r.is_error) || resultSummary === 'failure'
+      const toolNameClass = hasError
+        ? TOOL_NAME_ERROR_CLASS
+        : hasResults
+          ? TOOL_NAME_SUCCESS_CLASS
+          : TOOL_NAME_RUNNING_CLASS
       const isEditLikeTool =
         normalizedToolCardName === 'edit_file' ||
         normalizedToolCardName === 'editfile' ||
@@ -1858,56 +1867,39 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         const isEditToolSuccess = formatToolResultSummary(editResult) === 'success'
         return (
           <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
-            {/* Status pip indicator - align with edit diff success logic */}
-            <div
-              className={`${PROCESS_PIP_BASE_CLASS} ${
-                isEditToolSuccess
-                  ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.4)]'
-                  : 'bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.4)]'
-              }`}
-            />
-            {/* Tool header */}
-            <div className='flex items-center gap-2 mb-3'>
-              <span className='rounded-[10px] font-mono text-xs bg-neutral-100 dark:bg-neutral-900 px-1.5 py-0.5 rounded border border-neutral-300 dark:border-neutral-700 text-neutral-600 dark:text-neutral-400'>
+            {/* Tool header + edit summary */}
+            <div className='flex min-w-0 items-start gap-2'>
+              <span
+                className={
+                  !group.results.length
+                    ? TOOL_NAME_RUNNING_CLASS
+                    : isEditToolSuccess
+                      ? TOOL_NAME_SUCCESS_CLASS
+                      : TOOL_NAME_ERROR_CLASS
+                }
+              >
                 {group.name || 'edit_file'}
               </span>
+              <EditToolDiffView
+                toolName={group.name}
+                args={group.args}
+                result={editResult}
+                className='min-w-0 flex-1'
+              />
             </div>
-            <EditToolDiffView toolName={group.name} args={group.args} result={editResult} />
           </div>
         )
       }
 
       return (
         <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
-          {/* Status pip indicator - green for success/executing, red for error */}
-          <div
-            className={`${PROCESS_PIP_BASE_CLASS} ${
-              hasResults && hasError
-                ? 'bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.4)]'
-                : 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.4)]'
-            }`}
-          />
-
           {/* Tool header row */}
           <div className='flex items-center gap-2 flex-wrap'>
             <button onClick={() => handleExpandToggle(toggleKey, group)} className={TOOL_HEADER_BUTTON_CLASS}>
-              <span className={TOOL_NAME_BADGE_CLASS}>{group.name || 'tool'}</span>
-              {/* Status indicator when collapsed */}
-              {/* {!isExpanded && resultSummary && (
-                <span
-                  className={`text-[10px] ${resultSummary === 'success' ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500 dark:text-red-400'}`}
-                >
-                  {resultSummary}
-                </span>
-              )} */}
-              {!isExpanded && !resultSummary && (
-                <span className='inline-flex items-center text-neutral-400 dark:text-neutral-500'>
-                  <i className='bx bx-dots-horizontal-rounded text-sm animate-pulse' />
-                </span>
-              )}
+              <span className={toolNameClass}>{group.name || 'tool'}</span>
               {!isExpanded && pathContent && (
                 <span
-                  className='text-[10px] text-neutral-500 dark:text-neutral-500 max-w-[200px] overflow-hidden whitespace-nowrap'
+                  className='text-xs text-neutral-500 dark:text-neutral-500 max-w-[200px] overflow-hidden whitespace-nowrap'
                   style={{ direction: 'rtl', textOverflow: 'ellipsis' }}
                 >
                   {pathContent}
@@ -1946,7 +1938,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
             style={expandContainerStyle}
             onTransitionEnd={handleExpandTransitionEnd}
           >
-            <div className='tool-expand-content pt-3'>
+            <div className='tool-expand-content'>
               {/* Tool inputs */}
               {!hasHtmlOutput && group.args && Object.keys(group.args).length > 0 && (
                 <div className='border-l-2 border-neutral-300/50 dark:border-neutral-700/50 pl-4 py-1 mb-2 font-mono text-[11px] text-neutral-500 dark:text-neutral-500 leading-relaxed'>
@@ -2039,7 +2031,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
 
     const buildReasoningRenderItem = (reasoningText: string, reasoningId: number, key: string): MessageRenderItem => {
       const isExpanded = expandedBlocks.reasoning.has(reasoningId)
-      const reasoningSummary = truncateWords(reasoningText)
+      const reasoningSummary = getCollapsedReasoningSummary(reasoningText)
 
       return {
         key,
@@ -2047,15 +2039,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         processType: 'reasoning',
         node: (
           <div key={key} className={PROCESS_CARD_WRAPPER_CLASS}>
-            <div className={REASONING_PIP_CLASS} />
-
             <button
               onClick={() => toggleBlock('reasoning', reasoningId)}
               className='flex items-center gap-2 group/reason hover:opacity-80 transition-opacity cursor-pointer outline-none'
             >
-              <span className='text-[10px] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
-                Reasoning
-              </span>
+              <span className='text-xs leading-none text-neutral-800 dark:text-neutral-500'>Reasoning</span>
               {!isExpanded && reasoningSummary && (
                 <span className='text-xs text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
                   {reasoningSummary}
@@ -2072,11 +2060,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
             </button>
 
             <div
-            className={`tool-expand-container ${isExpanded ? 'open' : ''}`}
-            style={expandContainerStyle}
-            onTransitionEnd={handleExpandTransitionEnd}
-          >
-              <div className='tool-expand-content pt-2'>
+              className={`tool-expand-container ${isExpanded ? 'open' : ''}`}
+              style={expandContainerStyle}
+              onTransitionEnd={handleExpandTransitionEnd}
+            >
+              <div className='tool-expand-content'>
                 {renderMarkdownNode({
                   key: `${key}-reasoning-content`,
                   markdown: reasoningText,
@@ -2148,7 +2136,6 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
 
           rendered.push(
             <div key={groupKey} className={PROCESS_CARD_WRAPPER_CLASS}>
-              <div className={AGENT_RUN_PIP_CLASS} />
               <button
                 onClick={() => toggleBlock('groupRuns', groupKey)}
                 className='flex items-center gap-2 group/run hover:opacity-80 transition-opacity cursor-pointer outline-none'
@@ -2171,11 +2158,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 </svg>
               </button>
               <div
-            className={`tool-expand-container ${isExpanded ? 'open' : ''}`}
-            style={expandContainerStyle}
-            onTransitionEnd={handleExpandTransitionEnd}
-          >
-                <div className='tool-expand-content pt-2'>{runItems.map(item => item.node)}</div>
+                className={`tool-expand-container ${isExpanded ? 'open' : ''}`}
+                style={expandContainerStyle}
+                onTransitionEnd={handleExpandTransitionEnd}
+              >
+                <div className='tool-expand-content'>{runItems.map(item => item.node)}</div>
               </div>
             </div>
           )
@@ -2190,15 +2177,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
     }
 
     const wrapStreamProcessNode = (key: string, node: React.ReactNode): React.ReactNode => (
-      <motion.div
-        key={`anim-${key}`}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.12, ease: 'linear' }}
-        style={{ willChange: 'opacity' }}
-      >
-        {node}
-      </motion.div>
+      <React.Fragment key={`stream-process-${key}`}>{node}</React.Fragment>
     )
 
     const buildStreamRenderItems = (): MessageRenderItem[] => {
@@ -2595,7 +2574,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       <div
         id={`message-${id}`}
         ref={messageRef}
-        className={`group px-0 sm:px-2 md:px-2 ${styles.container} ${contextHighlightClass} ${width}  ${role === 'user' ? 'mt-4' : ''} transition-[background-color,opacity] duration-200 rounded-md hover:bg-opacity-80 ${isCompactionSummary ? 'border border-emerald-300/50 dark:border-emerald-600/50 bg-emerald-50/40 dark:bg-emerald-900/10' : ''} ${className ?? ''}`}
+        className={`group px-0 sm:px-2 md:px-2 ${styles.container} ${contextHighlightClass} ${width} ${role === 'user' ? 'mt-4' : ''} transition-colors duration-200 rounded-md hover:bg-opacity-80 ${isCompactionSummary ? 'border border-emerald-300/50 dark:border-emerald-600/50 bg-emerald-50/40 dark:bg-emerald-900/10' : ''} ${className ?? ''}`}
         style={styles.containerStyle}
         onContextMenu={handleContextMenu}
         onMouseEnter={() => setIsHovering(true)}
@@ -2603,6 +2582,16 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         onClick={handleMobileMessageActivate}
         onTouchStart={handleMobileMessageActivate}
       >
+        {role === 'user' && userTurnElapsedLabel && (
+          <div className='mb-4 flex w-full items-center gap-3 pt-1' aria-label={userTurnElapsedLabel}>
+            <div className='h-px flex-1 bg-gradient-to-r from-transparent via-neutral-500/30 to-neutral-500/20' />
+            <span className='shrink-0 rounded-full border border-neutral-500/20 bg-white/70 px-3 py-1 text-[10px] font-medium uppercase tracking-[0.12em] text-neutral-500 shadow-sm backdrop-blur dark:bg-neutral-950/60 dark:text-neutral-400'>
+              {userTurnElapsedLabel}
+            </span>
+            <div className='h-px flex-1 bg-gradient-to-l from-transparent via-neutral-500/30 to-neutral-500/20' />
+          </div>
+        )}
+
         {isCompactionSummary && (
           <div className='inline-flex mt-4 items-center gap-2 py-[3px] px-2.5 bg-emerald-100/70 dark:bg-emerald-900/40 border border-emerald-300/70 dark:border-emerald-700 rounded-md'>
             <div className='w-1.5 h-1.5 rounded-full bg-emerald-500' />
@@ -2614,12 +2603,9 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
 
         {/* Header with role */}
         {role === 'user' && (
-          <div className='inline-flex mt-6 items-center gap-2 pt-[3px] px-2.5 bg-white/[0.03] border border-white/[0.08] rounded-md mb-3 backdrop-blur cursor-default transition-all duration-200'>
+          <div className='inline-flex mt-0 items-center gap-2 pt-[3px] pr-2.5 bg-white/[0.03] border border-white/[0.08] rounded-md mb-3 backdrop-blur cursor-default transition-all duration-200'>
             <div className='w-1 h-1 rounded-full bg-neutral-500 shadow-[0_0_8px_rgba(115,115,115,0.4)]'></div>
-            <span
-              className={`font-mono text-[11px] uppercase tracking-[0.1em] ${styles.role || 'text-neutral-500'}`}
-              style={styles.roleStyle}
-            >
+            <span className={`text-sm tracking-[0.1em] ${styles.role || 'text-neutral-500'}`} style={styles.roleStyle}>
               {styles.roleText}
             </span>
           </div>
@@ -2656,9 +2642,6 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
             {/* Reasoning / thinking block */}
             {typeof thinking === 'string' && thinking.trim().length > 0 && (
               <div className={PROCESS_CARD_REASONING_WRAPPER_CLASS}>
-                {/* Blue pip indicator for reasoning */}
-                <div className={REASONING_PIP_CLASS} />
-
                 {/* Reasoning header */}
                 <button
                   onClick={() => setShowThinking(s => !s)}
@@ -2671,7 +2654,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                   </span>
                   {!showThinking && (
                     <span className='text-xs text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
-                      {truncateWords(thinking)}
+                      {getCollapsedReasoningSummary(thinking)}
                     </span>
                   )}
                   <svg
@@ -2690,7 +2673,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                   style={expandContainerStyle}
                   onTransitionEnd={handleExpandTransitionEnd}
                 >
-                  <div className='tool-expand-content pt-2'>
+                  <div className='tool-expand-content'>
                     {renderMarkdownNode({
                       key: `legacy-reasoning-${id}`,
                       id: `reasoning-content-${id}`,
@@ -2707,7 +2690,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
 
         {/* Message content - show edit mode or normal display */}
         {editingState ? (
-          <div className='px-4 w-full relative'>
+          <div className='px-2 w-full relative'>
             <TextArea
               value={editContent}
               onChange={setEditContent}
@@ -2716,6 +2699,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
               maxRows={40}
               maxLength={20000}
               autoFocus
+              label='Create New Branch'
               width='w-full'
               onContextMenu={(e: React.MouseEvent<HTMLTextAreaElement>) => {
                 // Always show default browser menu in TextArea, never the custom menu
@@ -2859,13 +2843,9 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
           </div>
         )}
 
-        {role === 'user' && (
-          <div className='h-px w-full bg-gradient-to-r from-transparent via-neutral-500/30 to-transparent mb-4'></div>
-        )}
-
         {/* Edit instructions */}
         {editingState && (
-          <div className='mt-2 text-xs sm:text-sm text-gray-500'>
+          <div className='text-[13px] text-gray-500 dark:text-gray-200 leading-none pl-1 pb-1 text-right'>
             Press Enter to save, Shift+Enter for new line, Escape to cancel
           </div>
         )}
@@ -2880,119 +2860,113 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         {contextMenuOpen &&
           contextMenuPosition &&
           createPortal(
-            <AnimatePresence>
-              <motion.div
-                ref={floatingActionsRef}
-                initial={{ opacity: 0, scale: 0.95, y: 5 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95, y: 5 }}
-                transition={{ duration: 0.15 }}
-                className='fixed z-[400]'
-                style={{
-                  left: `${contextMenuPosition.x}px`,
-                  top: `${contextMenuPosition.y}px`,
-                  transform: 'translate(-50%, -50%)',
-                }}
-              >
-                <MessageActions
-                  onEdit={
-                    !hasSelection
-                      ? () => {
-                          closeFloatingActions()
-                          handleEdit()
-                        }
-                      : undefined
-                  }
-                  onBranch={
-                    !hasSelection && role === 'user'
-                      ? () => {
-                          closeFloatingActions()
-                          handleBranch()
-                        }
-                      : undefined
-                  }
-                  onDelete={
-                    !hasSelection
-                      ? () => {
-                          closeFloatingActions()
-                          handleDelete()
-                        }
-                      : undefined
-                  }
-                  onCopy={
-                    !hasSelection
-                      ? () => {
-                          handleCopy()
-                          // Don't close on copy to show feedback
-                        }
-                      : undefined
-                  }
-                  onCopySelection={
-                    hasSelection
-                      ? () => {
-                          handleCopySelection()
-                          // Don't close on copy to show feedback
-                        }
-                      : undefined
-                  }
-                  onExplainSelection={
-                    hasSelection && onExplainFromSelection
-                      ? (position?: { x: number; y: number }) => {
-                          closeFloatingActions()
-                          handleExplainSelection(position)
-                        }
-                      : undefined
-                  }
-                  onAddToNoteSelection={
-                    hasSelection && _onAddToNote
-                      ? () => {
-                          closeFloatingActions()
-                          handleAddSelectionToNote()
-                        }
-                      : undefined
-                  }
-                  onSave={
-                    !hasSelection
-                      ? () => {
-                          closeFloatingActions()
-                          handleSave()
-                        }
-                      : undefined
-                  }
-                  onSaveBranch={
-                    !hasSelection
-                      ? () => {
-                          closeFloatingActions()
-                          handleSaveBranch()
-                        }
-                      : undefined
-                  }
-                  onCancel={
-                    !hasSelection
-                      ? () => {
-                          closeFloatingActions()
-                          handleCancel()
-                        }
-                      : undefined
-                  }
-                  onMore={
-                    !hasSelection
-                      ? () => {
-                          closeFloatingActions()
-                          handleMoreClick()
-                        }
-                      : undefined
-                  }
-                  isEditing={editingState}
-                  editMode={editMode}
-                  copied={copied}
-                  modelName={modelName}
-                  isVisible={true}
-                  variant={hasSelection ? 'selection' : 'default'}
-                  layout='menu'
-                />
-              </motion.div>
-            </AnimatePresence>,
+            <div
+              ref={floatingActionsRef}
+              className='fixed z-[400]'
+              style={{
+                left: `${contextMenuPosition.x}px`,
+                top: `${contextMenuPosition.y}px`,
+                transform: 'translate(-50%, -50%)',
+              }}
+            >
+              <MessageActions
+                onEdit={
+                  !hasSelection
+                    ? () => {
+                        closeFloatingActions()
+                        handleEdit()
+                      }
+                    : undefined
+                }
+                onBranch={
+                  !hasSelection && role === 'user'
+                    ? () => {
+                        closeFloatingActions()
+                        handleBranch()
+                      }
+                    : undefined
+                }
+                onDelete={
+                  !hasSelection
+                    ? () => {
+                        closeFloatingActions()
+                        handleDelete()
+                      }
+                    : undefined
+                }
+                onCopy={
+                  !hasSelection
+                    ? () => {
+                        handleCopy()
+                        // Don't close on copy to show feedback
+                      }
+                    : undefined
+                }
+                onCopySelection={
+                  hasSelection
+                    ? () => {
+                        handleCopySelection()
+                        // Don't close on copy to show feedback
+                      }
+                    : undefined
+                }
+                onExplainSelection={
+                  hasSelection && onExplainFromSelection
+                    ? (position?: { x: number; y: number }) => {
+                        closeFloatingActions()
+                        handleExplainSelection(position)
+                      }
+                    : undefined
+                }
+                onAddToNoteSelection={
+                  hasSelection && _onAddToNote
+                    ? () => {
+                        closeFloatingActions()
+                        handleAddSelectionToNote()
+                      }
+                    : undefined
+                }
+                onSave={
+                  !hasSelection
+                    ? () => {
+                        closeFloatingActions()
+                        handleSave()
+                      }
+                    : undefined
+                }
+                onSaveBranch={
+                  !hasSelection
+                    ? () => {
+                        closeFloatingActions()
+                        handleSaveBranch()
+                      }
+                    : undefined
+                }
+                onCancel={
+                  !hasSelection
+                    ? () => {
+                        closeFloatingActions()
+                        handleCancel()
+                      }
+                    : undefined
+                }
+                onMore={
+                  !hasSelection
+                    ? () => {
+                        closeFloatingActions()
+                        handleMoreClick()
+                      }
+                    : undefined
+                }
+                isEditing={editingState}
+                editMode={editMode}
+                copied={copied}
+                modelName={modelName}
+                isVisible={true}
+                variant={hasSelection ? 'selection' : 'default'}
+                layout='menu'
+              />
+            </div>,
             document.body
           )}
 
@@ -3000,57 +2974,51 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         {showExplainInput &&
           explainInputPosition.current &&
           createPortal(
-            <AnimatePresence>
-              <motion.div
-                ref={explainInputRef}
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                transition={{ duration: 0.15 }}
-                className='fixed px-2 py-2 z-[100] w-[320px] sm:w-[400px] rounded-[14px] acrylic shadow-[0_4px_12px_rgba(0,0,0,0.15)] dark:shadow-[0_4px_20px_rgba(0,0,0,0.5)]  [will-change:contents] [transform:translateZ(0)]'
-                style={{
-                  left: `${explainInputFixedPosition?.x ?? explainInputPosition.current?.x ?? 0}px`,
-                  top: `${explainInputFixedPosition?.y ?? explainInputPosition.current?.y ?? 0}px`,
+            <div
+              ref={explainInputRef}
+              className='fixed px-2 py-2 z-[100] w-[320px] sm:w-[400px] rounded-[14px] acrylic shadow-[0_4px_12px_rgba(0,0,0,0.15)] dark:shadow-[0_4px_20px_rgba(0,0,0,0.5)]  [will-change:contents] [transform:translateZ(0)]'
+              style={{
+                left: `${explainInputFixedPosition?.x ?? explainInputPosition.current?.x ?? 0}px`,
+                top: `${explainInputFixedPosition?.y ?? explainInputPosition.current?.y ?? 0}px`,
+              }}
+            >
+              {/* Display selected text */}
+              <div className='mb-2 p-2 rounded-[12px] bg-neutral-50 dark:bg-yBlack-800 border border-neutral-200 dark:border-neutral-700 max-h-[100px] overflow-y-auto'>
+                <div className='text-xs text-gray-600 dark:text-gray-400 italic line-clamp-4'>"{selectedText}"</div>
+              </div>
+              <TextArea
+                value={explainInputValue}
+                onChange={setExplainInputValue}
+                placeholder='Ask a question about the selected text...'
+                width='w-full'
+                minRows={1}
+                maxRows={2}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    handleSendExplainInput()
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault()
+                    handleCancelExplainInput()
+                  }
                 }}
-              >
-                {/* Display selected text */}
-                <div className='mb-2 p-2 rounded-[12px] bg-neutral-50 dark:bg-yBlack-800 border border-neutral-200 dark:border-neutral-700 max-h-[100px] overflow-y-auto'>
-                  <div className='text-xs text-gray-600 dark:text-gray-400 italic line-clamp-4'>"{selectedText}"</div>
-                </div>
-                <TextArea
-                  value={explainInputValue}
-                  onChange={setExplainInputValue}
-                  placeholder='Ask a question about the selected text...'
-                  width='w-full'
-                  minRows={1}
-                  maxRows={2}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      handleSendExplainInput()
-                    } else if (e.key === 'Escape') {
-                      e.preventDefault()
-                      handleCancelExplainInput()
-                    }
-                  }}
-                />
-                <div className='mt-2 flex justify-end gap-2'>
-                  <button
-                    onClick={handleCancelExplainInput}
-                    className='w-7 h-7 flex items-center justify-center rounded-full text-sm bg-neutral-200 hover:bg-rose-400 dark:bg-neutral-600/80 disabled:bg-neutral-300 disabled:cursor-not-allowed dark:disabled:bg-neutral-700 dark:hover:bg-rose-600/80 dark:text-white text-black hover:text-neutral-50 transition-colors'
-                  >
-                    <i className='bx bx-x text-base' aria-hidden='true'></i>
-                  </button>
-                  <button
-                    onClick={handleSendExplainInput}
-                    disabled={!explainInputValue.trim()}
-                    className='w-7 h-7 flex items-center justify-center rounded-full bg-neutral-200 dark:bg-neutral-600 hover:bg-blue-500 dark:hover:bg-green-700 disabled:bg-neutral-300 disabled:cursor-not-allowed dark:disabled:bg-neutral-800 dark:text-white text-black hover:text-neutral-50 transition-colors'
-                  >
-                    <i className='bx bx-check  text-[18px] leading-none' aria-hidden='true'></i>
-                  </button>
-                </div>
-              </motion.div>
-            </AnimatePresence>,
+              />
+              <div className='mt-2 flex justify-end gap-2'>
+                <button
+                  onClick={handleCancelExplainInput}
+                  className='w-7 h-7 flex items-center justify-center rounded-full text-sm bg-neutral-200 hover:bg-rose-400 dark:bg-neutral-600/80 disabled:bg-neutral-300 disabled:cursor-not-allowed dark:disabled:bg-neutral-700 dark:hover:bg-rose-600/80 dark:text-white text-black hover:text-neutral-50 transition-colors'
+                >
+                  <i className='bx bx-x text-base' aria-hidden='true'></i>
+                </button>
+                <button
+                  onClick={handleSendExplainInput}
+                  disabled={!explainInputValue.trim()}
+                  className='w-7 h-7 flex items-center justify-center rounded-full bg-neutral-200 dark:bg-neutral-600 hover:bg-blue-500 dark:hover:bg-green-700 disabled:bg-neutral-300 disabled:cursor-not-allowed dark:disabled:bg-neutral-800 dark:text-white text-black hover:text-neutral-50 transition-colors'
+                >
+                  <i className='bx bx-check  text-[18px] leading-none' aria-hidden='true'></i>
+                </button>
+              </div>
+            </div>,
             document.body
           )}
         <ImageModal

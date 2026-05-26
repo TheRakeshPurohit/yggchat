@@ -23,11 +23,14 @@ interface MobileHeaderProps {
   selectorsDisabled?: boolean
   openAiAuthenticated: boolean
   openRouterAuthenticated: boolean
+  zaiAuthenticated: boolean
   openAiBusy: boolean
   hasPendingOpenAiFlow: boolean
   onOpenAiLoginStart: () => void
   onOpenAiLoginComplete: () => void
   onOpenAiLogout: () => void
+  onZaiTokenSet: () => void
+  onZaiTokenClear: () => void
   customTools: MobileCustomTool[]
   customToolBusyNames: string[]
   customToolsLoading: boolean
@@ -54,6 +57,7 @@ const PROVIDER_LABELS: Record<MobileProviderName, string> = {
   openaichatgpt: 'OpenAI ChatGPT',
   openrouter: 'OpenRouter',
   lmstudio: 'LM Studio',
+  zai: 'Z.AI / GLM',
 }
 
 export const MobileHeader: React.FC<MobileHeaderProps> = ({
@@ -74,11 +78,14 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
   selectorsDisabled = false,
   openAiAuthenticated,
   openRouterAuthenticated,
+  zaiAuthenticated,
   openAiBusy,
   hasPendingOpenAiFlow,
   onOpenAiLoginStart,
   onOpenAiLoginComplete,
   onOpenAiLogout,
+  onZaiTokenSet,
+  onZaiTokenClear,
   customTools,
   customToolBusyNames,
   customToolsLoading,
@@ -126,11 +133,17 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
         className: openRouterAuthenticated ? 'connected' : 'disconnected',
       }
     }
+    if (providerName === 'zai') {
+      return {
+        label: `Z.AI ${zaiAuthenticated ? 'connected' : 'not connected'}`,
+        className: zaiAuthenticated ? 'connected' : 'disconnected',
+      }
+    }
     return {
       label: 'LM Studio local provider',
       className: 'connected',
     }
-  }, [providerName, openAiAuthenticated, openRouterAuthenticated])
+  }, [providerName, openAiAuthenticated, openRouterAuthenticated, zaiAuthenticated])
 
   useEffect(() => {
     if (!settingsOpen) {
@@ -279,6 +292,21 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
                     )
                   ) : providerName === 'openrouter' ? (
                     <span className='mobile-conversation-cwd-hint'>OpenRouter uses your stored app token.</span>
+                  ) : providerName === 'zai' ? (
+                    zaiAuthenticated ? (
+                      <>
+                        <Button onClick={onZaiTokenSet} variant='secondary' size='sm'>
+                          Replace Z.AI key
+                        </Button>
+                        <Button onClick={onZaiTokenClear} variant='outline' size='sm'>
+                          Clear Z.AI key
+                        </Button>
+                      </>
+                    ) : (
+                      <Button onClick={onZaiTokenSet} variant='secondary' size='sm'>
+                        Enter Z.AI API key
+                      </Button>
+                    )
                   ) : (
                     <span className='mobile-conversation-cwd-hint'>LM Studio uses your local runtime. No remote auth needed.</span>
                   )}

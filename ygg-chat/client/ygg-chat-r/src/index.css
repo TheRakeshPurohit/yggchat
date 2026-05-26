@@ -661,3 +661,106 @@ html {
   color: #3b82f6;
   opacity: 0.8;
 }
+
+/* Minimal running-state treatment for chat process/tool labels. */
+@keyframes tool-name-shimmer {
+  0%,
+  12% {
+    background-position: 150% 50%;
+  }
+
+  72%,
+  100% {
+    background-position: -150% 50%;
+  }
+}
+
+@layer utilities {
+  .tool-name-shimmer {
+    --tool-shimmer-base: rgb(115 115 115);
+    --tool-shimmer-glint: rgb(212 212 212);
+    color: transparent;
+    background-image: linear-gradient(
+      110deg,
+      var(--tool-shimmer-base) 0%,
+      var(--tool-shimmer-base) 40%,
+      var(--tool-shimmer-glint) 50%,
+      var(--tool-shimmer-base) 60%,
+      var(--tool-shimmer-base) 100%
+    );
+    background-size: 260% 100%;
+    background-position: 150% 50%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    animation: tool-name-shimmer 2.4s linear 320ms infinite;
+  }
+
+  .dark .tool-name-shimmer {
+    --tool-shimmer-base: rgb(115 115 115);
+    --tool-shimmer-glint: rgb(245 245 245);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tool-name-shimmer {
+      animation: none;
+      color: rgb(115 115 115);
+      background-image: none;
+    }
+
+    .dark .tool-name-shimmer {
+      color: rgb(163 163 163);
+    }
+  }
+}
+
+/* Edit diff expansion animation: defined once globally to avoid per-row <style> tags in virtualized lists. */
+@keyframes edit-diff-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.edit-diff-slide-down {
+  animation: edit-diff-slide-down 120ms ease-out;
+  will-change: opacity, transform;
+}
+
+.edit-diff-animations-disabled .edit-diff-slide-down {
+  animation: none !important;
+  will-change: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .edit-diff-slide-down {
+    animation: none !important;
+    will-change: auto;
+  }
+}
+
+@keyframes ygg-chat-stream-item-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.chat-stream-item-fade-in {
+  opacity: 0;
+  animation: ygg-chat-stream-item-fade-in 500ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-stream-item-fade-in {
+    opacity: 1;
+    animation: none;
+  }
+}

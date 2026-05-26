@@ -37,6 +37,7 @@ import {
 } from './chatTypes'
 import { createLmStudioStreamingRequest } from './LMStudio'
 import { createOpenAIChatGPTStreamingRequest } from './OpenAIChatGPT'
+import { createZaiStreamingRequest } from './Zai'
 import { openStreamingWithPreFirstByteRetry } from './streamResilience'
 import { buildCompactionHistoryLines, buildCompactionWriteOpAppendix } from './compactionContext'
 import { persistToolResultsWithFallback } from './toolResultPersistence'
@@ -64,17 +65,25 @@ import {
 } from './toolDefinitions'
 import { runChatHook, type ChatHookLineage, type ChatHookTurnContext } from './chatHookClient'
 
-
 // TODO: Import when conversations feature is available
 // import { conversationActions } from '../conversations'
 
 // Remote API base for syncing from cloud (Railway)
 const getRemoteApiBase = (): string | null =>
-  isCommunityMode ? null : (import.meta.env.VITE_API_URL || 'https://webdrasil-production.up.railway.app/api')
+  isCommunityMode ? null : import.meta.env.VITE_API_URL || 'https://webdrasil-production.up.railway.app/api'
 // Tools that should not prompt for user permission before execution.
 // Server-executed tools (e.g., brave_search) are already excluded upstream.
 const TOOL_PERMISSION_ALWAYS_BYPASS = new Set(['skill_manager', 'mcp_manager'])
-const CUSTOM_TOOL_MANAGER_BYPASS_ACTIONS = new Set(['list', 'get', 'enable', 'disable', 'add', 'remove', 'reload', 'settings'])
+const CUSTOM_TOOL_MANAGER_BYPASS_ACTIONS = new Set([
+  'list',
+  'get',
+  'enable',
+  'disable',
+  'add',
+  'remove',
+  'reload',
+  'settings',
+])
 
 const getToolCallArgsObject = (toolCall: any): Record<string, any> | null => {
   const rawArgs = toolCall?.arguments
@@ -552,7 +561,7 @@ const maybePersistAutoConversationTitle = async ({
   content,
   contextLabel,
   skip,
-  }: {
+}: {
   dispatch: any
   conversationId: ConversationId
   storageMode?: 'cloud' | 'local'
@@ -560,7 +569,7 @@ const maybePersistAutoConversationTitle = async ({
   content: string | null | undefined
   contextLabel: string
   skip?: boolean
-  }): Promise<void> => {
+}): Promise<void> => {
   if (skip || parentId != null) return
 
   const title = buildAutoConversationTitle(content)
@@ -1106,7 +1115,6 @@ const shouldContinueFromStopHook = async (params: {
   return false
 }
 
-
 export const AUTO_COMPACTION_NOTE = '__auto_compaction_summary__'
 export const AUTO_COMPACTION_SUMMARY_RESUME_LINE = 'Following is summary of the session, you have to resume the work.'
 export const GENERATED_IMAGE_PATH_HINT_NOTE = '__generated_image_path_hint__'
@@ -1120,7 +1128,6 @@ const isGeneratedImagePathHintMessage = (msg: Message | undefined | null): boole
   if (!msg) return false
   return typeof msg.note === 'string' && msg.note === GENERATED_IMAGE_PATH_HINT_NOTE
 }
-
 
 const createGeneratedImagePathHintContent = (filePaths?: string[] | null): string | null => {
   const uniquePaths = Array.from(
@@ -1190,9 +1197,17 @@ const appendCompactionSummaryToOpenAIChatGPTHistory = (target: any[], msg: Messa
   return true
 }
 
-const appendGeneratedImagePathHintToOpenAIChatGPTHistory = (target: any[], msg: Message | undefined | null): boolean => {
+const appendGeneratedImagePathHintToOpenAIChatGPTHistory = (
+  target: any[],
+  msg: Message | undefined | null
+): boolean => {
   if (!isGeneratedImagePathHintMessage(msg)) return false
-  const content = typeof msg?.content === 'string' ? msg.content : typeof msg?.content_plain_text === 'string' ? msg.content_plain_text : ''
+  const content =
+    typeof msg?.content === 'string'
+      ? msg.content
+      : typeof msg?.content_plain_text === 'string'
+        ? msg.content_plain_text
+        : ''
   if (!content.trim()) return false
   target.push({ role: 'developer', content })
   return true
@@ -1248,20 +1263,18 @@ const syncAssistantMessageLocallyInBackground = (params: {
     .catch(err => console.error(`[${params.logPrefix}] Failed to sync assistant message:`, err))
 }
 
-const persistGeneratedImagePathHintMessage = async (
-  params: {
-    dispatch: any
-    queryClient: any
-    conversationId: ConversationId
-    parentId: MessageId | null
-    modelName: string | null | undefined
-    authUserId: string | null | undefined
-    selectedProjectId?: string | null
-    storageMode?: string | null
-    filePaths?: string[] | null
-    directoryHint?: { dir?: string | null; pattern?: string | null } | null
-  }
-): Promise<Message | null> => {
+const persistGeneratedImagePathHintMessage = async (params: {
+  dispatch: any
+  queryClient: any
+  conversationId: ConversationId
+  parentId: MessageId | null
+  modelName: string | null | undefined
+  authUserId: string | null | undefined
+  selectedProjectId?: string | null
+  storageMode?: string | null
+  filePaths?: string[] | null
+  directoryHint?: { dir?: string | null; pattern?: string | null } | null
+}): Promise<Message | null> => {
   const filePaths = params.filePaths || []
   const content = createGeneratedImagePathHintContent(filePaths)
   if (!content) return null
@@ -1309,48 +1322,64 @@ const persistGeneratedImagePathHintMessage = async (
 
   return hintMessage
 }
-const trimHistoryToLatestCompaction = (messages: Array<Message | undefined>): Message[] => {
-  const resolved = messages.filter(Boolean) as Message[]
-  if (resolved.length === 0) return []
 
-  let latestCompactionIndex = -1
-  for (let i = resolved.length - 1; i >= 0; i--) {
-    if (isAutoCompactionSummaryMessage(resolved[i])) {
-      latestCompactionIndex = i
-      break
-    }
-  }
+const trimHistoryToLatestCompaction = (messages: Array<Message | undefined>): Message[] => {
+  const resolved = messages.filter(Boolean) as Message[]
 
-  return latestCompactionIndex >= 0 ? resolved.slice(latestCompactionIndex) : resolved
-}
+  if (resolved.length === 0) return []
 
-const appendGeneratedImagePathHintsForHistory = (history: Message[], allMessages: Message[]): Message[] => {
-  if (!Array.isArray(history) || history.length === 0 || !Array.isArray(allMessages) || allMessages.length === 0) {
-    return history
-  }
+  let latestCompactionIndex = -1
 
-  const historyIds = new Set(history.map(message => String(message.id)))
-  const hintByParent = new Map<string, Message[]>()
-  for (const message of allMessages) {
-    if (!isGeneratedImagePathHintMessage(message) || message.parent_id == null) continue
-    if (historyIds.has(String(message.id))) continue
-    const key = String(message.parent_id)
-    const existing = hintByParent.get(key)
-    if (existing) existing.push(message)
-    else hintByParent.set(key, [message])
-  }
+  for (let i = resolved.length - 1; i >= 0; i--) {
+    if (isAutoCompactionSummaryMessage(resolved[i])) {
+      latestCompactionIndex = i
 
-  if (hintByParent.size === 0) return history
+      break
+    }
+  }
 
-  const expanded: Message[] = []
-  let changed = false
-  for (const message of history) {
-    expanded.push(message)
-    const hints = hintByParent.get(String(message.id))
-    if (!hints?.length) continue
-    changed = true
-    expanded.push(...hints.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()))
-  }
+  return latestCompactionIndex >= 0 ? resolved.slice(latestCompactionIndex) : resolved
+}
+
+const appendGeneratedImagePathHintsForHistory = (history: Message[], allMessages: Message[]): Message[] => {
+  if (!Array.isArray(history) || history.length === 0 || !Array.isArray(allMessages) || allMessages.length === 0) {
+    return history
+  }
+
+  const historyIds = new Set(history.map(message => String(message.id)))
+
+  const hintByParent = new Map<string, Message[]>()
+
+  for (const message of allMessages) {
+    if (!isGeneratedImagePathHintMessage(message) || message.parent_id == null) continue
+
+    if (historyIds.has(String(message.id))) continue
+
+    const key = String(message.parent_id)
+
+    const existing = hintByParent.get(key)
+
+    if (existing) existing.push(message)
+    else hintByParent.set(key, [message])
+  }
+
+  if (hintByParent.size === 0) return history
+
+  const expanded: Message[] = []
+
+  let changed = false
+
+  for (const message of history) {
+    expanded.push(message)
+
+    const hints = hintByParent.get(String(message.id))
+
+    if (!hints?.length) continue
+
+    changed = true
+
+    expanded.push(...hints.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()))
+  }
 
   return changed ? expanded : history
 }
@@ -1394,7 +1423,7 @@ const DEFAULT_SUBAGENT_MODEL = 'openai/gpt-5.3-codex'
 const normalizeProviderSlug = (providerName: string | null | undefined): string =>
   (providerName || '').toLowerCase().replace(/\s+/g, '')
 
-type SubagentInheritedProvider = 'openaichatgpt' | 'openrouter' | 'lmstudio'
+type SubagentInheritedProvider = 'openaichatgpt' | 'openrouter' | 'lmstudio' | 'zai'
 
 const resolveInheritedSubagentProvider = (
   callerProviderName: string | null | undefined
@@ -1403,6 +1432,7 @@ const resolveInheritedSubagentProvider = (
   if (slug === 'openaichatgpt' || slug === 'openai(chatgpt)') return 'openaichatgpt'
   if (slug === 'openrouter') return 'openrouter'
   if (slug === 'lmstudio') return 'lmstudio'
+  if (slug === 'zai' || slug === 'z.ai' || slug === 'glm') return 'zai'
   return undefined
 }
 
@@ -1440,11 +1470,7 @@ const parseToolResultsFromContentBlocks = (contentBlocks: any): any[] => {
     .map(block => ({
       tool_use_id: block.tool_use_id || block.toolUseId,
       content:
-        typeof block.content === 'string'
-          ? block.content
-          : block.content == null
-            ? ''
-            : JSON.stringify(block.content),
+        typeof block.content === 'string' ? block.content : block.content == null ? '' : JSON.stringify(block.content),
       is_error: Boolean(block.is_error ?? block.isError),
       tool_name: typeof block.name === 'string' ? block.name : undefined,
       input: block.input,
@@ -1467,10 +1493,7 @@ const executeSimpleSubagentCall = async (
     throw new Error('Subagent requires a prompt')
   }
 
-  const { model: resolvedModel, provider: resolvedProvider } = await resolveSubagentDefaults(
-    model,
-    callerProviderName
-  )
+  const { model: resolvedModel, provider: resolvedProvider } = await resolveSubagentDefaults(model, callerProviderName)
 
   try {
     if (shouldUseCommunityLocalEphemeral()) {
@@ -1686,7 +1709,7 @@ const getSubagentToolDefinitions = (
     .map(convertToServerToolFormat)
 }
 
-const parseMaybeJson = <T,>(value: any, fallback: T): T => {
+const parseMaybeJson = <T>(value: any, fallback: T): T => {
   if (value == null) return fallback
   if (typeof value !== 'string') return value as T
 
@@ -1702,11 +1725,7 @@ const normalizeToolCallsForSubagentHistory = (rawToolCalls: any[]): any[] => {
     .map(tc => {
       const id = tc?.id
       const name =
-        typeof tc?.name === 'string'
-          ? tc.name
-          : typeof tc?.function?.name === 'string'
-            ? tc.function.name
-            : ''
+        typeof tc?.name === 'string' ? tc.name : typeof tc?.function?.name === 'string' ? tc.function.name : ''
 
       const rawArgs = tc?.arguments ?? tc?.input ?? tc?.function?.arguments ?? {}
       const argsString = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs)
@@ -1736,11 +1755,12 @@ const getCachedSubagentSessionMessages = (
   const messages = Array.isArray(cached?.messages) ? cached.messages : []
 
   return messages
-    .filter(message =>
-      String(message.conversation_id) === String(conversationId) &&
-      message.role === 'ex_agent' &&
-      message.ex_agent_type === 'subagent' &&
-      message.ex_agent_session_id === sessionId
+    .filter(
+      message =>
+        String(message.conversation_id) === String(conversationId) &&
+        message.role === 'ex_agent' &&
+        message.ex_agent_type === 'subagent' &&
+        message.ex_agent_session_id === sessionId
     )
     .sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime())
 }
@@ -1831,10 +1851,7 @@ const executeSubagentCall = async (
   const streamId = context.streamId
   const state = getState()
   const callerProviderName = context.callerProvider ?? state.chat.providerState.currentProvider
-  const { model: resolvedModel, provider: resolvedProvider } = await resolveSubagentDefaults(
-    model,
-    callerProviderName
-  )
+  const { model: resolvedModel, provider: resolvedProvider } = await resolveSubagentDefaults(model, callerProviderName)
 
   // Get filtered tool definitions for this subagent
   const subagentTools = getSubagentToolDefinitions(orchestratorMode, requestedTools)
@@ -1898,7 +1915,6 @@ const executeSubagentCall = async (
   let shouldContinue = true
   try {
     for (let turn = 0; turn < subagentMaxTurns && shouldContinue; turn++) {
-
       if (!isStreamActive()) {
         subagentAbortController.abort()
         throw new Error('Subagent aborted')
@@ -1925,10 +1941,14 @@ const executeSubagentCall = async (
 
         const syntheticEvents: string[] = []
         if (typeof localPayload?.reasoning === 'string' && localPayload.reasoning.length > 0) {
-          syntheticEvents.push(`data: ${JSON.stringify({ type: 'chunk', part: 'reasoning', delta: localPayload.reasoning })}`)
+          syntheticEvents.push(
+            `data: ${JSON.stringify({ type: 'chunk', part: 'reasoning', delta: localPayload.reasoning })}`
+          )
         }
         if (typeof localPayload?.message?.content === 'string' && localPayload.message.content.length > 0) {
-          syntheticEvents.push(`data: ${JSON.stringify({ type: 'chunk', part: 'text', delta: localPayload.message.content })}`)
+          syntheticEvents.push(
+            `data: ${JSON.stringify({ type: 'chunk', part: 'text', delta: localPayload.message.content })}`
+          )
         }
 
         const localToolCalls = Array.isArray(localPayload?.toolCalls) ? localPayload.toolCalls : []
@@ -2336,10 +2356,14 @@ const executeSubagentCall = async (
 
       const syntheticEvents: string[] = []
       if (typeof localPayload?.reasoning === 'string' && localPayload.reasoning.length > 0) {
-        syntheticEvents.push(`data: ${JSON.stringify({ type: 'chunk', part: 'reasoning', delta: localPayload.reasoning })}`)
+        syntheticEvents.push(
+          `data: ${JSON.stringify({ type: 'chunk', part: 'reasoning', delta: localPayload.reasoning })}`
+        )
       }
       if (typeof localPayload?.message?.content === 'string' && localPayload.message.content.length > 0) {
-        syntheticEvents.push(`data: ${JSON.stringify({ type: 'chunk', part: 'text', delta: localPayload.message.content })}`)
+        syntheticEvents.push(
+          `data: ${JSON.stringify({ type: 'chunk', part: 'text', delta: localPayload.message.content })}`
+        )
       }
       syntheticEvents.push('data: [DONE]')
 
@@ -2879,7 +2903,6 @@ const persistAssistantMessageWithFallback = async (
 // See useModels, useRecentModels, useRefreshModels, and useSelectModel in hooks/useQueries.ts
 // Model selection state is now managed entirely by React Query and localStorage
 
-
 interface CompactBranchPayload {
   conversationId: ConversationId
   parentMessageId: MessageId | null
@@ -2894,7 +2917,10 @@ export const compactBranch = createAsyncThunk<
   { state: RootState; extra: ThunkExtraArgument }
 >(
   'chat/compactBranch',
-  async ({ conversationId, parentMessageId, messages, providerName, modelName }, { dispatch, getState, extra, rejectWithValue }) => {
+  async (
+    { conversationId, parentMessageId, messages, providerName, modelName },
+    { dispatch, getState, extra, rejectWithValue }
+  ) => {
     dispatch(chatSliceActions.compactingStarted({ conversationId }))
 
     try {
@@ -2905,6 +2931,8 @@ export const compactBranch = createAsyncThunk<
       const providerSlug = provider.toLowerCase().replace(/\s+/g, '')
       const isLmStudio = providerSlug === 'lmstudio'
       const isOpenAIChatGPT = providerSlug === 'openaichatgpt' || providerSlug === 'openai(chatgpt)'
+      const isZai =
+        providerSlug === 'z.ai/glm' || providerSlug === 'zai/glm' || providerSlug === 'zai' || providerSlug === 'glm'
 
       console.log('[compactBranch] start', {
         conversationId,
@@ -2945,8 +2973,7 @@ export const compactBranch = createAsyncThunk<
       }
 
       const providerSettings = loadProviderSettings()
-      const compactionSystemPrompt =
-        providerSettings.compactionSystemPrompt?.trim() || DEFAULT_COMPACTION_SYSTEM_PROMPT
+      const compactionSystemPrompt = providerSettings.compactionSystemPrompt?.trim() || DEFAULT_COMPACTION_SYSTEM_PROMPT
       const compactionUserPrompt = [
         'Compact this branch context for continued conversation.',
         'Output sections:',
@@ -2967,7 +2994,8 @@ export const compactBranch = createAsyncThunk<
         providerSlug,
         isLmStudio,
         isOpenAIChatGPT,
-        usingEphemeral: !isLmStudio && !isOpenAIChatGPT,
+        isZai,
+        usingEphemeral: !isLmStudio && !isOpenAIChatGPT && !isZai,
       })
 
       if (isLmStudio) {
@@ -2994,8 +3022,8 @@ export const compactBranch = createAsyncThunk<
             },
           }
         )
-      } else if (isOpenAIChatGPT) {
-        await createOpenAIChatGPTStreamingRequest(
+      } else if (isOpenAIChatGPT || isZai) {
+        await (isZai ? createZaiStreamingRequest : createOpenAIChatGPTStreamingRequest)(
           {
             conversationId,
             parentId: parentMessageId,
@@ -3005,6 +3033,7 @@ export const compactBranch = createAsyncThunk<
               { role: 'system', content: compactionSystemPrompt },
               { role: 'user', content: compactionUserPrompt },
             ],
+            ...(isZai ? { userId: auth.userId } : {}),
             tools: [],
           },
           {
@@ -3149,7 +3178,6 @@ export const compactBranch = createAsyncThunk<
 
 // Streaming message sending with proper error handling
 export const sendMessage = createAsyncThunk<
-
   { messageId: MessageId | null; userMessage: any; streamId: string },
   SendMessagePayload & { streamId?: string },
   { state: RootState; extra: ThunkExtraArgument }
@@ -3165,6 +3193,7 @@ export const sendMessage = createAsyncThunk<
       retrigger = false,
       imageConfig,
       reasoningConfig,
+      serviceTier,
       cwd,
       streamId: providedStreamId,
     },
@@ -3229,10 +3258,13 @@ export const sendMessage = createAsyncThunk<
       const providerRaw = state.chat.providerState.currentProvider || 'ollama'
       const appProvider = providerRaw.toLowerCase()
       const providerSlug = appProvider.replace(/\s+/g, '')
-      const serverProvider = providerSlug === 'google' ? 'gemini' : providerSlug
+      const serverProvider =
+        providerSlug === 'google' ? 'gemini' : /^(zai|glm|z\.ai)(\/glm)?$/.test(providerSlug) ? 'zai' : providerSlug
       const openRouterTemperature = resolveOpenRouterTemperature(providerSlug)
       const isLmStudio = providerSlug === 'lmstudio'
       const isOpenAIChatGPT = providerSlug === 'openaichatgpt' || providerSlug === 'openai(chatgpt)'
+      const isZai =
+        providerSlug === 'z.ai/glm' || providerSlug === 'zai/glm' || providerSlug === 'zai' || providerSlug === 'glm'
       // Gather any image drafts (base64) captured before send start so UI can clear immediately.
       const attachmentsBase64 = preSendAttachmentsBase64
 
@@ -3263,25 +3295,25 @@ export const sendMessage = createAsyncThunk<
         projectContext && conversationContextSource
           ? `${projectContext}\n\n${conversationContextSource}`
           : projectContext || conversationContextSource || null
-// Get selected files for chat captured before send start so UI can clear immediately
-const selectedFilesForChat = preSendSelectedFilesForChat
+      // Get selected files for chat captured before send start so UI can clear immediately
+      const selectedFilesForChat = preSendSelectedFilesForChat
 
-const conversationMeta = state.conversations.items.find(c => c.id === conversationId)
-// Use React Query cache as fallback for storage mode detection (handles local conversations not yet in Redux)
-const storageMode = conversationMeta?.storage_mode || getStorageModeFromCache(extra.queryClient, conversationId)
-// Keep cwd for tool execution context only (do not inject cwd into system prompt)
-const payloadCwd = typeof cwd === 'string' ? cwd.trim() : (cwd ?? null)
-const effectiveToolRootPath = payloadCwd || conversationMeta?.cwd || state.ideContext.workspace?.rootPath || null
-// Append custom tools explanation to system prompt
-systemPrompt = systemPrompt + '\n\n' + sysPromptConfig.customToolsPrompt
-const baseSystemPrompt = systemPrompt
+      const conversationMeta = state.conversations.items.find(c => c.id === conversationId)
+      // Use React Query cache as fallback for storage mode detection (handles local conversations not yet in Redux)
+      const storageMode = conversationMeta?.storage_mode || getStorageModeFromCache(extra.queryClient, conversationId)
+      // Keep cwd for tool execution context only (do not inject cwd into system prompt)
+      const payloadCwd = typeof cwd === 'string' ? cwd.trim() : (cwd ?? null)
+      const effectiveToolRootPath = payloadCwd || conversationMeta?.cwd || state.ideContext.workspace?.rootPath || null
+      // Append custom tools explanation to system prompt
+      systemPrompt = systemPrompt + '\n\n' + sysPromptConfig.customToolsPrompt
+      const baseSystemPrompt = systemPrompt
 
-// Determine execution mode
-const isElectronMode =
-  import.meta.env.VITE_ENVIRONMENT === 'electron' || (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__)
-// For local tool execution support (GemTools), we prefer client mode even in web environment
-// This allows the client to intercept tool calls and execute them via the discovered local server endpoint.
-const executionMode = 'client'
+      // Determine execution mode
+      const isElectronMode =
+        import.meta.env.VITE_ENVIRONMENT === 'electron' || (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__)
+      // For local tool execution support (GemTools), we prefer client mode even in web environment
+      // This allows the client to intercept tool calls and execute them via the discovered local server endpoint.
+      const executionMode = 'client'
       let currentTurnHistory = [...currentPathMessages]
       const pendingHookContextForNextTurn: string[] = []
       let currentTurnContent = await maybeApplyUserPromptSubmitHook({
@@ -3327,10 +3359,11 @@ const executionMode = 'client'
 
         const shouldUseLmStudio = isElectronMode && isLmStudio
         const shouldUseOpenAIChatGPT = isElectronMode && isOpenAIChatGPT
+        const shouldUseZai = isElectronMode && isZai
 
         // For LM Studio or OpenAI ChatGPT, synthesize the user message locally on the first turn so history is not empty
         if (
-          (shouldUseLmStudio || shouldUseOpenAIChatGPT) &&
+          (shouldUseLmStudio || shouldUseOpenAIChatGPT || shouldUseZai) &&
           turnCount === 1 &&
           currentTurnContent &&
           currentTurnContent.trim()
@@ -3389,8 +3422,8 @@ const executionMode = 'client'
           })
 
           // Directly persist to local SQLite for LM Studio/OpenAI ChatGPT (dualSync skips local-only records)
-          if ((shouldUseLmStudio || shouldUseOpenAIChatGPT) && isElectronMode) {
-            const providerLabel = shouldUseLmStudio ? 'lmstudio' : 'openai-chatgpt'
+          if ((shouldUseLmStudio || shouldUseOpenAIChatGPT || shouldUseZai) && isElectronMode) {
+            const providerLabel = shouldUseLmStudio ? 'lmstudio' : shouldUseZai ? 'zai' : 'openai-chatgpt'
             localApi
               .post('/sync/message', {
                 ...newUserMessage,
@@ -3415,7 +3448,11 @@ const executionMode = 'client'
             storageMode,
             parentId: newUserMessage.parent_id,
             content: newUserMessage.content_plain_text || input.content,
-            contextLabel: shouldUseLmStudio ? 'sendMessage/lmstudio' : 'sendMessage/openai-chatgpt',
+            contextLabel: shouldUseLmStudio
+              ? 'sendMessage/lmstudio'
+              : shouldUseZai
+                ? 'sendMessage/zai'
+                : 'sendMessage/openai-chatgpt',
           })
 
           // CRITICAL: Update parent to user message ID so assistant reply is parented correctly
@@ -3556,7 +3593,8 @@ const executionMode = 'client'
                       provider: serverProvider,
                       model: modelName,
                       operation: 'send',
-                      onHookAdditionalContext: value => appendHookAdditionalContext(pendingHookContextForNextTurn, value),
+                      onHookAdditionalContext: value =>
+                        appendHookAdditionalContext(pendingHookContextForNextTurn, value),
                     }
                   )
                   content = typeof result === 'string' ? result : JSON.stringify(result)
@@ -3642,8 +3680,8 @@ const executionMode = 'client'
             continue
           }
 
-          // OpenAI ChatGPT: handle repeat locally via OAuth tokens
-          if (shouldUseOpenAIChatGPT) {
+          // OpenAI ChatGPT / Z.AI: handle repeat locally via headless provider
+          if (shouldUseOpenAIChatGPT || shouldUseZai) {
             const toolNameById = buildToolNameMap(currentTurnHistory)
             const chatgptMessages: any[] = []
             if (systemPrompt && systemPrompt.trim()) {
@@ -3704,16 +3742,17 @@ const executionMode = 'client'
               chatgptMessages.push({ role: 'user', content: currentTurnContent })
             }
 
-            await createOpenAIChatGPTStreamingRequest(
+            await (shouldUseZai ? createZaiStreamingRequest : createOpenAIChatGPTStreamingRequest)(
               {
                 conversationId,
                 parentId: parent,
                 modelName,
                 systemPrompt,
                 messages: chatgptMessages,
-                attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined,
-                tools: getToolsForOpenAIChatGPT(),
-                reasoningConfig,
+                ...(shouldUseZai
+                  ? { userId: auth.userId, think }
+                  : { attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined, reasoningConfig, serviceTier }),
+                tools: shouldUseZai ? getAllTools() : getToolsForOpenAIChatGPT(),
               },
               {
                 onChunk: async chunk => {
@@ -3731,25 +3770,32 @@ const executionMode = 'client'
                     const imageBlocks = Array.isArray((assistantMsg as any).content_blocks)
                       ? (assistantMsg as any).content_blocks.filter((block: any) => block?.type === 'image')
                       : []
-                    const syncGeneratedImagePaths = imageBlocks.length > 0
-                      ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
-                          message: assistantMsg,
-                          conversationId,
-                          authUserId: auth.userId,
-                          selectedProjectId: selectedProject?.id || null,
-                          storageMode,
-                          logPrefix: 'sendMessage][openai-chatgpt repeat',
-                        })
-                      : (syncAssistantMessageLocallyInBackground({
-                          message: assistantMsg,
-                          conversationId,
-                          authUserId: auth.userId,
-                          selectedProjectId: selectedProject?.id || null,
-                          storageMode,
-                          logPrefix: 'sendMessage][openai-chatgpt repeat',
-                        }), [])
+                    const syncGeneratedImagePaths =
+                      imageBlocks.length > 0
+                        ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
+                            message: assistantMsg,
+                            conversationId,
+                            authUserId: auth.userId,
+                            selectedProjectId: selectedProject?.id || null,
+                            storageMode,
+                            logPrefix: 'sendMessage][openai-chatgpt repeat',
+                          })
+                        : (syncAssistantMessageLocallyInBackground({
+                            message: assistantMsg,
+                            conversationId,
+                            authUserId: auth.userId,
+                            selectedProjectId: selectedProject?.id || null,
+                            storageMode,
+                            logPrefix: 'sendMessage][openai-chatgpt repeat',
+                          }),
+                          [])
                     const generatedImagePaths = Array.isArray((assistantMsg as any).generatedImageFilePaths)
-                      ? Array.from(new Set([...((assistantMsg as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
+                      ? Array.from(
+                          new Set([
+                            ...((assistantMsg as any).generatedImageFilePaths as string[]),
+                            ...syncGeneratedImagePaths,
+                          ])
+                        )
                       : syncGeneratedImagePaths
                     if (imageBlocks.length > 0) {
                       const hintMessage = await persistGeneratedImagePathHintMessage({
@@ -3807,7 +3853,8 @@ const executionMode = 'client'
                       provider: serverProvider,
                       model: modelName,
                       operation: 'send',
-                      onHookAdditionalContext: value => appendHookAdditionalContext(pendingHookContextForNextTurn, value),
+                      onHookAdditionalContext: value =>
+                        appendHookAdditionalContext(pendingHookContextForNextTurn, value),
                     }
                   )
                   content = typeof result === 'string' ? result : JSON.stringify(result)
@@ -3965,6 +4012,7 @@ const executionMode = 'client'
                 isElectron: isElectronMode,
                 imageConfig,
                 reasoningConfig,
+                serviceTier,
                 tools: getToolsForAI(),
               }),
               signal: controller.signal,
@@ -4100,7 +4148,8 @@ const executionMode = 'client'
                       provider: serverProvider,
                       model: modelName,
                       operation: 'send',
-                      onHookAdditionalContext: value => appendHookAdditionalContext(pendingHookContextForNextTurn, value),
+                      onHookAdditionalContext: value =>
+                        appendHookAdditionalContext(pendingHookContextForNextTurn, value),
                     }
                   )
                   content = typeof result === 'string' ? result : JSON.stringify(result)
@@ -4196,7 +4245,7 @@ const executionMode = 'client'
           }
 
           // OpenAI ChatGPT: handle locally via OAuth tokens (personal use only)
-          if (shouldUseOpenAIChatGPT) {
+          if (shouldUseOpenAIChatGPT || shouldUseZai) {
             const toolNameById = buildToolNameMap(currentTurnHistory)
             const chatgptMessages: any[] = []
             if (systemPrompt && systemPrompt.trim()) {
@@ -4251,16 +4300,17 @@ const executionMode = 'client'
               chatgptMessages.push({ role: 'user', content: currentTurnContent })
             }
 
-            await createOpenAIChatGPTStreamingRequest(
+            await (shouldUseZai ? createZaiStreamingRequest : createOpenAIChatGPTStreamingRequest)(
               {
                 conversationId,
                 parentId: parent,
                 modelName,
                 systemPrompt,
                 messages: chatgptMessages,
-                attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined,
-                tools: getToolsForOpenAIChatGPT(),
-                reasoningConfig,
+                ...(shouldUseZai
+                  ? { userId: auth.userId, think }
+                  : { attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined, reasoningConfig, serviceTier }),
+                tools: shouldUseZai ? getAllTools() : getToolsForOpenAIChatGPT(),
               },
               {
                 onChunk: async chunk => {
@@ -4281,45 +4331,52 @@ const executionMode = 'client'
                     const imageBlocks = Array.isArray((chunk.message as any).content_blocks)
                       ? (chunk.message as any).content_blocks.filter((block: any) => block?.type === 'image')
                       : []
-                    const syncGeneratedImagePaths = imageBlocks.length > 0
-                      ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
-                          message: chunk.message,
-                          conversationId,
-                          authUserId: auth.userId,
-                          selectedProjectId: selectedProject?.id || null,
-                          storageMode,
-                          logPrefix: 'sendMessage][openai-chatgpt',
-                        })
-                      : (syncAssistantMessageLocallyInBackground({
-                          message: chunk.message,
-                          conversationId,
-                          authUserId: auth.userId,
-                          selectedProjectId: selectedProject?.id || null,
-                          storageMode,
-                          logPrefix: 'sendMessage][openai-chatgpt',
-                        }), [])
+                    const syncGeneratedImagePaths =
+                      imageBlocks.length > 0
+                        ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
+                            message: chunk.message,
+                            conversationId,
+                            authUserId: auth.userId,
+                            selectedProjectId: selectedProject?.id || null,
+                            storageMode,
+                            logPrefix: 'sendMessage][openai-chatgpt',
+                          })
+                        : (syncAssistantMessageLocallyInBackground({
+                            message: chunk.message,
+                            conversationId,
+                            authUserId: auth.userId,
+                            selectedProjectId: selectedProject?.id || null,
+                            storageMode,
+                            logPrefix: 'sendMessage][openai-chatgpt',
+                          }),
+                          [])
                     const generatedImagePaths = Array.isArray((chunk.message as any).generatedImageFilePaths)
-                      ? Array.from(new Set([...((chunk.message as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
+                      ? Array.from(
+                          new Set([
+                            ...((chunk.message as any).generatedImageFilePaths as string[]),
+                            ...syncGeneratedImagePaths,
+                          ])
+                        )
                       : syncGeneratedImagePaths
-                      if (imageBlocks.length > 0) {
-                        const hintMessage = await persistGeneratedImagePathHintMessage({
-                          dispatch,
-                          queryClient: extra.queryClient,
-                          conversationId,
-                          parentId: chunk.message.id,
-                          modelName,
-                          authUserId: auth.userId,
-                          selectedProjectId: selectedProject?.id || null,
-                          storageMode,
-                          filePaths: generatedImagePaths,
-                          directoryHint: (chunk.message as any).generatedImagesDirectoryHint,
-                        })
-                        if (hintMessage) {
-                          currentTurnHistory.push(hintMessage)
-                          messageId = hintMessage.id
-                        }
+                    if (imageBlocks.length > 0) {
+                      const hintMessage = await persistGeneratedImagePathHintMessage({
+                        dispatch,
+                        queryClient: extra.queryClient,
+                        conversationId,
+                        parentId: chunk.message.id,
+                        modelName,
+                        authUserId: auth.userId,
+                        selectedProjectId: selectedProject?.id || null,
+                        storageMode,
+                        filePaths: generatedImagePaths,
+                        directoryHint: (chunk.message as any).generatedImagesDirectoryHint,
+                      })
+                      if (hintMessage) {
+                        currentTurnHistory.push(hintMessage)
+                        messageId = hintMessage.id
                       }
-                      // Keep current streaming UI until the next generation_started event clears it.
+                    }
+                    // Keep current streaming UI until the next generation_started event clears it.
                   }
                 },
                 signal: controller.signal,
@@ -4331,18 +4388,6 @@ const executionMode = 'client'
             const pendingToolCalls = Array.isArray(lastMsg?.tool_calls) ? lastMsg.tool_calls : []
             const streamSnapshot = getState().chat.streaming.byId[streamId]
             const isStreamActive = streamSnapshot?.active ?? false
-            console.log('[OpenAIChatGPTToolLoop][sendMessage] post-stream tool check', {
-              streamId,
-              active: isStreamActive,
-              streamStatus: streamSnapshot?.status,
-              historyLength: currentTurnHistory.length,
-              lastRole: lastMsg?.role,
-              lastId: lastMsg?.id,
-              lastPartial: lastMsg?.partial,
-              pendingToolCallCount: pendingToolCalls.length,
-              pendingToolCallNames: pendingToolCalls.map((tc: any) => tc?.name || tc?.function?.name || '<unnamed>'),
-              pendingToolCallIds: pendingToolCalls.map((tc: any) => tc?.id || '<no-id>'),
-            })
 
             if (pendingToolCalls.length > 0 && isStreamActive) {
               const rootPath = effectiveToolRootPath
@@ -4355,11 +4400,6 @@ const executionMode = 'client'
                 let isError = false
 
                 try {
-                  console.log('[OpenAIChatGPTToolLoop][sendMessage] executing tool call', {
-                    streamId,
-                    toolCallId: toolCall?.id,
-                    toolName: toolCall?.name || toolCall?.function?.name,
-                  })
                   const result = await executeToolWithPermissionCheck(
                     dispatch,
                     getState,
@@ -4376,7 +4416,8 @@ const executionMode = 'client'
                       provider: serverProvider,
                       model: modelName,
                       operation: 'send',
-                      onHookAdditionalContext: value => appendHookAdditionalContext(pendingHookContextForNextTurn, value),
+                      onHookAdditionalContext: value =>
+                        appendHookAdditionalContext(pendingHookContextForNextTurn, value),
                     }
                   )
                   content = typeof result === 'string' ? result : JSON.stringify(result)
@@ -4448,23 +4489,8 @@ const executionMode = 'client'
               currentTurnContent = ''
               parent = lastMsg.id
               continueTurn = successfulTool
-              console.log('[OpenAIChatGPTToolLoop][sendMessage] tool loop continuation decision', {
-                streamId,
-                successfulTool,
-                continueTurn,
-                parent,
-                toolResultBlockCount: toolResultBlocks.length,
-              })
             } else {
               continueTurn = false
-              console.warn('[OpenAIChatGPTToolLoop][sendMessage] not executing tool calls', {
-                streamId,
-                pendingToolCallCount: pendingToolCalls.length,
-                isStreamActive,
-                streamStatus: streamSnapshot?.status,
-                lastRole: lastMsg?.role,
-                lastId: lastMsg?.id,
-              })
             }
 
             if (!continueTurn) {
@@ -4564,6 +4590,7 @@ const executionMode = 'client'
                 isElectron: isElectronMode,
                 imageConfig,
                 reasoningConfig,
+                serviceTier,
                 tools: getToolsForAI(),
               }),
               signal: controller.signal,
@@ -5204,7 +5231,7 @@ export const editMessageWithBranching = createAsyncThunk<
 >(
   'chat/editMessageWithBranching',
   async (
-    { conversationId, originalMessageId, newContent, modelOverride, think, cwd, streamId: providedStreamId },
+    { conversationId, originalMessageId, newContent, modelOverride, think, serviceTier, cwd, streamId: providedStreamId },
     { dispatch, getState, extra, rejectWithValue, signal }
   ) => {
     const { auth } = extra
@@ -5273,10 +5300,13 @@ export const editMessageWithBranching = createAsyncThunk<
       const providerRaw = state.chat.providerState.currentProvider || 'ollama'
       const appProvider = providerRaw.toLowerCase()
       const providerSlug = appProvider.replace(/\s+/g, '')
-      const serverProvider = providerSlug === 'google' ? 'gemini' : providerSlug
+      const serverProvider =
+        providerSlug === 'google' ? 'gemini' : /^(zai|glm|z\.ai)(\/glm)?$/.test(providerSlug) ? 'zai' : providerSlug
       const openRouterTemperature = resolveOpenRouterTemperature(providerSlug)
       const isLmStudio = providerSlug === 'lmstudio'
       const isOpenAIChatGPT = providerSlug === 'openaichatgpt' || providerSlug === 'openai(chatgpt)'
+      const isZai =
+        providerSlug === 'z.ai/glm' || providerSlug === 'zai/glm' || providerSlug === 'zai' || providerSlug === 'glm'
 
       // Combine system prompts in order: user default > project > conversation
       const selectedProject = selectSelectedProject(state)
@@ -5361,7 +5391,10 @@ export const editMessageWithBranching = createAsyncThunk<
       }
 
       const resolvedModel =
-        modelsData?.models?.find(model => model.name === modelName) || modelsData?.selected || modelsData?.default || null
+        modelsData?.models?.find(model => model.name === modelName) ||
+        modelsData?.selected ||
+        modelsData?.default ||
+        null
       const branchContextLimit = resolvedModel?.contextLength || 128_000
 
       let promptAndContextTokens = 0
@@ -5466,22 +5499,22 @@ export const editMessageWithBranching = createAsyncThunk<
         }
       }
 
-const selectedFilesForChat = preSendSelectedFilesForChat
+      const selectedFilesForChat = preSendSelectedFilesForChat
 
-const conversationMeta = state.conversations.items.find(c => c.id === conversationId)
-// Use React Query cache as fallback for storage mode detection (handles local conversations not yet in Redux)
-const storageMode = conversationMeta?.storage_mode || getStorageModeFromCache(extra.queryClient, conversationId)
-// Keep cwd for tool execution context only (do not inject cwd into system prompt)
-const payloadCwd = typeof cwd === 'string' ? cwd.trim() : (cwd ?? null)
-const effectiveToolRootPath = payloadCwd || conversationMeta?.cwd || state.ideContext.workspace?.rootPath || null
-// Append custom tools explanation to system prompt
-systemPrompt = systemPrompt + '\n\n' + sysPromptConfig.customToolsPrompt
-const baseSystemPrompt = systemPrompt
+      const conversationMeta = state.conversations.items.find(c => c.id === conversationId)
+      // Use React Query cache as fallback for storage mode detection (handles local conversations not yet in Redux)
+      const storageMode = conversationMeta?.storage_mode || getStorageModeFromCache(extra.queryClient, conversationId)
+      // Keep cwd for tool execution context only (do not inject cwd into system prompt)
+      const payloadCwd = typeof cwd === 'string' ? cwd.trim() : (cwd ?? null)
+      const effectiveToolRootPath = payloadCwd || conversationMeta?.cwd || state.ideContext.workspace?.rootPath || null
+      // Append custom tools explanation to system prompt
+      systemPrompt = systemPrompt + '\n\n' + sysPromptConfig.customToolsPrompt
+      const baseSystemPrompt = systemPrompt
 
-// Determine execution mode
-const isElectronMode =
-  import.meta.env.VITE_ENVIRONMENT === 'electron' || (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__)
-const executionMode = 'client' // Prefer client execution for tools
+      // Determine execution mode
+      const isElectronMode =
+        import.meta.env.VITE_ENVIRONMENT === 'electron' || (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__)
+      const executionMode = 'client' // Prefer client execution for tools
       let currentTurnHistory = [...branchHistoryForSend]
       const pendingHookContextForNextTurn: string[] = []
       let currentTurnContent = await maybeApplyUserPromptSubmitHook({
@@ -5506,6 +5539,7 @@ const executionMode = 'client' // Prefer client execution for tools
 
       const shouldUseLmStudio = isElectronMode && isLmStudio
       const shouldUseOpenAIChatGPT = isElectronMode && isOpenAIChatGPT
+      const shouldUseZai = isElectronMode && isZai
 
       while (continueTurn && turnCount < MAX_TURNS) {
         turnCount++
@@ -5767,7 +5801,7 @@ const executionMode = 'client' // Prefer client execution for tools
         }
 
         // OpenAI ChatGPT branch: handle locally via OAuth tokens
-        if (shouldUseOpenAIChatGPT) {
+        if (shouldUseOpenAIChatGPT || shouldUseZai) {
           const toolNameById = buildToolNameMap(currentTurnHistory)
           // Synthesize user message locally on first turn
           if (turnCount === 1 && currentTurnContent && currentTurnContent.trim()) {
@@ -5909,15 +5943,17 @@ const executionMode = 'client' // Prefer client execution for tools
             }
           }
 
-          await createOpenAIChatGPTStreamingRequest(
+          await (shouldUseZai ? createZaiStreamingRequest : createOpenAIChatGPTStreamingRequest)(
             {
               conversationId,
               parentId: activeParentId,
               modelName,
               systemPrompt,
               messages: chatgptMessages,
-              attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined,
-              tools: getToolsForOpenAIChatGPT(),
+              ...(shouldUseZai
+                ? { userId: auth.userId, think }
+                : { attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined, serviceTier }),
+              tools: shouldUseZai ? getAllTools() : getToolsForOpenAIChatGPT(),
             },
             {
               onChunk: async chunk => {
@@ -5935,45 +5971,52 @@ const executionMode = 'client' // Prefer client execution for tools
                   const imageBlocks = Array.isArray((assistantMsg as any).content_blocks)
                     ? (assistantMsg as any).content_blocks.filter((block: any) => block?.type === 'image')
                     : []
-                  const syncGeneratedImagePaths = imageBlocks.length > 0
-                    ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
-                        message: assistantMsg,
-                        conversationId,
-                        authUserId: auth.userId,
-                        selectedProjectId: selectedProject?.id || null,
-                        storageMode,
-                        logPrefix: 'editMessageWithBranching][openai-chatgpt',
-                      })
-                    : (syncAssistantMessageLocallyInBackground({
-                        message: assistantMsg,
-                        conversationId,
-                        authUserId: auth.userId,
-                        selectedProjectId: selectedProject?.id || null,
-                        storageMode,
-                        logPrefix: 'editMessageWithBranching][openai-chatgpt',
-                      }), [])
+                  const syncGeneratedImagePaths =
+                    imageBlocks.length > 0
+                      ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
+                          message: assistantMsg,
+                          conversationId,
+                          authUserId: auth.userId,
+                          selectedProjectId: selectedProject?.id || null,
+                          storageMode,
+                          logPrefix: 'editMessageWithBranching][openai-chatgpt',
+                        })
+                      : (syncAssistantMessageLocallyInBackground({
+                          message: assistantMsg,
+                          conversationId,
+                          authUserId: auth.userId,
+                          selectedProjectId: selectedProject?.id || null,
+                          storageMode,
+                          logPrefix: 'editMessageWithBranching][openai-chatgpt',
+                        }),
+                        [])
                   const generatedImagePaths = Array.isArray((assistantMsg as any).generatedImageFilePaths)
-                    ? Array.from(new Set([...((assistantMsg as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
+                    ? Array.from(
+                        new Set([
+                          ...((assistantMsg as any).generatedImageFilePaths as string[]),
+                          ...syncGeneratedImagePaths,
+                        ])
+                      )
                     : syncGeneratedImagePaths
-                    if (imageBlocks.length > 0) {
-                      const hintMessage = await persistGeneratedImagePathHintMessage({
-                        dispatch,
-                        queryClient: extra.queryClient,
-                        conversationId,
-                        parentId: assistantMsg.id,
-                        modelName,
-                        authUserId: auth.userId,
-                        selectedProjectId: selectedProject?.id || null,
-                        storageMode,
-                        filePaths: generatedImagePaths,
-                        directoryHint: (assistantMsg as any).generatedImagesDirectoryHint,
-                      })
-                      if (hintMessage) {
-                        currentTurnHistory.push(hintMessage)
-                        messageId = hintMessage.id
-                      }
+                  if (imageBlocks.length > 0) {
+                    const hintMessage = await persistGeneratedImagePathHintMessage({
+                      dispatch,
+                      queryClient: extra.queryClient,
+                      conversationId,
+                      parentId: assistantMsg.id,
+                      modelName,
+                      authUserId: auth.userId,
+                      selectedProjectId: selectedProject?.id || null,
+                      storageMode,
+                      filePaths: generatedImagePaths,
+                      directoryHint: (assistantMsg as any).generatedImagesDirectoryHint,
+                    })
+                    if (hintMessage) {
+                      currentTurnHistory.push(hintMessage)
+                      messageId = hintMessage.id
                     }
-                    // Keep current streaming UI until the next generation_started event clears it.
+                  }
+                  // Keep current streaming UI until the next generation_started event clears it.
                 }
               },
               signal: controller.signal,
@@ -6272,7 +6315,7 @@ const executionMode = 'client' // Prefer client execution for tools
                     parentId: chunk.message.parent_id ?? activeParentId ?? null,
                     content: chunk.message?.content_plain_text || chunk.message?.content || newContent,
                     contextLabel: 'editMessageWithBranching',
-              skip: true,
+                    skip: true,
                   })
 
                   // Live-update: ensure the new branched user message shows all intended artifacts immediately
@@ -6644,7 +6687,7 @@ export const sendMessageToBranch = createAsyncThunk<
 >(
   'chat/sendMessageToBranch',
   async (
-    { conversationId, parentId, content, modelOverride, systemPrompt, think, cwd, streamId: providedStreamId },
+    { conversationId, parentId, content, modelOverride, systemPrompt, think, serviceTier, cwd, streamId: providedStreamId },
     { dispatch, getState, extra, rejectWithValue, signal }
   ) => {
     const { auth } = extra
@@ -6692,10 +6735,13 @@ export const sendMessageToBranch = createAsyncThunk<
       const providerRaw = state.chat.providerState.currentProvider || 'ollama'
       const appProvider = providerRaw.toLowerCase()
       const providerSlug = appProvider.replace(/\s+/g, '')
-      const serverProvider = providerSlug === 'google' ? 'gemini' : providerSlug
+      const serverProvider =
+        providerSlug === 'google' ? 'gemini' : /^(zai|glm|z\.ai)(\/glm)?$/.test(providerSlug) ? 'zai' : providerSlug
       const openRouterTemperature = resolveOpenRouterTemperature(providerSlug)
       const isLmStudio = providerSlug === 'lmstudio'
       const isOpenAIChatGPT = providerSlug === 'openaichatgpt' || providerSlug === 'openai(chatgpt)'
+      const isZai =
+        providerSlug === 'z.ai/glm' || providerSlug === 'zai/glm' || providerSlug === 'zai' || providerSlug === 'glm'
       const attachmentsBase64 = preSendAttachmentsBase64
 
       // Retrieve project and conversation context to send with branch message
@@ -6706,24 +6752,24 @@ export const sendMessageToBranch = createAsyncThunk<
         projectContext && conversationContextSource
           ? `${projectContext}\n\n${conversationContextSource}`
           : projectContext || conversationContextSource || null
-// Get selected files for chat captured before send start so UI can clear immediately
-const selectedFilesForChat = preSendSelectedFilesForChat
+      // Get selected files for chat captured before send start so UI can clear immediately
+      const selectedFilesForChat = preSendSelectedFilesForChat
 
-const conversationMeta = state.conversations.items.find(c => c.id === conversationId)
-// Use React Query cache as fallback for storage mode detection (handles local conversations not yet in Redux)
-const storageMode = conversationMeta?.storage_mode || getStorageModeFromCache(extra.queryClient, conversationId)
-// Keep cwd for tool execution context only (do not inject cwd into system prompt)
-let effectiveSystemPrompt = systemPrompt
-const payloadCwd = typeof cwd === 'string' ? cwd.trim() : (cwd ?? null)
-const effectiveToolRootPath = payloadCwd || conversationMeta?.cwd || state.ideContext.workspace?.rootPath || null
-// Append custom tools explanation to system prompt
-effectiveSystemPrompt = (effectiveSystemPrompt || '') + '\n\n' + sysPromptConfig.customToolsPrompt
-const baseSystemPrompt = effectiveSystemPrompt
+      const conversationMeta = state.conversations.items.find(c => c.id === conversationId)
+      // Use React Query cache as fallback for storage mode detection (handles local conversations not yet in Redux)
+      const storageMode = conversationMeta?.storage_mode || getStorageModeFromCache(extra.queryClient, conversationId)
+      // Keep cwd for tool execution context only (do not inject cwd into system prompt)
+      let effectiveSystemPrompt = systemPrompt
+      const payloadCwd = typeof cwd === 'string' ? cwd.trim() : (cwd ?? null)
+      const effectiveToolRootPath = payloadCwd || conversationMeta?.cwd || state.ideContext.workspace?.rootPath || null
+      // Append custom tools explanation to system prompt
+      effectiveSystemPrompt = (effectiveSystemPrompt || '') + '\n\n' + sysPromptConfig.customToolsPrompt
+      const baseSystemPrompt = effectiveSystemPrompt
 
-// Determine execution mode
-const isElectronMode =
-  import.meta.env.VITE_ENVIRONMENT === 'electron' || (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__)
-const executionMode = 'client'
+      // Determine execution mode
+      const isElectronMode =
+        import.meta.env.VITE_ENVIRONMENT === 'electron' || (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__)
+      const executionMode = 'client'
 
       const pendingHookContextForNextTurn: string[] = []
       let currentTurnContent = await maybeApplyUserPromptSubmitHook({
@@ -6771,9 +6817,13 @@ const executionMode = 'client'
         return history
       }
 
-      let currentTurnHistory = appendGeneratedImagePathHintsForHistory(buildHistoryFromParent(parentId), currentMessages)
+      let currentTurnHistory = appendGeneratedImagePathHintsForHistory(
+        buildHistoryFromParent(parentId),
+        currentMessages
+      )
       const shouldUseLmStudio = isElectronMode && isLmStudio
       const shouldUseOpenAIChatGPT = isElectronMode && isOpenAIChatGPT
+      const shouldUseZai = isElectronMode && isZai
 
       while (continueTurn && turnCount < MAX_TURNS) {
         turnCount++
@@ -7031,7 +7081,7 @@ const executionMode = 'client'
         }
 
         // OpenAI ChatGPT branch: handle locally via OAuth tokens
-        if (shouldUseOpenAIChatGPT) {
+        if (shouldUseOpenAIChatGPT || shouldUseZai) {
           const toolNameById = buildToolNameMap(currentTurnHistory)
           // Synthesize user message locally on first turn
           if (turnCount === 1 && currentTurnContent && currentTurnContent.trim()) {
@@ -7154,15 +7204,17 @@ const executionMode = 'client'
             }
           }
 
-          await createOpenAIChatGPTStreamingRequest(
+          await (shouldUseZai ? createZaiStreamingRequest : createOpenAIChatGPTStreamingRequest)(
             {
               conversationId,
               parentId: currentParentId,
               modelName,
               systemPrompt: effectiveSystemPrompt || '',
               messages: chatgptMessages,
-              attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined,
-              tools: getToolsForOpenAIChatGPT(),
+              ...(shouldUseZai
+                ? { userId: auth.userId, think }
+                : { attachmentsBase64: turnCount === 1 ? attachmentsBase64 : undefined, serviceTier }),
+              tools: shouldUseZai ? getAllTools() : getToolsForOpenAIChatGPT(),
             },
             {
               onChunk: async chunk => {
@@ -7179,45 +7231,52 @@ const executionMode = 'client'
                   const imageBlocks = Array.isArray((assistantMsg as any).content_blocks)
                     ? (assistantMsg as any).content_blocks.filter((block: any) => block?.type === 'image')
                     : []
-                  const syncGeneratedImagePaths = imageBlocks.length > 0
-                    ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
-                        message: assistantMsg,
-                        conversationId,
-                        authUserId: auth.userId,
-                        selectedProjectId: selectedProject?.id || null,
-                        storageMode,
-                        logPrefix: 'sendMessageToBranch][openai-chatgpt',
-                      })
-                    : (syncAssistantMessageLocallyInBackground({
-                        message: assistantMsg,
-                        conversationId,
-                        authUserId: auth.userId,
-                        selectedProjectId: selectedProject?.id || null,
-                        storageMode,
-                        logPrefix: 'sendMessageToBranch][openai-chatgpt',
-                      }), [])
+                  const syncGeneratedImagePaths =
+                    imageBlocks.length > 0
+                      ? await syncAssistantMessageLocallyAndGetGeneratedImagePaths({
+                          message: assistantMsg,
+                          conversationId,
+                          authUserId: auth.userId,
+                          selectedProjectId: selectedProject?.id || null,
+                          storageMode,
+                          logPrefix: 'sendMessageToBranch][openai-chatgpt',
+                        })
+                      : (syncAssistantMessageLocallyInBackground({
+                          message: assistantMsg,
+                          conversationId,
+                          authUserId: auth.userId,
+                          selectedProjectId: selectedProject?.id || null,
+                          storageMode,
+                          logPrefix: 'sendMessageToBranch][openai-chatgpt',
+                        }),
+                        [])
                   const generatedImagePaths = Array.isArray((assistantMsg as any).generatedImageFilePaths)
-                    ? Array.from(new Set([...((assistantMsg as any).generatedImageFilePaths as string[]), ...syncGeneratedImagePaths]))
+                    ? Array.from(
+                        new Set([
+                          ...((assistantMsg as any).generatedImageFilePaths as string[]),
+                          ...syncGeneratedImagePaths,
+                        ])
+                      )
                     : syncGeneratedImagePaths
-                    if (imageBlocks.length > 0) {
-                      const hintMessage = await persistGeneratedImagePathHintMessage({
-                        dispatch,
-                        queryClient: extra.queryClient,
-                        conversationId,
-                        parentId: assistantMsg.id,
-                        modelName,
-                        authUserId: auth.userId,
-                        selectedProjectId: selectedProject?.id || null,
-                        storageMode,
-                        filePaths: generatedImagePaths,
-                        directoryHint: (assistantMsg as any).generatedImagesDirectoryHint,
-                      })
-                      if (hintMessage) {
-                        currentTurnHistory.push(hintMessage)
-                        messageId = hintMessage.id
-                      }
+                  if (imageBlocks.length > 0) {
+                    const hintMessage = await persistGeneratedImagePathHintMessage({
+                      dispatch,
+                      queryClient: extra.queryClient,
+                      conversationId,
+                      parentId: assistantMsg.id,
+                      modelName,
+                      authUserId: auth.userId,
+                      selectedProjectId: selectedProject?.id || null,
+                      storageMode,
+                      filePaths: generatedImagePaths,
+                      directoryHint: (assistantMsg as any).generatedImagesDirectoryHint,
+                    })
+                    if (hintMessage) {
+                      currentTurnHistory.push(hintMessage)
+                      messageId = hintMessage.id
                     }
-                    // Keep current streaming UI until the next generation_started event clears it.
+                  }
+                  // Keep current streaming UI until the next generation_started event clears it.
                 }
               },
               signal: controller.signal,
@@ -7464,7 +7523,7 @@ const executionMode = 'client'
                     parentId: chunk.message.parent_id ?? currentParentId ?? null,
                     content: chunk.message?.content_plain_text || chunk.message?.content || content,
                     contextLabel: 'sendMessageToBranch',
-              skip: true,
+                    skip: true,
                   })
                 }
 
@@ -7788,7 +7847,6 @@ const executionMode = 'client'
       }
 
       dispatch(chatSliceActions.sendingCompleted({ streamId }))
-
 
       // Schedule stream cleanup after delay
       setTimeout(() => {
@@ -8177,7 +8235,9 @@ export const initializeUserAndConversation = createAsyncThunk<
         storage_mode: 'local',
       })
 
-      dispatch(chatSliceActions.initializationCompleted({ userId: String(auth.userId), conversationId: conversation.id }))
+      dispatch(
+        chatSliceActions.initializationCompleted({ userId: String(auth.userId), conversationId: conversation.id })
+      )
       return { userId: auth.userId, conversationId: conversation.id }
     }
 
@@ -8866,11 +8926,7 @@ export const sendHermesMessage = createAsyncThunk<
       let sawHermesIncrementalTextDelta = false
       const currentPath = getState().chat.conversation.currentPath
       const inferredParentId =
-        parentId !== undefined
-          ? parentId
-          : currentPath.length > 0
-            ? currentPath[currentPath.length - 1]
-            : null
+        parentId !== undefined ? parentId : currentPath.length > 0 ? currentPath[currentPath.length - 1] : null
 
       try {
         while (true) {
@@ -8906,9 +8962,7 @@ export const sendHermesMessage = createAsyncThunk<
                       ? rawToolCall.name
                       : 'hermes_permission',
                   arguments:
-                    rawToolCall.arguments && typeof rawToolCall.arguments === 'object'
-                      ? rawToolCall.arguments
-                      : {},
+                    rawToolCall.arguments && typeof rawToolCall.arguments === 'object' ? rawToolCall.arguments : {},
                   status: 'pending' as const,
                 }
 
@@ -8927,12 +8981,8 @@ export const sendHermesMessage = createAsyncThunk<
                   typeof event.tool_call_id === 'string' && event.tool_call_id.length > 0
                     ? event.tool_call_id
                     : uuidv4()
-                const toolName =
-                  typeof event.name === 'string' && event.name.length > 0 ? event.name : 'tool'
-                const toolArgs =
-                  event.arguments && typeof event.arguments === 'object'
-                    ? event.arguments
-                    : {}
+                const toolName = typeof event.name === 'string' && event.name.length > 0 ? event.name : 'tool'
+                const toolArgs = event.arguments && typeof event.arguments === 'object' ? event.arguments : {}
 
                 dispatch(
                   chatSliceActions.streamChunkReceived({
@@ -8956,8 +9006,7 @@ export const sendHermesMessage = createAsyncThunk<
                     typeof event.tool_call_id === 'string' && event.tool_call_id.length > 0
                       ? event.tool_call_id
                       : uuidv4(),
-                  tool_name:
-                    typeof event.name === 'string' && event.name.length > 0 ? event.name : 'tool',
+                  tool_name: typeof event.name === 'string' && event.name.length > 0 ? event.name : 'tool',
                   content:
                     typeof event.content === 'string'
                       ? event.content
@@ -9040,11 +9089,7 @@ export const sendHermesMessage = createAsyncThunk<
                 // Hermes ACP can emit a full assistant_message/final text event after
                 // native assistant_delta streaming. If we've already seen incremental text,
                 // skip the synthetic full-text replay to avoid duplicate output in UI.
-                if (
-                  normalizedPart === 'text' &&
-                  typeof normalizedDelta === 'string' &&
-                  normalizedDelta.length > 0
-                ) {
+                if (normalizedPart === 'text' && typeof normalizedDelta === 'string' && normalizedDelta.length > 0) {
                   if (normalizedChunkType === 'content_delta') {
                     sawHermesIncrementalTextDelta = true
                   }
@@ -9097,7 +9142,9 @@ export const sendHermesMessage = createAsyncThunk<
                   if (completedMessage) {
                     const normalizedCompletedMessage: Message = {
                       ...completedMessage,
-                      pastedContext: Array.isArray(completedMessage.pastedContext) ? completedMessage.pastedContext : [],
+                      pastedContext: Array.isArray(completedMessage.pastedContext)
+                        ? completedMessage.pastedContext
+                        : [],
                       artifacts: Array.isArray(completedMessage.artifacts) ? completedMessage.artifacts : [],
                     }
 
@@ -9159,7 +9206,6 @@ export const sendHermesMessage = createAsyncThunk<
       }
 
       dispatch(chatSliceActions.sendingCompleted({ streamId }))
-
 
       setTimeout(() => {
         dispatch(chatSliceActions.streamPruned({ streamId }))
@@ -9408,7 +9454,6 @@ export const sendCCMessage = createAsyncThunk<
       }
 
       dispatch(chatSliceActions.sendingCompleted({ streamId }))
-
 
       // Schedule stream cleanup after delay
       setTimeout(() => {
@@ -9660,7 +9705,6 @@ export const sendCCBranch = createAsyncThunk<
       }
 
       dispatch(chatSliceActions.sendingCompleted({ streamId }))
-
 
       // Schedule stream cleanup after delay
       setTimeout(() => {

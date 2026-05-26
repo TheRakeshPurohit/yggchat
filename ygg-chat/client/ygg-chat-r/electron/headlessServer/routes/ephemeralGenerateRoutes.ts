@@ -1,6 +1,7 @@
 import type { Express } from 'express'
 import { normalizeAuthorizationToken, syncOpenRouterTokenFromElectronSession } from '../providers/electronAppAuth.js'
 import { LmStudioProvider } from '../providers/lmStudioProvider.js'
+import { HyperRouterZaiProvider } from '../providers/hyperRouterZaiProvider.js'
 import { OpenAiChatgptProvider } from '../providers/openaiChatgptProvider.js'
 import type { ProviderGenerateOutput, ProviderToolDefinition } from '../providers/openRouterProvider.js'
 import type { ProviderTokenStore } from '../providers/tokenStore.js'
@@ -25,6 +26,7 @@ type EphemeralGenerateInput = {
   maxTokens?: number
   temperature?: number
   responseFormat?: any
+  think?: boolean
 }
 
 function normalizeTools(raw: any): InferenceToolDefinition[] | undefined {
@@ -82,6 +84,7 @@ function inferEphemeralProvider(body: any): ProviderRoute {
     const prefix = rawModel.split('/')[0]?.trim().toLowerCase() || ''
     if (prefix === 'openai' || prefix === 'openaichatgpt') return 'openaichatgpt'
     if (prefix === 'lmstudio') return 'lmstudio'
+    if (prefix === 'zai' || prefix === 'glm' || prefix === 'z.ai') return 'zai'
     return 'openrouter'
   }
 
@@ -89,7 +92,7 @@ function inferEphemeralProvider(body: any): ProviderRoute {
 }
 
 function normalizeModelName(rawModelName: any, provider: ProviderRoute): string {
-  const fallback = provider === 'lmstudio' ? 'local-model' : provider === 'openrouter' ? 'openai/gpt-4o-mini' : 'gpt-5.4'
+  const fallback = provider === 'lmstudio' ? 'local-model' : provider === 'openrouter' ? 'openai/gpt-4o-mini' : provider === 'zai' ? 'glm-5.1' : 'gpt-5.4'
   const raw = typeof rawModelName === 'string' && rawModelName.trim() ? rawModelName.trim() : fallback
 
   if (provider === 'openaichatgpt') {
@@ -98,6 +101,10 @@ function normalizeModelName(rawModelName: any, provider: ProviderRoute): string 
 
   if (provider === 'lmstudio') {
     return raw.replace(/^lmstudio\//i, '') || fallback
+  }
+
+  if (provider === 'zai') {
+    return raw.replace(/^(zai|glm|z\.ai)\//i, '') || fallback
   }
 
   return raw
@@ -121,6 +128,7 @@ function buildEphemeralGenerateInput(body: any): EphemeralGenerateInput {
     maxTokens: typeof body?.maxTokens === 'number' ? body.maxTokens : undefined,
     temperature: typeof body?.temperature === 'number' ? body.temperature : undefined,
     responseFormat: body?.response_format ?? body?.responseFormat,
+    think: Boolean(body?.think),
   }
 }
 
@@ -139,8 +147,8 @@ function buildSuccessPayload(provider: ProviderRoute, modelName: string, upstrea
 }
 
 async function runLocalProviderGenerate(
-  providerName: 'openaichatgpt' | 'lmstudio',
-  provider: OpenAiChatgptProvider | LmStudioProvider,
+  providerName: 'openaichatgpt' | 'lmstudio' | 'zai',
+  provider: OpenAiChatgptProvider | LmStudioProvider | HyperRouterZaiProvider,
   body: any
 ) {
   const parsed = buildEphemeralGenerateInput(body)
@@ -166,11 +174,13 @@ async function runLocalProviderGenerate(
     accountId: parsed.accountId,
     systemPrompt: parsed.systemPrompt,
     tools: parsed.tools,
+    think: parsed.think,
+    temperature: parsed.temperature,
   })
 
   return {
     status: 200 as const,
-    payload: buildSuccessPayload(providerName, parsed.modelName, providerName === 'lmstudio' ? 'chat_completions' : 'responses', generated),
+    payload: buildSuccessPayload(providerName, parsed.modelName, providerName === 'lmstudio' || providerName === 'zai' ? 'chat_completions' : 'responses', generated),
   }
 }
 
@@ -331,7 +341,8 @@ function registerEphemeralChatHandler(
   app: Express,
   tokenStore: ProviderTokenStore,
   openAiProvider: OpenAiChatgptProvider,
-  lmStudioProvider: LmStudioProvider
+  lmStudioProvider: LmStudioProvider,
+  zaiProvider: HyperRouterZaiProvider
 ): void {
   app.post('/api/headless/ephemeral/chat', async (req, res) => {
     try {
@@ -343,7 +354,9 @@ function registerEphemeralChatHandler(
           ? await runRemoteOpenRouterEphemeralGenerate(tokenStore, body)
           : provider === 'lmstudio'
             ? await runLocalProviderGenerate('lmstudio', lmStudioProvider, body)
-            : await runLocalProviderGenerate('openaichatgpt', openAiProvider, body)
+            : provider === 'zai'
+              ? await runLocalProviderGenerate('zai', zaiProvider, body)
+              : await runLocalProviderGenerate('openaichatgpt', openAiProvider, body)
 
       if ('error' in result) {
         res.status(result.status).json({ success: false, error: result.error })
@@ -401,8 +414,9 @@ function registerYggHookGenerateRoute(app: Express, openAiProvider: OpenAiChatgp
 export function registerEphemeralGenerateRoutes(app: Express, deps: RegisterEphemeralGenerateRoutesDeps): void {
   const openAiProvider = new OpenAiChatgptProvider({ tokenStore: deps.tokenStore })
   const lmStudioProvider = new LmStudioProvider()
+  const zaiProvider = new HyperRouterZaiProvider({ tokenStore: deps.tokenStore })
 
   registerDirectOpenAiGenerateHandler(app, '/api/headless/provider/openai/responses', openAiProvider)
-  registerEphemeralChatHandler(app, deps.tokenStore, openAiProvider, lmStudioProvider)
+  registerEphemeralChatHandler(app, deps.tokenStore, openAiProvider, lmStudioProvider, zaiProvider)
   registerYggHookGenerateRoute(app, openAiProvider)
 }

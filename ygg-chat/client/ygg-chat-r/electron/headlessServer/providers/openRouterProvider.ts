@@ -26,7 +26,10 @@ export interface ProviderRailwayTurnInput {
   isElectron?: boolean
   imageConfig?: any
   reasoningConfig?: any
+  serviceTier?: 'priority'
   openaiHostedTools?: any
+  promptCacheRetention?: 'in_memory' | '24h'
+  previousResponseId?: string | null
 }
 
 export interface ProviderGenerateInput {
@@ -38,6 +41,8 @@ export interface ProviderGenerateInput {
   accessToken?: string | null
   accountId?: string | null
   tools?: ProviderToolDefinition[]
+  think?: boolean
+  temperature?: number
   railwayTurn?: ProviderRailwayTurnInput | null
 }
 

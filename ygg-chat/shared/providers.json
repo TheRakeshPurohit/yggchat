@@ -16,6 +16,12 @@
       "name": "OpenAI (ChatGPT)",
       "url": "https://chatgpt.com/backend-api",
       "description": "OpenAI ChatGPT Plus/Pro (local only, uses your subscription)"
+    },
+
+    "zai": {
+      "name": "Z.AI / GLM",
+      "url": "https://api.z.ai",
+      "description": "Z.AI GLM models via local BYOK headless provider"
     }
   }
 }

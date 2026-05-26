@@ -31,6 +31,9 @@ export const STREAMING_LIGHT_COLOR_STORAGE_KEY = 'chat:streamingAnimationLightCo
 export const STREAMING_DARK_COLOR_STORAGE_KEY = 'chat:streamingAnimationDarkColor'
 export const STREAMING_SPEED_STORAGE_KEY = 'chat:streamingAnimationSpeed'
 
+export const DEFAULT_STREAMING_LIGHT_COLOR = '#3b82f6'
+export const DEFAULT_STREAMING_DARK_COLOR = '#f97316'
+
 const SEND_BUTTON_ANIMATIONS: { id: SendButtonAnimationType; name: string }[] = [
   { id: 'pulse-orbit', name: 'Pulse Orbit' },
   { id: 'ellipsis-flow', name: 'Ellipsis Flow' },
@@ -136,7 +139,7 @@ export const getStoredStreamingColor = (): string => {
   } catch {
     // Ignore localStorage errors
   }
-  return '#ef4444'
+  return DEFAULT_STREAMING_LIGHT_COLOR
 }
 
 export const getStoredStreamingLightColor = (): string => {
@@ -148,7 +151,7 @@ export const getStoredStreamingLightColor = (): string => {
   } catch {
     // Ignore localStorage errors
   }
-  return '#ef4444'
+  return DEFAULT_STREAMING_LIGHT_COLOR
 }
 
 export const getStoredStreamingDarkColor = (): string => {
@@ -160,7 +163,7 @@ export const getStoredStreamingDarkColor = (): string => {
   } catch {
     // Ignore localStorage errors
   }
-  return '#ffffff'
+  return DEFAULT_STREAMING_DARK_COLOR
 }
 
 export const getStoredStreamingSpeed = (): number => {
@@ -882,7 +885,7 @@ export const StreamingLoadingAnimation: React.FC<{
   color?: string
   speed?: number
   className?: string
-}> = ({ animationType, color = '#ef4444', speed = 1, className }) => (
+}> = ({ animationType, color = DEFAULT_STREAMING_LIGHT_COLOR, speed = 1, className }) => (
   <StreamingAnimationVisual
     animationType={animationType}
     color={color}

@@ -28,9 +28,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// ../../node_modules/react/cjs/react.production.js
+// node_modules/react/cjs/react.production.js
 var require_react_production = __commonJS({
-  "../../node_modules/react/cjs/react.production.js"(exports) {
+  "node_modules/react/cjs/react.production.js"(exports) {
     "use strict";
     var REACT_ELEMENT_TYPE = /* @__PURE__ */ Symbol.for("react.transitional.element");
     var REACT_PORTAL_TYPE = /* @__PURE__ */ Symbol.for("react.portal");
@@ -469,9 +469,9 @@ var require_react_production = __commonJS({
   }
 });
 
-// ../../node_modules/react/index.js
+// node_modules/react/index.js
 var require_react = __commonJS({
-  "../../node_modules/react/index.js"(exports, module) {
+  "node_modules/react/index.js"(exports, module) {
     "use strict";
     if (true) {
       module.exports = require_react_production();
@@ -481,9 +481,9 @@ var require_react = __commonJS({
   }
 });
 
-// ../../node_modules/scheduler/cjs/scheduler.production.js
+// node_modules/scheduler/cjs/scheduler.production.js
 var require_scheduler_production = __commonJS({
-  "../../node_modules/scheduler/cjs/scheduler.production.js"(exports) {
+  "node_modules/scheduler/cjs/scheduler.production.js"(exports) {
     "use strict";
     function push2(heap, node2) {
       var index3 = heap.length;
@@ -754,9 +754,9 @@ var require_scheduler_production = __commonJS({
   }
 });
 
-// ../../node_modules/scheduler/index.js
+// node_modules/scheduler/index.js
 var require_scheduler = __commonJS({
-  "../../node_modules/scheduler/index.js"(exports, module) {
+  "node_modules/scheduler/index.js"(exports, module) {
     "use strict";
     if (true) {
       module.exports = require_scheduler_production();
@@ -766,9 +766,9 @@ var require_scheduler = __commonJS({
   }
 });
 
-// ../../node_modules/react-dom/cjs/react-dom.production.js
+// node_modules/react-dom/cjs/react-dom.production.js
 var require_react_dom_production = __commonJS({
-  "../../node_modules/react-dom/cjs/react-dom.production.js"(exports) {
+  "node_modules/react-dom/cjs/react-dom.production.js"(exports) {
     "use strict";
     var React24 = require_react();
     function formatProdErrorMessage(code4) {
@@ -915,9 +915,9 @@ var require_react_dom_production = __commonJS({
   }
 });
 
-// ../../node_modules/react-dom/index.js
+// node_modules/react-dom/index.js
 var require_react_dom = __commonJS({
-  "../../node_modules/react-dom/index.js"(exports, module) {
+  "node_modules/react-dom/index.js"(exports, module) {
     "use strict";
     function checkDCE() {
       if (typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ === "undefined" || typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.checkDCE !== "function") {
@@ -941,9 +941,9 @@ var require_react_dom = __commonJS({
   }
 });
 
-// ../../node_modules/react-dom/cjs/react-dom-client.production.js
+// node_modules/react-dom/cjs/react-dom-client.production.js
 var require_react_dom_client_production = __commonJS({
-  "../../node_modules/react-dom/cjs/react-dom-client.production.js"(exports) {
+  "node_modules/react-dom/cjs/react-dom-client.production.js"(exports) {
     "use strict";
     var Scheduler = require_scheduler();
     var React24 = require_react();
@@ -12682,9 +12682,9 @@ var require_react_dom_client_production = __commonJS({
   }
 });
 
-// ../../node_modules/react-dom/client.js
+// node_modules/react-dom/client.js
 var require_client = __commonJS({
-  "../../node_modules/react-dom/client.js"(exports, module) {
+  "node_modules/react-dom/client.js"(exports, module) {
     "use strict";
     function checkDCE() {
       if (typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ === "undefined" || typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.checkDCE !== "function") {
@@ -12946,9 +12946,9 @@ var require_cjs3 = __commonJS({
   }
 });
 
-// ../../node_modules/react/cjs/react-jsx-runtime.production.js
+// node_modules/react/cjs/react-jsx-runtime.production.js
 var require_react_jsx_runtime_production = __commonJS({
-  "../../node_modules/react/cjs/react-jsx-runtime.production.js"(exports) {
+  "node_modules/react/cjs/react-jsx-runtime.production.js"(exports) {
     "use strict";
     var REACT_ELEMENT_TYPE = /* @__PURE__ */ Symbol.for("react.transitional.element");
     var REACT_FRAGMENT_TYPE = /* @__PURE__ */ Symbol.for("react.fragment");
@@ -12976,9 +12976,9 @@ var require_react_jsx_runtime_production = __commonJS({
   }
 });
 
-// ../../node_modules/react/jsx-runtime.js
+// node_modules/react/jsx-runtime.js
 var require_jsx_runtime = __commonJS({
-  "../../node_modules/react/jsx-runtime.js"(exports, module) {
+  "node_modules/react/jsx-runtime.js"(exports, module) {
     "use strict";
     if (true) {
       module.exports = require_react_jsx_runtime_production();
@@ -49272,7 +49272,9 @@ var mobileApi = {
     const query = typeof userId === "string" && userId.trim() ? `?userId=${encodeURIComponent(userId.trim())}` : "";
     const payload = await jsonFetch(`/api/provider-auth/models${query}`, { method: "GET" });
     return Array.isArray(payload?.providers) ? payload.providers.filter(
-      (provider) => Boolean(provider && (provider.name === "openaichatgpt" || provider.name === "openrouter" || provider.name === "lmstudio"))
+      (provider) => Boolean(
+        provider && (provider.name === "openaichatgpt" || provider.name === "openrouter" || provider.name === "lmstudio" || provider.name === "zai")
+      )
     ).map((provider) => ({
       name: provider.name,
       models: Array.isArray(provider.models) ? provider.models.map((model) => String(model)) : []
@@ -49314,6 +49316,9 @@ var mobileApi = {
   async getOpenRouterTokenStatus(userId) {
     return this.getProviderTokenStatus("openrouter", userId);
   },
+  async getZaiTokenStatus(userId) {
+    return this.getProviderTokenStatus("zai", userId);
+  },
   async getRuntimeAppAuth() {
     const session = await readRuntimeAppSession();
     return {
@@ -49332,6 +49337,9 @@ var mobileApi = {
   },
   async clearOpenRouterToken(userId) {
     await this.clearProviderToken("openrouter", userId);
+  },
+  async clearZaiToken(userId) {
+    await this.clearProviderToken("zai", userId);
   },
   async startOpenAiOAuth() {
     const payload = await jsonFetch(
@@ -49382,6 +49390,15 @@ var mobileApi = {
   },
   async storeOpenRouterToken(params) {
     await jsonFetch("/api/provider-auth/openrouter/token", {
+      method: "POST",
+      body: JSON.stringify({
+        userId: params.userId,
+        accessToken: params.accessToken
+      })
+    });
+  },
+  async storeZaiToken(params) {
+    await jsonFetch("/api/provider-auth/zai/token", {
       method: "POST",
       body: JSON.stringify({
         userId: params.userId,
@@ -49477,7 +49494,7 @@ var import_react7 = __toESM(require_react(), 1);
 // electron/headlessServer/ui/mobile/src/components/ui/badge.tsx
 var import_react = __toESM(require_react(), 1);
 
-// ../../node_modules/clsx/dist/clsx.mjs
+// node_modules/clsx/dist/clsx.mjs
 function r(e) {
   var t, f, n = "";
   if ("string" == typeof e || "number" == typeof e) n += e;
@@ -49603,7 +49620,7 @@ var import_react_dom2 = __toESM(require_react_dom(), 1);
 var import_react19 = __toESM(require_react(), 1);
 var import_react_dom = __toESM(require_react_dom(), 1);
 
-// ../../node_modules/@monaco-editor/loader/lib/es/_virtual/_rollupPluginBabelHelpers.js
+// node_modules/@monaco-editor/loader/lib/es/_virtual/_rollupPluginBabelHelpers.js
 function _arrayLikeToArray(r2, a) {
   (null == a || a > r2.length) && (a = r2.length);
   for (var e = 0, n = Array(a); e < a; e++) n[e] = r2[e];
@@ -49706,7 +49723,7 @@ function _unsupportedIterableToArray(r2, a) {
   }
 }
 
-// ../../node_modules/state-local/lib/es/state-local.js
+// node_modules/state-local/lib/es/state-local.js
 function _defineProperty2(obj, key, value) {
   if (key in obj) {
     Object.defineProperty(obj, key, {
@@ -49868,14 +49885,14 @@ var index = {
 };
 var state_local_default = index;
 
-// ../../node_modules/@monaco-editor/loader/lib/es/config/index.js
+// node_modules/@monaco-editor/loader/lib/es/config/index.js
 var config = {
   paths: {
     vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs"
   }
 };
 
-// ../../node_modules/@monaco-editor/loader/lib/es/utils/curry.js
+// node_modules/@monaco-editor/loader/lib/es/utils/curry.js
 function curry2(fn) {
   return function curried() {
     var _this = this;
@@ -49891,12 +49908,12 @@ function curry2(fn) {
   };
 }
 
-// ../../node_modules/@monaco-editor/loader/lib/es/utils/isObject.js
+// node_modules/@monaco-editor/loader/lib/es/utils/isObject.js
 function isObject2(value) {
   return {}.toString.call(value).includes("Object");
 }
 
-// ../../node_modules/@monaco-editor/loader/lib/es/validators/index.js
+// node_modules/@monaco-editor/loader/lib/es/validators/index.js
 function validateConfig(config3) {
   if (!config3) errorHandler2("configIsRequired");
   if (!isObject2(config3)) errorHandler2("configType");
@@ -49927,7 +49944,7 @@ var validators2 = {
   config: validateConfig
 };
 
-// ../../node_modules/@monaco-editor/loader/lib/es/utils/compose.js
+// node_modules/@monaco-editor/loader/lib/es/utils/compose.js
 var compose2 = function compose3() {
   for (var _len = arguments.length, fns = new Array(_len), _key = 0; _key < _len; _key++) {
     fns[_key] = arguments[_key];
@@ -49939,7 +49956,7 @@ var compose2 = function compose3() {
   };
 };
 
-// ../../node_modules/@monaco-editor/loader/lib/es/utils/deepMerge.js
+// node_modules/@monaco-editor/loader/lib/es/utils/deepMerge.js
 function merge(target, source) {
   Object.keys(source).forEach(function(key) {
     if (source[key] instanceof Object) {
@@ -49951,7 +49968,7 @@ function merge(target, source) {
   return _objectSpread2(_objectSpread2({}, target), source);
 }
 
-// ../../node_modules/@monaco-editor/loader/lib/es/utils/makeCancelable.js
+// node_modules/@monaco-editor/loader/lib/es/utils/makeCancelable.js
 var CANCELATION_MESSAGE = {
   type: "cancelation",
   msg: "operation is manually canceled"
@@ -49969,7 +49986,7 @@ function makeCancelable(promise) {
   }, wrappedPromise;
 }
 
-// ../../node_modules/@monaco-editor/loader/lib/es/loader/index.js
+// node_modules/@monaco-editor/loader/lib/es/loader/index.js
 var _excluded = ["monaco"];
 var _state$create = state_local_default.create({
   config,
@@ -50082,7 +50099,7 @@ var loader = {
   __getMonacoInstance
 };
 
-// ../../node_modules/@monaco-editor/react/dist/index.mjs
+// node_modules/@monaco-editor/react/dist/index.mjs
 var import_react8 = __toESM(require_react(), 1);
 var import_react9 = __toESM(require_react(), 1);
 var import_react10 = __toESM(require_react(), 1);
@@ -65172,7 +65189,8 @@ var ToolTogglePanel = ({
 var PROVIDER_LABELS = {
   openaichatgpt: "OpenAI ChatGPT",
   openrouter: "OpenRouter",
-  lmstudio: "LM Studio"
+  lmstudio: "LM Studio",
+  zai: "Z.AI / GLM"
 };
 var MobileHeader = ({
   providerName,
@@ -65192,11 +65210,14 @@ var MobileHeader = ({
   selectorsDisabled = false,
   openAiAuthenticated,
   openRouterAuthenticated,
+  zaiAuthenticated,
   openAiBusy,
   hasPendingOpenAiFlow,
   onOpenAiLoginStart,
   onOpenAiLoginComplete,
   onOpenAiLogout,
+  onZaiTokenSet,
+  onZaiTokenClear,
   customTools,
   customToolBusyNames,
   customToolsLoading,
@@ -65241,11 +65262,17 @@ var MobileHeader = ({
         className: openRouterAuthenticated ? "connected" : "disconnected"
       };
     }
+    if (providerName === "zai") {
+      return {
+        label: `Z.AI ${zaiAuthenticated ? "connected" : "not connected"}`,
+        className: zaiAuthenticated ? "connected" : "disconnected"
+      };
+    }
     return {
       label: "LM Studio local provider",
       className: "connected"
     };
-  }, [providerName, openAiAuthenticated, openRouterAuthenticated]);
+  }, [providerName, openAiAuthenticated, openRouterAuthenticated, zaiAuthenticated]);
   (0, import_react33.useEffect)(() => {
     if (!settingsOpen) {
       setModelSearch("");
@@ -65329,7 +65356,7 @@ var MobileHeader = ({
         size: "sm"
       },
       "Complete sign-in"
-    )) : /* @__PURE__ */ import_react33.default.createElement(Button, { onClick: onOpenAiLogout, disabled: openAiBusy, variant: "outline", size: "sm" }, "Sign out OpenAI") : providerName === "openrouter" ? /* @__PURE__ */ import_react33.default.createElement("span", { className: "mobile-conversation-cwd-hint" }, "OpenRouter uses your stored app token.") : /* @__PURE__ */ import_react33.default.createElement("span", { className: "mobile-conversation-cwd-hint" }, "LM Studio uses your local runtime. No remote auth needed.")), /* @__PURE__ */ import_react33.default.createElement("section", { className: "mobile-settings-collapsible" }, /* @__PURE__ */ import_react33.default.createElement(
+    )) : /* @__PURE__ */ import_react33.default.createElement(Button, { onClick: onOpenAiLogout, disabled: openAiBusy, variant: "outline", size: "sm" }, "Sign out OpenAI") : providerName === "openrouter" ? /* @__PURE__ */ import_react33.default.createElement("span", { className: "mobile-conversation-cwd-hint" }, "OpenRouter uses your stored app token.") : providerName === "zai" ? zaiAuthenticated ? /* @__PURE__ */ import_react33.default.createElement(import_react33.default.Fragment, null, /* @__PURE__ */ import_react33.default.createElement(Button, { onClick: onZaiTokenSet, variant: "secondary", size: "sm" }, "Replace Z.AI key"), /* @__PURE__ */ import_react33.default.createElement(Button, { onClick: onZaiTokenClear, variant: "outline", size: "sm" }, "Clear Z.AI key")) : /* @__PURE__ */ import_react33.default.createElement(Button, { onClick: onZaiTokenSet, variant: "secondary", size: "sm" }, "Enter Z.AI API key") : /* @__PURE__ */ import_react33.default.createElement("span", { className: "mobile-conversation-cwd-hint" }, "LM Studio uses your local runtime. No remote auth needed.")), /* @__PURE__ */ import_react33.default.createElement("section", { className: "mobile-settings-collapsible" }, /* @__PURE__ */ import_react33.default.createElement(
       "button",
       {
         type: "button",
@@ -65572,7 +65599,7 @@ var normalizeCwd = (value) => {
   return trimmed.length > 0 ? trimmed : null;
 };
 var normalizeProviderName = (value) => {
-  if (value === "openrouter" || value === "lmstudio" || value === "openaichatgpt") return value;
+  if (value === "openrouter" || value === "lmstudio" || value === "openaichatgpt" || value === "zai") return value;
   return DEFAULT_PROVIDER;
 };
 var clampAgentTextFontSize = (value) => {
@@ -65771,6 +65798,7 @@ var App = () => {
   const [composerBlockModal, setComposerBlockModal] = (0, import_react35.useState)(null);
   const [openAiConnected, setOpenAiConnected] = (0, import_react35.useState)(false);
   const [openRouterConnected, setOpenRouterConnected] = (0, import_react35.useState)(false);
+  const [zaiConnected, setZaiConnected] = (0, import_react35.useState)(false);
   const [openAiBusy, setOpenAiBusy] = (0, import_react35.useState)(false);
   const [pendingOpenAiState, setPendingOpenAiState] = (0, import_react35.useState)(null);
   const [customTools, setCustomTools] = (0, import_react35.useState)([]);
@@ -65819,8 +65847,8 @@ var App = () => {
     const models = providerModels.find((provider) => provider.name === selectedProvider)?.models || [];
     return models.length > 0 ? models : [modelName];
   }, [providerModels, selectedProvider, modelName]);
-  const selectedProviderRequiresAuth = selectedProvider === "openaichatgpt" || selectedProvider === "openrouter";
-  const selectedProviderAuthenticated = selectedProvider === "openaichatgpt" ? openAiConnected : selectedProvider === "openrouter" ? openRouterConnected : true;
+  const selectedProviderRequiresAuth = selectedProvider === "openaichatgpt" || selectedProvider === "openrouter" || selectedProvider === "zai";
+  const selectedProviderAuthenticated = selectedProvider === "openaichatgpt" ? openAiConnected : selectedProvider === "openrouter" ? openRouterConnected : selectedProvider === "zai" ? zaiConnected : true;
   const composerDisabledReason = (0, import_react35.useMemo)(() => {
     if (!selectedUserId) {
       return {
@@ -65835,7 +65863,7 @@ var App = () => {
       };
     }
     if (selectedProviderRequiresAuth && !selectedProviderAuthenticated) {
-      const providerLabel = selectedProvider === "openaichatgpt" ? "OpenAI" : "OpenRouter";
+      const providerLabel = selectedProvider === "openaichatgpt" ? "OpenAI" : selectedProvider === "zai" ? "Z.AI" : "OpenRouter";
       return {
         title: `${providerLabel} is not connected`,
         message: `This provider requires authentication. Open Settings and sign in to ${providerLabel}, then try again.`
@@ -65984,6 +66012,14 @@ var App = () => {
       setOpenRouterConnected(false);
     }
   };
+  const refreshZaiStatus = async (userId) => {
+    try {
+      const status = await mobileApi.getZaiTokenStatus(userId);
+      setZaiConnected(Boolean(status.hasToken));
+    } catch {
+      setZaiConnected(false);
+    }
+  };
   const loadCustomTools = async () => {
     setCustomToolsLoading(true);
     try {
@@ -66081,6 +66117,34 @@ var App = () => {
       setStatusText(error instanceof Error ? error.message : String(error));
     } finally {
       setOpenAiBusy(false);
+    }
+  };
+  const handleZaiTokenSet = async () => {
+    if (!selectedUserId) {
+      setStatusText("Select a user profile first");
+      return;
+    }
+    const apiKey = window.prompt("Enter your Z.AI API key. It will be stored locally for this user.")?.trim();
+    if (!apiKey) return;
+    try {
+      await mobileApi.storeZaiToken({ userId: selectedUserId, accessToken: apiKey });
+      setZaiConnected(true);
+      setStatusText("Z.AI connected");
+    } catch (error) {
+      setStatusText(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const handleZaiTokenClear = async () => {
+    if (!selectedUserId) {
+      setStatusText("Select a user profile first");
+      return;
+    }
+    try {
+      await mobileApi.clearZaiToken(selectedUserId);
+      setZaiConnected(false);
+      setStatusText("Z.AI disconnected");
+    } catch (error) {
+      setStatusText(error instanceof Error ? error.message : String(error));
     }
   };
   const handleCreateProject = async () => {
@@ -66302,6 +66366,7 @@ ${nextPath}`;
       setBranchSourceMessage(null);
       setOpenAiConnected(false);
       setOpenRouterConnected(false);
+      setZaiConnected(false);
       setPendingOpenAiState(null);
       setConversationSystemPromptInput("");
       setConversationContextInput("");
@@ -66317,6 +66382,8 @@ ${nextPath}`;
         await refreshOpenAiStatus(selectedUserId);
         if (cancelled) return;
         await refreshOpenRouterStatus(selectedUserId);
+        if (cancelled) return;
+        await refreshZaiStatus(selectedUserId);
         if (cancelled) return;
         const listedProviderModels = await mobileApi.getProviderModels(selectedUserId);
         if (cancelled) return;
@@ -66553,7 +66620,7 @@ ${nextPath}`;
     MobileHeader,
     {
       providerName: selectedProvider,
-      providerOptions: providerModels.length > 0 ? providerModels.map((provider) => provider.name) : ["openaichatgpt", "openrouter", "lmstudio"],
+      providerOptions: providerModels.length > 0 ? providerModels.map((provider) => provider.name) : ["openaichatgpt", "openrouter", "lmstudio", "zai"],
       modelName,
       modelOptions: availableModelOptions,
       statusText,
@@ -66569,11 +66636,14 @@ ${nextPath}`;
       selectorsDisabled: sending,
       openAiAuthenticated: openAiConnected,
       openRouterAuthenticated: openRouterConnected,
+      zaiAuthenticated: zaiConnected,
       openAiBusy,
       hasPendingOpenAiFlow: Boolean(pendingOpenAiState),
       onOpenAiLoginStart: handleOpenAiLoginStart,
       onOpenAiLoginComplete: handleOpenAiLoginComplete,
       onOpenAiLogout: handleOpenAiLogout,
+      onZaiTokenSet: handleZaiTokenSet,
+      onZaiTokenClear: handleZaiTokenClear,
       customTools,
       customToolBusyNames,
       customToolsLoading,

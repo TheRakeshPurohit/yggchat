@@ -225,6 +225,10 @@ const Settings: React.FC = () => {
   const [braveApiKeyConfigured, setBraveApiKeyConfigured] = useState(false)
   const [braveApiKeyLoading, setBraveApiKeyLoading] = useState(import.meta.env.VITE_ENVIRONMENT === 'electron')
   const [braveApiKeySaving, setBraveApiKeySaving] = useState(false)
+  const [zaiApiKeyInput, setZaiApiKeyInput] = useState('')
+  const [zaiApiKeyConfigured, setZaiApiKeyConfigured] = useState(false)
+  const [zaiApiKeyLoading, setZaiApiKeyLoading] = useState(import.meta.env.VITE_ENVIRONMENT === 'electron')
+  const [zaiApiKeySaving, setZaiApiKeySaving] = useState(false)
   const [openRouterTemperatureInput, setOpenRouterTemperatureInput] = useState<string>(() => {
     const configured = loadProviderSettings().openRouterTemperature
     return typeof configured === 'number' ? String(configured) : ''
@@ -518,6 +522,37 @@ const Settings: React.FC = () => {
   }, [])
 
   useEffect(() => {
+    if (import.meta.env.VITE_ENVIRONMENT !== 'electron') {
+      setZaiApiKeyLoading(false)
+      return
+    }
+
+    let active = true
+    const effectiveUserId = userId || LOCAL_AUTH_USER_ID
+
+    localApi
+      .get<{ success?: boolean; hasToken?: boolean }>(`/provider-auth/zai/token?userId=${encodeURIComponent(effectiveUserId)}`)
+      .then(status => {
+        if (!active) return
+        setZaiApiKeyConfigured(Boolean(status?.hasToken))
+        setZaiApiKeyInput('')
+      })
+      .catch(error => {
+        if (active) {
+          console.error('Failed to load Z.AI token status:', error)
+          setZaiApiKeyConfigured(false)
+        }
+      })
+      .finally(() => {
+        if (active) setZaiApiKeyLoading(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [userId])
+
+  useEffect(() => {
     if (openRouterTemperatureTouched) return
     const configured = providerSettings.openRouterTemperature
     setOpenRouterTemperatureInput(typeof configured === 'number' ? String(configured) : '')
@@ -646,6 +681,20 @@ const Settings: React.FC = () => {
     setCompactionSystemPromptTouched(true)
   }
 
+  const handleOpenAiPromptCacheRetentionChange = (value: string) => {
+    const retention: ProviderSettings['openAiPromptCacheRetention'] = value === '24h' ? '24h' : 'in_memory'
+    const updated = {
+      ...providerSettings,
+      openAiPromptCacheRetention: retention,
+    }
+    saveProviderSettings(updated)
+    setProviderSettings(updated)
+    showStatus({
+      type: 'success',
+      text: retention === '24h' ? 'OpenAI prompt cache retention set to 24h.' : 'OpenAI prompt cache retention set to in-memory.',
+    })
+  }
+
   const commitCompactionSystemPromptChange = (value: string) => {
     const normalized = value.trim()
     const fallback = loadProviderSettings().compactionSystemPrompt
@@ -759,6 +808,47 @@ const Settings: React.FC = () => {
       dispatch(chatSliceActions.providerSelected('OpenRouter'))
     }
     showStatus({ type: 'success', text: 'Signed out of OpenAI ChatGPT.' })
+  }
+
+  const handleSaveZaiApiKey = async () => {
+    const normalized = zaiApiKeyInput.trim()
+    if (!normalized) {
+      showStatus({ type: 'error', text: 'Enter a Z.AI API key before saving.' })
+      return
+    }
+
+    const effectiveUserId = userId || LOCAL_AUTH_USER_ID
+    setZaiApiKeySaving(true)
+    try {
+      await localApi.post('/provider-auth/zai/token', {
+        userId: effectiveUserId,
+        accessToken: normalized,
+      })
+      setZaiApiKeyInput('')
+      setZaiApiKeyConfigured(true)
+      showStatus({ type: 'success', text: 'Z.AI API key saved locally.' })
+    } catch (error) {
+      console.error('Failed to save Z.AI API key:', error)
+      showStatus({ type: 'error', text: error instanceof Error ? error.message : 'Failed to save Z.AI API key.' })
+    } finally {
+      setZaiApiKeySaving(false)
+    }
+  }
+
+  const handleDeleteZaiApiKey = async () => {
+    const effectiveUserId = userId || LOCAL_AUTH_USER_ID
+    setZaiApiKeySaving(true)
+    try {
+      await localApi.delete(`/provider-auth/zai/token?userId=${encodeURIComponent(effectiveUserId)}`)
+      setZaiApiKeyInput('')
+      setZaiApiKeyConfigured(false)
+      showStatus({ type: 'success', text: 'Z.AI API key removed.' })
+    } catch (error) {
+      console.error('Failed to delete Z.AI API key:', error)
+      showStatus({ type: 'error', text: error instanceof Error ? error.message : 'Failed to delete Z.AI API key.' })
+    } finally {
+      setZaiApiKeySaving(false)
+    }
   }
 
   const handleSaveBraveApiKey = async () => {
@@ -2003,6 +2093,58 @@ const Settings: React.FC = () => {
 
         <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
           <div className='flex flex-col gap-1'>
+            <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Chat Interface</h2>
+            <p className='text-sm text-stone-500 dark:text-stone-200'>Control optional chat UI elements.</p>
+          </div>
+
+          <div className='mt-4 flex flex-col gap-4'>
+            <div className='flex items-center justify-between'>
+              <div>
+                <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Show Token Usage Bar</p>
+                <p className='text-sm text-stone-500 dark:text-stone-400'>
+                  Display input/output token progress and credit refresh in the chat composer.
+                </p>
+              </div>
+              <button
+                onClick={handleTokenUsageBarToggle}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  showTokenUsageBar ? 'bg-emerald-500 dark:bg-emerald-600' : 'bg-stone-300 dark:bg-stone-600'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    showTokenUsageBar ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <div>
+                <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Auto Compaction</p>
+                <p className='text-sm text-stone-500 dark:text-stone-400'>
+                  Automatically compact the visible branch before send when context usage gets near the model or credit
+                  threshold.
+                </p>
+              </div>
+              <button
+                onClick={handleAutoCompactionToggle}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  autoCompactionEnabled ? 'bg-emerald-500 dark:bg-emerald-600' : 'bg-stone-300 dark:bg-stone-600'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    autoCompactionEnabled ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+          <div className='flex flex-col gap-1'>
             <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Chat Reasoning Defaults</h2>
             <p className='text-sm text-stone-500 dark:text-stone-200'>
               These defaults are loaded every time Chat opens, then applied when the selected model supports
@@ -2057,250 +2199,6 @@ const Settings: React.FC = () => {
             </div>
           </div>
         </section>
-
-        <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-          <div className='flex flex-col gap-1'>
-            <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Chat Interface</h2>
-            <p className='text-sm text-stone-500 dark:text-stone-200'>Control optional chat UI elements.</p>
-          </div>
-
-          <div className='mt-4 flex flex-col gap-4'>
-            <div className='flex items-center justify-between'>
-              <div>
-                <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Show Token Usage Bar</p>
-                <p className='text-sm text-stone-500 dark:text-stone-400'>
-                  Display input/output token progress and credit refresh in the chat composer.
-                </p>
-              </div>
-              <button
-                onClick={handleTokenUsageBarToggle}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  showTokenUsageBar ? 'bg-emerald-500 dark:bg-emerald-600' : 'bg-stone-300 dark:bg-stone-600'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    showTokenUsageBar ? 'translate-x-6' : 'translate-x-1'
-                  }`}
-                />
-              </button>
-            </div>
-
-            <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
-              <div>
-                <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Auto Compaction</p>
-                <p className='text-sm text-stone-500 dark:text-stone-400'>
-                  Automatically compact the visible branch before send when context usage gets near the model or credit
-                  threshold.
-                </p>
-              </div>
-              <button
-                onClick={handleAutoCompactionToggle}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  autoCompactionEnabled ? 'bg-emerald-500 dark:bg-emerald-600' : 'bg-stone-300 dark:bg-stone-600'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    autoCompactionEnabled ? 'translate-x-6' : 'translate-x-1'
-                  }`}
-                />
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-          <div className='flex flex-col gap-1'>
-            <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Typography</h2>
-            <p className='text-sm text-stone-500 dark:text-stone-200'>
-              Set app font from a Google Fonts URL or a local font file.
-            </p>
-          </div>
-
-          <div className='mt-4 flex flex-col gap-5'>
-            <div className='flex flex-col gap-2'>
-              <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Google Fonts URL</p>
-              <p className='text-sm text-stone-500 dark:text-stone-400'>
-                Only <code>https://fonts.googleapis.com/css</code> and <code>/css2</code> links are accepted.
-              </p>
-              <input
-                type='url'
-                value={googleFontUrlInput}
-                onChange={event => setGoogleFontUrlInput(event.target.value)}
-                placeholder='https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap'
-                className='w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
-              />
-              <div className='flex flex-wrap items-center gap-2'>
-                <Button variant='primary' size='small' onClick={handleGoogleFontUrlApply}>
-                  Apply Google Font
-                </Button>
-                <Button variant='outline2' size='small' onClick={handleResetAppFont}>
-                  Reset to DM Sans
-                </Button>
-              </div>
-            </div>
-
-            <div className='pt-3 border-t border-stone-200 dark:border-stone-700 flex flex-col gap-2'>
-              <input
-                ref={fontFileInputRef}
-                type='file'
-                accept={LOCAL_FONT_ACCEPT}
-                className='hidden'
-                onChange={handleLocalFontUpload}
-              />
-              <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Local Font Upload</p>
-              <p className='text-sm text-stone-500 dark:text-stone-400'>
-                Upload <code>.woff2</code>, <code>.ttf</code>, or <code>.otf</code> (max{' '}
-                {formatSize(MAX_FONT_UPLOAD_SIZE_BYTES)}).
-              </p>
-              <div className='flex flex-wrap items-center gap-2'>
-                <Button
-                  variant='acrylic'
-                  size='small'
-                  onClick={() => fontFileInputRef.current?.click()}
-                  disabled={fontUploading}
-                >
-                  {fontUploading ? 'Uploading…' : 'Upload Local Font'}
-                </Button>
-                <Button variant='outline2' size='small' onClick={handleUseLocalFont} disabled={!hasLocalFontSaved}>
-                  Use Local Font
-                </Button>
-                <Button variant='outline2' size='small' onClick={handleRemoveLocalFont} disabled={!hasLocalFontSaved}>
-                  Remove Local Font
-                </Button>
-              </div>
-              <p className='text-xs text-stone-500 dark:text-stone-400'>
-                Active source:{' '}
-                <span className='font-mono'>
-                  {fontSettings.source === 'google'
-                    ? `google (${fontSettings.googleFontFamily ?? 'unknown'})`
-                    : fontSettings.source}
-                </span>
-              </p>
-            </div>
-          </div>
-        </section>
-
-        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Remote Mobile Access</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Configure a LAN URL for your phone/tablet (same Wi-Fi), then open or scan the QR code.
-              </p>
-            </div>
-
-            <div className='mt-4 grid gap-5 lg:grid-cols-[minmax(0,1fr)_240px]'>
-              <div className='flex flex-col gap-3'>
-                <div className='flex flex-col gap-2'>
-                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Remote Server Base URL</p>
-                  <input
-                    type='url'
-                    value={remoteBaseUrlInput}
-                    placeholder='http://192.168.0.119:3002'
-                    onChange={event => setRemoteBaseUrlInput(event.target.value)}
-                    className='w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
-                  />
-                  <p className='text-xs text-stone-500 dark:text-stone-400'>
-                    Leave blank to use detected local origin: {detectedLocalServerOrigin || 'resolving...'}
-                  </p>
-                </div>
-
-                <div className='flex flex-wrap items-center gap-2'>
-                  <Button variant='primary' size='small' onClick={handleSaveRemoteBaseUrl}>
-                    Save Remote URL
-                  </Button>
-                  <Button
-                    variant='outline2'
-                    size='small'
-                    onClick={() => {
-                      setRemoteBaseUrlInput('')
-                      saveRemoteServerSettings({ remoteBaseUrl: null })
-                      showStatus({
-                        type: 'info',
-                        text: 'Remote server URL cleared. Using detected local origin as fallback.',
-                      })
-                    }}
-                  >
-                    Clear
-                  </Button>
-                  <Button
-                    variant='outline2'
-                    size='small'
-                    onClick={handleOpenRemoteMobileUi}
-                    disabled={!effectiveRemoteMobileUrl}
-                  >
-                    Open Mobile UI
-                  </Button>
-                  <Button
-                    variant='outline2'
-                    size='small'
-                    onClick={handleCopyRemoteMobileUi}
-                    disabled={!effectiveRemoteMobileUrl}
-                  >
-                    Copy URL
-                  </Button>
-                </div>
-
-                <div className='rounded-lg border border-stone-200 bg-stone-50/70 px-3 py-2 text-xs text-stone-600 dark:border-stone-700 dark:bg-stone-800/40 dark:text-stone-300 break-all'>
-                  <p className='font-medium mb-1 text-stone-700 dark:text-stone-200'>Effective mobile URL</p>
-                  <p>{effectiveRemoteMobileUrl || 'Unavailable'}</p>
-                </div>
-              </div>
-
-              <div className='flex flex-col items-start gap-2'>
-                <p className='text-sm font-medium text-stone-900 dark:text-stone-100'>Scan QR (phone)</p>
-                {remoteQrCodeImageUrl ? (
-                  <img
-                    src={remoteQrCodeImageUrl}
-                    alt='QR code for remote mobile URL'
-                    className='h-[220px] w-[220px] rounded-lg border border-stone-200 bg-white p-2 dark:border-stone-700'
-                  />
-                ) : (
-                  <div className='flex h-[220px] w-[220px] items-center justify-center rounded-lg border border-dashed border-stone-300 text-xs text-stone-500 dark:border-stone-600 dark:text-stone-400'>
-                    Enter or detect a URL to render QR
-                  </div>
-                )}
-                <p className='text-[11px] text-stone-500 dark:text-stone-400'>
-                  QR image is rendered via api.qrserver.com.
-                </p>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Memory</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Build note embeddings for local memory search using your LM Studio embedding model. This does not run automatically.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
-              <div className='rounded-lg border border-stone-200 bg-stone-50/70 px-4 py-3 text-sm text-stone-600 dark:border-stone-700 dark:bg-stone-800/40 dark:text-stone-300'>
-                <p className='font-medium text-stone-800 dark:text-stone-100'>Manual memory indexing</p>
-                <p className='mt-1'>
-                  This sends note summaries to LM Studio using <code>text-embedding-nomic-embed-text-v1.5</code>, stores the returned vectors in the local sqlite-vec index, and marks indexed notes as ready for hybrid memory search.
-                </p>
-                <p className='mt-2 text-xs text-stone-500 dark:text-stone-400'>
-                  Use this after changing note content, after enabling LM Studio embeddings, or when you want to refresh missing/stale memory vectors on demand.
-                </p>
-              </div>
-
-              <div className='flex flex-wrap items-center gap-3'>
-                <Button variant='primary' size='small' onClick={handleMemoryBackfill} disabled={memoryBackfillRunning}>
-                  {memoryBackfillRunning ? 'Indexing Memory…' : 'Index Memory Notes'}
-                </Button>
-                <p className='text-xs text-stone-500 dark:text-stone-400'>
-                  Uses the LM Studio server configured below. Nothing runs until you click the button.
-                </p>
-              </div>
-            </div>
-          </section>
-        )}
 
         {/* Provider Settings Section */}
         {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
@@ -2488,6 +2386,67 @@ const Settings: React.FC = () => {
 
               <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
                 <div>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>OpenAI Prompt Cache Retention</p>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    Uses the conversation ID as the OpenAI prompt cache key for ChatGPT/Codex requests.
+                  </p>
+                </div>
+                <Select
+                  value={providerSettings.openAiPromptCacheRetention}
+                  onChange={handleOpenAiPromptCacheRetentionChange}
+                  options={[
+                    { value: 'in_memory', label: 'In-memory (default)' },
+                    { value: '24h', label: '24 hours' },
+                  ]}
+                  className='max-w-xs'
+                />
+                {providerSettings.openAiPromptCacheRetention === '24h' && (
+                  <p className='rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200'>
+                    24h prompt cache retention is not Zero Data Retention eligible because OpenAI may retain derived cache artifacts for longer.
+                  </p>
+                )}
+              </div>
+
+              <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+                <div>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Z.AI / GLM API Key</p>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    Store your Z.AI BYOK key locally for the GLM headless provider. The key is kept in the local token store for this user.
+                  </p>
+                </div>
+                <div className='flex flex-wrap items-center gap-2'>
+                  <span
+                    className={`text-xs px-2 py-1 rounded-full border ${
+                      zaiApiKeyConfigured
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-900/30 dark:border-emerald-700 dark:text-emerald-300'
+                        : 'bg-stone-100 border-stone-200 text-stone-600 dark:bg-stone-800 dark:border-stone-700 dark:text-stone-300'
+                    }`}
+                  >
+                    {zaiApiKeyLoading ? 'Checking…' : zaiApiKeyConfigured ? 'Key saved' : 'No key'}
+                  </span>
+                  <input
+                    type='password'
+                    value={zaiApiKeyInput}
+                    placeholder={zaiApiKeyConfigured ? 'Enter new key to replace' : 'Enter Z.AI API key'}
+                    onChange={e => setZaiApiKeyInput(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        void handleSaveZaiApiKey()
+                      }
+                    }}
+                    className='w-full max-w-md rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                  />
+                  <Button variant='outline2' size='small' onClick={handleSaveZaiApiKey} disabled={zaiApiKeySaving || !zaiApiKeyInput.trim()}>
+                    {zaiApiKeyConfigured ? 'Replace key' : 'Save key'}
+                  </Button>
+                  <Button variant='outline2' size='small' onClick={handleDeleteZaiApiKey} disabled={zaiApiKeySaving || !zaiApiKeyConfigured}>
+                    Clear key
+                  </Button>
+                </div>
+              </div>
+
+              <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+                <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>OpenAI ChatGPT Account</p>
                   <p className='text-sm text-stone-500 dark:text-stone-400'>
                     Sign in or out to manage local ChatGPT OAuth tokens used by the OpenAI (ChatGPT) provider.
@@ -2528,358 +2487,31 @@ const Settings: React.FC = () => {
         {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
           <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
             <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Hermes Runtime</h2>
+              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Memory</h2>
               <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Choose how Ygg launches Hermes ACP for Hermes-backed chats. Changes apply to new Hermes runs.
+                Build note embeddings for local memory search using your LM Studio embedding model. This does not run automatically.
               </p>
             </div>
 
             <div className='mt-4 flex flex-col gap-4'>
-              <div className='flex flex-col gap-2'>
-                <div>
-                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Launch Mode</p>
-                  <p className='text-sm text-stone-500 dark:text-stone-400'>
-                    Auto uses the native launcher by default. Use WSL only when Ygg is on Windows and Hermes is
-                    installed inside WSL.
-                  </p>
-                </div>
-                <Select
-                  value={hermesRuntimeSettings.launchMode}
-                  onChange={handleHermesLaunchModeChange}
-                  options={[
-                    { value: 'auto', label: 'Auto (recommended)' },
-                    { value: 'native', label: 'Native' },
-                    ...(isWindowsElectron || hermesRuntimeSettings.launchMode === 'wsl'
-                      ? [{ value: 'wsl', label: 'WSL' }]
-                      : []),
-                  ]}
-                  className='max-w-xs'
-                />
-              </div>
-
-              {isWindowsElectron && hermesRuntimeSettings.launchMode === 'wsl' && (
-                <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
-                  <div>
-                    <p className='text-base font-medium text-stone-900 dark:text-stone-100'>WSL Distribution</p>
-                    <p className='text-sm text-stone-500 dark:text-stone-400'>
-                      Optional. Leave blank to use your default WSL distro.
-                    </p>
-                  </div>
-                  <input
-                    type='text'
-                    value={hermesRuntimeSettings.wslDistro}
-                    onChange={event => handleHermesWslDistroChange(event.target.value)}
-                    onBlur={handleHermesWslDistroBlur}
-                    placeholder='e.g. Ubuntu-24.04'
-                    className='max-w-md rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
-                  />
-                </div>
-              )}
-
-              <div className='rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-xs text-stone-600 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-300'>
-                <p>
-                  Current setting: <code>{hermesRuntimeSettings.launchMode}</code>
-                  {isWindowsElectron && hermesRuntimeSettings.launchMode === 'wsl'
-                    ? hermesRuntimeSettings.wslDistro
-                      ? ` via distro ${hermesRuntimeSettings.wslDistro}`
-                      : ' via default WSL distro'
-                    : ''}
+              <div className='rounded-lg border border-stone-200 bg-stone-50/70 px-4 py-3 text-sm text-stone-600 dark:border-stone-700 dark:bg-stone-800/40 dark:text-stone-300'>
+                <p className='font-medium text-stone-800 dark:text-stone-100'>Manual memory indexing</p>
+                <p className='mt-1'>
+                  This sends note summaries to LM Studio using <code>text-embedding-nomic-embed-text-v1.5</code>, stores the returned vectors in the local sqlite-vec index, and marks indexed notes as ready for hybrid memory search.
+                </p>
+                <p className='mt-2 text-xs text-stone-500 dark:text-stone-400'>
+                  Use this after changing note content, after enabling LM Studio embeddings, or when you want to refresh missing/stale memory vectors on demand.
                 </p>
               </div>
-            </div>
-          </section>
-        )}
 
-        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Built-in Browser</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Control optional features for the Electron right-dock browser pane.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
-              <div className='flex items-center justify-between'>
-                <div>
-                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Guest Page DevTools</p>
-                  <p className='text-sm text-stone-500 dark:text-stone-400'>
-                    Allow the built-in browser pane to open detached DevTools for the embedded page.
-                  </p>
-                </div>
-                <button
-                  onClick={handleBrowserGuestDevToolsToggle}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    browserSettings.guestDevToolsEnabled
-                      ? 'bg-emerald-500 dark:bg-emerald-600'
-                      : 'bg-stone-300 dark:bg-stone-600'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      browserSettings.guestDevToolsEnabled ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              <div className='rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-xs text-stone-600 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-300'>
-                <p>
-                  Current setting:{' '}
-                  <code>{browserSettings.guestDevToolsEnabled ? 'enabled' : 'disabled'}</code>
-                </p>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Subagent</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Configure default subagent behavior used by the <code>subagent</code> tool.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
-              <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
-                <div>
-                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Subagent Max Turns</p>
-                  <p className='text-sm text-stone-500 dark:text-stone-400'>
-                    Maximum model/tool loop turns for one subagent invocation.
-                  </p>
-                </div>
-                <input
-                  type='number'
-                  min={1}
-                  step={1}
-                  value={subagentMaxTurnsInput}
-                  onChange={e => handleSubagentMaxTurnsInputChange(e.target.value)}
-                  onBlur={e => commitSubagentMaxTurnsChange(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') {
-                      e.currentTarget.blur()
-                    }
-                  }}
-                  className='w-32 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
-                />
-              </div>
-
-              <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
-                <div>
-                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
-                    Enable Orchestrator Tool Calls
-                  </p>
-                  <p className='text-sm text-stone-500 dark:text-stone-400'>
-                    Controls whether subagents can execute tools at all.
-                  </p>
-                </div>
-                <button
-                  onClick={handleSubagentOrchestratorToggle}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    subagentSettings.orchestratorEnabled
-                      ? 'bg-emerald-500 dark:bg-emerald-600'
-                      : 'bg-stone-300 dark:bg-stone-600'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      subagentSettings.orchestratorEnabled ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
-                <div>
-                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
-                    Force OpenAI Provider for ChatGPT Parent
-                  </p>
-                  <p className='text-sm text-stone-500 dark:text-stone-400'>
-                    When current chat provider is <code>OpenAI (ChatGPT)</code>, subagent calls set provider to OpenAI.
-                  </p>
-                </div>
-                <button
-                  onClick={handleSubagentForceOpenAIToggle}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    subagentSettings.forceOpenAIProviderWhenChatGPTSelected
-                      ? 'bg-emerald-500 dark:bg-emerald-600'
-                      : 'bg-stone-300 dark:bg-stone-600'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      subagentSettings.forceOpenAIProviderWhenChatGPTSelected ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
-                <div>
-                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
-                    Default to Global Agent Model
-                  </p>
-                  <p className='text-sm text-stone-500 dark:text-stone-400'>
-                    If subagent tool call omits <code>model</code>, use Global Agent model from Settings.
-                  </p>
-                  <p className='text-xs text-stone-500 dark:text-stone-400 mt-1'>
-                    Current fallback model: <code>{subagentDefaultModelPreview}</code>
-                  </p>
-                </div>
-                <button
-                  onClick={handleSubagentUseGlobalModelToggle}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    subagentSettings.useGlobalAgentModelAsDefault
-                      ? 'bg-emerald-500 dark:bg-emerald-600'
-                      : 'bg-stone-300 dark:bg-stone-600'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      subagentSettings.useGlobalAgentModelAsDefault ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              <p className='text-xs text-stone-500 dark:text-stone-400 pt-2 border-t border-stone-200 dark:border-stone-700'>
-                Note: subagent turn/tool quota args and verbose return summary have been removed for a simpler output.
-              </p>
-            </div>
-          </section>
-        )}
-
-        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>API Keys</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Store local tool credentials securely in your OS keychain via keytar.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
-              <div className='flex flex-col gap-2'>
-                <div className='flex flex-wrap items-center gap-3'>
-                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Brave Search API Key</p>
-                  <span
-                    className={`text-xs px-2 py-1 rounded-full border ${
-                      braveApiKeyConfigured
-                        ? 'bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-900/30 dark:border-emerald-700 dark:text-emerald-300'
-                        : 'bg-stone-100 border-stone-200 text-stone-600 dark:bg-stone-800 dark:border-stone-700 dark:text-stone-300'
-                    }`}
-                  >
-                    {braveApiKeyLoading ? 'Loading…' : braveApiKeyConfigured ? 'Configured' : 'Not configured'}
-                  </span>
-                </div>
-                <p className='text-sm text-stone-500 dark:text-stone-400'>
-                  Used by the local <code>brave_search</code> tool when running in Electron.
-                </p>
-                <input
-                  type='password'
-                  value={braveApiKeyInput}
-                  placeholder='Enter Brave Search API key'
-                  onChange={e => setBraveApiKeyInput(e.target.value)}
-                  className='w-full max-w-xl rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
-                />
-                <div className='flex flex-wrap items-center gap-2'>
-                  <Button
-                    variant='primary'
-                    size='small'
-                    onClick={handleSaveBraveApiKey}
-                    disabled={braveApiKeySaving || braveApiKeyLoading || !braveApiKeyInput.trim()}
-                  >
-                    {braveApiKeySaving ? 'Saving…' : 'Save Brave API Key'}
-                  </Button>
-                  <Button
-                    variant='outline2'
-                    size='small'
-                    onClick={handleDeleteBraveApiKey}
-                    disabled={braveApiKeySaving || braveApiKeyLoading || !braveApiKeyConfigured}
-                  >
-                    Remove
-                  </Button>
-                </div>
+              <div className='flex flex-wrap items-center gap-3'>
+                <Button variant='primary' size='small' onClick={handleMemoryBackfill} disabled={memoryBackfillRunning}>
+                  {memoryBackfillRunning ? 'Indexing Memory…' : 'Index Memory Notes'}
+                </Button>
                 <p className='text-xs text-stone-500 dark:text-stone-400'>
-                  Saved in the desktop app only. The key is not stored in browser localStorage.
+                  Uses the LM Studio server configured below. Nothing runs until you click the button.
                 </p>
               </div>
-            </div>
-          </section>
-        )}
-
-        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>
-                Local Ownership Migration
-              </h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Manually move local project/conversation ownership from one user ID to another.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
-              <div className='flex flex-col gap-2'>
-                <p className='text-base font-medium text-stone-900 dark:text-stone-100'>From User</p>
-                <Select
-                  value={fromUserId}
-                  onChange={setFromUserId}
-                  options={localUsers.map(user => ({ value: user.id, label: formatLocalUserOptionLabel(user) }))}
-                  placeholder={localUsersLoading ? 'Loading users...' : 'Select source user'}
-                  disabled={localUsersLoading || localUsers.length === 0 || migratingOwnership}
-                  className='max-w-2xl'
-                />
-                <p className='text-xs text-stone-500 dark:text-stone-400 break-all'>Source ID: {fromUserId || '—'}</p>
-              </div>
-
-              <div className='flex flex-col gap-2'>
-                <p className='text-base font-medium text-stone-900 dark:text-stone-100'>To User</p>
-                <Select
-                  value={toUserId}
-                  onChange={setToUserId}
-                  options={localUsers.map(user => ({ value: user.id, label: formatLocalUserOptionLabel(user) }))}
-                  placeholder={localUsersLoading ? 'Loading users...' : 'Select destination user'}
-                  disabled={localUsersLoading || localUsers.length === 0 || migratingOwnership}
-                  className='max-w-2xl'
-                />
-                <p className='text-xs text-stone-500 dark:text-stone-400 break-all'>
-                  Destination ID: {toUserId || '—'}
-                </p>
-              </div>
-
-              <div className='flex flex-wrap items-center gap-3 pt-2 border-t border-stone-200 dark:border-stone-700'>
-                <Button
-                  variant='outline2'
-                  size='small'
-                  onClick={fetchLocalUsers}
-                  disabled={localUsersLoading || migratingOwnership}
-                >
-                  {localUsersLoading ? 'Refreshing users...' : 'Refresh user list'}
-                </Button>
-
-                <Button
-                  variant='outline2'
-                  size='small'
-                  onClick={handleManualOwnershipMigration}
-                  disabled={
-                    localUsersLoading ||
-                    migratingOwnership ||
-                    localUsers.length < 2 ||
-                    !fromUserId ||
-                    !toUserId ||
-                    fromUserId === toUserId
-                  }
-                >
-                  {migratingOwnership ? 'Migrating...' : 'Migrate local ownership'}
-                </Button>
-              </div>
-
-              <p className='text-xs text-amber-700 dark:text-amber-300'>
-                This only updates local SQLite ownership (projects, conversations, provider costs).
-              </p>
             </div>
           </section>
         )}
@@ -3096,6 +2728,124 @@ const Settings: React.FC = () => {
                   })}
                 </div>
               </div>
+            </div>
+          </section>
+        )}
+
+                {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
+          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+            <div className='flex flex-col gap-1'>
+              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Subagent</h2>
+              <p className='text-sm text-stone-500 dark:text-stone-200'>
+                Configure default subagent behavior used by the <code>subagent</code> tool.
+              </p>
+            </div>
+
+            <div className='mt-4 flex flex-col gap-4'>
+              <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                <div>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Subagent Max Turns</p>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    Maximum model/tool loop turns for one subagent invocation.
+                  </p>
+                </div>
+                <input
+                  type='number'
+                  min={1}
+                  step={1}
+                  value={subagentMaxTurnsInput}
+                  onChange={e => handleSubagentMaxTurnsInputChange(e.target.value)}
+                  onBlur={e => commitSubagentMaxTurnsChange(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      e.currentTarget.blur()
+                    }
+                  }}
+                  className='w-32 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                />
+              </div>
+
+              <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
+                <div>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
+                    Enable Orchestrator Tool Calls
+                  </p>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    Controls whether subagents can execute tools at all.
+                  </p>
+                </div>
+                <button
+                  onClick={handleSubagentOrchestratorToggle}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    subagentSettings.orchestratorEnabled
+                      ? 'bg-emerald-500 dark:bg-emerald-600'
+                      : 'bg-stone-300 dark:bg-stone-600'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      subagentSettings.orchestratorEnabled ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
+                <div>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
+                    Force OpenAI Provider for ChatGPT Parent
+                  </p>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    When current chat provider is <code>OpenAI (ChatGPT)</code>, subagent calls set provider to OpenAI.
+                  </p>
+                </div>
+                <button
+                  onClick={handleSubagentForceOpenAIToggle}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    subagentSettings.forceOpenAIProviderWhenChatGPTSelected
+                      ? 'bg-emerald-500 dark:bg-emerald-600'
+                      : 'bg-stone-300 dark:bg-stone-600'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      subagentSettings.forceOpenAIProviderWhenChatGPTSelected ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
+                <div>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
+                    Default to Global Agent Model
+                  </p>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    If subagent tool call omits <code>model</code>, use Global Agent model from Settings.
+                  </p>
+                  <p className='text-xs text-stone-500 dark:text-stone-400 mt-1'>
+                    Current fallback model: <code>{subagentDefaultModelPreview}</code>
+                  </p>
+                </div>
+                <button
+                  onClick={handleSubagentUseGlobalModelToggle}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    subagentSettings.useGlobalAgentModelAsDefault
+                      ? 'bg-emerald-500 dark:bg-emerald-600'
+                      : 'bg-stone-300 dark:bg-stone-600'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      subagentSettings.useGlobalAgentModelAsDefault ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <p className='text-xs text-stone-500 dark:text-stone-400 pt-2 border-t border-stone-200 dark:border-stone-700'>
+                Note: subagent turn/tool quota args and verbose return summary have been removed for a simpler output.
+              </p>
             </div>
           </section>
         )}
@@ -3406,75 +3156,406 @@ const Settings: React.FC = () => {
           </section>
         )}
 
-        {false && (
+                {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
           <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
             <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Services</h2>
+              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>API Keys</h2>
               <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Connect third-party services so tools can access them through the proxy.
+                Store local tool credentials securely in your OS keychain via keytar.
               </p>
             </div>
-            <div className='mt-4 flex flex-col gap-4 md:flex-row md:items-center md:justify-between'>
-              <div className='flex items-center gap-3'>
-                <div>
-                  <div className='flex items-center gap-2'>
-                    <p className='text-base font-semibold text-stone-900 dark:text-stone-100'>Google Drive</p>
-                    {googleDriveStatus?.connected && (
-                      <span className='rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300'>
-                        Connected
-                      </span>
-                    )}
-                  </div>
-                  <p className='text-sm text-stone-500 dark:text-stone-400'>
-                    {googleDriveStatus?.connected
-                      ? `Connected ${googleDriveStatus.connectedAt ? new Date(googleDriveStatus.connectedAt).toLocaleDateString() : ''}`
-                      : 'Sign in once to enable Drive-powered tools.'}
-                  </p>
+
+            <div className='mt-4 flex flex-col gap-4'>
+              <div className='flex flex-col gap-2'>
+                <div className='flex flex-wrap items-center gap-3'>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Brave Search API Key</p>
+                  <span
+                    className={`text-xs px-2 py-1 rounded-full border ${
+                      braveApiKeyConfigured
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-900/30 dark:border-emerald-700 dark:text-emerald-300'
+                        : 'bg-stone-100 border-stone-200 text-stone-600 dark:bg-stone-800 dark:border-stone-700 dark:text-stone-300'
+                    }`}
+                  >
+                    {braveApiKeyLoading ? 'Loading…' : braveApiKeyConfigured ? 'Configured' : 'Not configured'}
+                  </span>
                 </div>
-              </div>
-              <div className='flex gap-2'>
-                {googleDriveStatus?.connected ? (
-                  <>
-                    <Button
-                      variant='outline2'
-                      size='large'
-                      onClick={handleGoogleDriveConnect}
-                      disabled={googleConnecting}
-                      className='group'
-                    >
-                      <p className='transition-transform duration-100 group-active:scale-95'>
-                        {googleConnecting ? 'Opening…' : 'Reconnect'}
-                      </p>
-                    </Button>
-                    <Button
-                      variant='outline2'
-                      size='large'
-                      onClick={handleGoogleDriveDisconnect}
-                      disabled={googleDisconnecting}
-                      className='group text-rose-600 hover:text-rose-700 dark:text-rose-400'
-                    >
-                      <p className='transition-transform duration-100 group-active:scale-95'>
-                        {googleDisconnecting ? 'Disconnecting…' : 'Disconnect'}
-                      </p>
-                    </Button>
-                  </>
-                ) : (
+                <p className='text-sm text-stone-500 dark:text-stone-400'>
+                  Used by the local <code>brave_search</code> tool when running in Electron.
+                </p>
+                <input
+                  type='password'
+                  value={braveApiKeyInput}
+                  placeholder='Enter Brave Search API key'
+                  onChange={e => setBraveApiKeyInput(e.target.value)}
+                  className='w-full max-w-xl rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                />
+                <div className='flex flex-wrap items-center gap-2'>
+                  <Button
+                    variant='primary'
+                    size='small'
+                    onClick={handleSaveBraveApiKey}
+                    disabled={braveApiKeySaving || braveApiKeyLoading || !braveApiKeyInput.trim()}
+                  >
+                    {braveApiKeySaving ? 'Saving…' : 'Save Brave API Key'}
+                  </Button>
                   <Button
                     variant='outline2'
-                    size='large'
-                    onClick={handleGoogleDriveConnect}
-                    disabled={googleConnecting}
-                    className='group'
+                    size='small'
+                    onClick={handleDeleteBraveApiKey}
+                    disabled={braveApiKeySaving || braveApiKeyLoading || !braveApiKeyConfigured}
                   >
-                    <p className='transition-transform duration-100 group-active:scale-95'>
-                      {googleConnecting ? 'Opening…' : 'Connect Google Drive'}
-                    </p>
+                    Remove
                   </Button>
-                )}
+                </div>
+                <p className='text-xs text-stone-500 dark:text-stone-400'>
+                  Saved in the desktop app only. The key is not stored in browser localStorage.
+                </p>
               </div>
             </div>
           </section>
         )}
+
+        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
+          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+            <div className='flex flex-col gap-1'>
+              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Hermes Runtime</h2>
+              <p className='text-sm text-stone-500 dark:text-stone-200'>
+                Choose how Ygg launches Hermes ACP for Hermes-backed chats. Changes apply to new Hermes runs.
+              </p>
+            </div>
+
+            <div className='mt-4 flex flex-col gap-4'>
+              <div className='flex flex-col gap-2'>
+                <div>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Launch Mode</p>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    Auto uses the native launcher by default. Use WSL only when Ygg is on Windows and Hermes is
+                    installed inside WSL.
+                  </p>
+                </div>
+                <Select
+                  value={hermesRuntimeSettings.launchMode}
+                  onChange={handleHermesLaunchModeChange}
+                  options={[
+                    { value: 'auto', label: 'Auto (recommended)' },
+                    { value: 'native', label: 'Native' },
+                    ...(isWindowsElectron || hermesRuntimeSettings.launchMode === 'wsl'
+                      ? [{ value: 'wsl', label: 'WSL' }]
+                      : []),
+                  ]}
+                  className='max-w-xs'
+                />
+              </div>
+
+              {isWindowsElectron && hermesRuntimeSettings.launchMode === 'wsl' && (
+                <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+                  <div>
+                    <p className='text-base font-medium text-stone-900 dark:text-stone-100'>WSL Distribution</p>
+                    <p className='text-sm text-stone-500 dark:text-stone-400'>
+                      Optional. Leave blank to use your default WSL distro.
+                    </p>
+                  </div>
+                  <input
+                    type='text'
+                    value={hermesRuntimeSettings.wslDistro}
+                    onChange={event => handleHermesWslDistroChange(event.target.value)}
+                    onBlur={handleHermesWslDistroBlur}
+                    placeholder='e.g. Ubuntu-24.04'
+                    className='max-w-md rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                  />
+                </div>
+              )}
+
+              <div className='rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-xs text-stone-600 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-300'>
+                <p>
+                  Current setting: <code>{hermesRuntimeSettings.launchMode}</code>
+                  {isWindowsElectron && hermesRuntimeSettings.launchMode === 'wsl'
+                    ? hermesRuntimeSettings.wslDistro
+                      ? ` via distro ${hermesRuntimeSettings.wslDistro}`
+                      : ' via default WSL distro'
+                    : ''}
+                </p>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
+          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+            <div className='flex flex-col gap-1'>
+              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Built-in Browser</h2>
+              <p className='text-sm text-stone-500 dark:text-stone-200'>
+                Control optional features for the Electron right-dock browser pane.
+              </p>
+            </div>
+
+            <div className='mt-4 flex flex-col gap-4'>
+              <div className='flex items-center justify-between'>
+                <div>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Guest Page DevTools</p>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    Allow the built-in browser pane to open detached DevTools for the embedded page.
+                  </p>
+                </div>
+                <button
+                  onClick={handleBrowserGuestDevToolsToggle}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    browserSettings.guestDevToolsEnabled
+                      ? 'bg-emerald-500 dark:bg-emerald-600'
+                      : 'bg-stone-300 dark:bg-stone-600'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      browserSettings.guestDevToolsEnabled ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <div className='rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-xs text-stone-600 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-300'>
+                <p>
+                  Current setting:{' '}
+                  <code>{browserSettings.guestDevToolsEnabled ? 'enabled' : 'disabled'}</code>
+                </p>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
+          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+            <div className='flex flex-col gap-1'>
+              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Remote Mobile Access</h2>
+              <p className='text-sm text-stone-500 dark:text-stone-200'>
+                Configure a LAN URL for your phone/tablet (same Wi-Fi), then open or scan the QR code.
+              </p>
+            </div>
+
+            <div className='mt-4 grid gap-5 lg:grid-cols-[minmax(0,1fr)_240px]'>
+              <div className='flex flex-col gap-3'>
+                <div className='flex flex-col gap-2'>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Remote Server Base URL</p>
+                  <input
+                    type='url'
+                    value={remoteBaseUrlInput}
+                    placeholder='http://192.168.0.119:3002'
+                    onChange={event => setRemoteBaseUrlInput(event.target.value)}
+                    className='w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                  />
+                  <p className='text-xs text-stone-500 dark:text-stone-400'>
+                    Leave blank to use detected local origin: {detectedLocalServerOrigin || 'resolving...'}
+                  </p>
+                </div>
+
+                <div className='flex flex-wrap items-center gap-2'>
+                  <Button variant='primary' size='small' onClick={handleSaveRemoteBaseUrl}>
+                    Save Remote URL
+                  </Button>
+                  <Button
+                    variant='outline2'
+                    size='small'
+                    onClick={() => {
+                      setRemoteBaseUrlInput('')
+                      saveRemoteServerSettings({ remoteBaseUrl: null })
+                      showStatus({
+                        type: 'info',
+                        text: 'Remote server URL cleared. Using detected local origin as fallback.',
+                      })
+                    }}
+                  >
+                    Clear
+                  </Button>
+                  <Button
+                    variant='outline2'
+                    size='small'
+                    onClick={handleOpenRemoteMobileUi}
+                    disabled={!effectiveRemoteMobileUrl}
+                  >
+                    Open Mobile UI
+                  </Button>
+                  <Button
+                    variant='outline2'
+                    size='small'
+                    onClick={handleCopyRemoteMobileUi}
+                    disabled={!effectiveRemoteMobileUrl}
+                  >
+                    Copy URL
+                  </Button>
+                </div>
+
+                <div className='rounded-lg border border-stone-200 bg-stone-50/70 px-3 py-2 text-xs text-stone-600 dark:border-stone-700 dark:bg-stone-800/40 dark:text-stone-300 break-all'>
+                  <p className='font-medium mb-1 text-stone-700 dark:text-stone-200'>Effective mobile URL</p>
+                  <p>{effectiveRemoteMobileUrl || 'Unavailable'}</p>
+                </div>
+              </div>
+
+              <div className='flex flex-col items-start gap-2'>
+                <p className='text-sm font-medium text-stone-900 dark:text-stone-100'>Scan QR (phone)</p>
+                {remoteQrCodeImageUrl ? (
+                  <img
+                    src={remoteQrCodeImageUrl}
+                    alt='QR code for remote mobile URL'
+                    className='h-[220px] w-[220px] rounded-lg border border-stone-200 bg-white p-2 dark:border-stone-700'
+                  />
+                ) : (
+                  <div className='flex h-[220px] w-[220px] items-center justify-center rounded-lg border border-dashed border-stone-300 text-xs text-stone-500 dark:border-stone-600 dark:text-stone-400'>
+                    Enter or detect a URL to render QR
+                  </div>
+                )}
+                <p className='text-[11px] text-stone-500 dark:text-stone-400'>
+                  QR image is rendered via api.qrserver.com.
+                </p>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
+          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+            <div className='flex flex-col gap-1'>
+              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>
+                Local Ownership Migration
+              </h2>
+              <p className='text-sm text-stone-500 dark:text-stone-200'>
+                Manually move local project/conversation ownership from one user ID to another.
+              </p>
+            </div>
+
+            <div className='mt-4 flex flex-col gap-4'>
+              <div className='flex flex-col gap-2'>
+                <p className='text-base font-medium text-stone-900 dark:text-stone-100'>From User</p>
+                <Select
+                  value={fromUserId}
+                  onChange={setFromUserId}
+                  options={localUsers.map(user => ({ value: user.id, label: formatLocalUserOptionLabel(user) }))}
+                  placeholder={localUsersLoading ? 'Loading users...' : 'Select source user'}
+                  disabled={localUsersLoading || localUsers.length === 0 || migratingOwnership}
+                  className='max-w-2xl'
+                />
+                <p className='text-xs text-stone-500 dark:text-stone-400 break-all'>Source ID: {fromUserId || '—'}</p>
+              </div>
+
+              <div className='flex flex-col gap-2'>
+                <p className='text-base font-medium text-stone-900 dark:text-stone-100'>To User</p>
+                <Select
+                  value={toUserId}
+                  onChange={setToUserId}
+                  options={localUsers.map(user => ({ value: user.id, label: formatLocalUserOptionLabel(user) }))}
+                  placeholder={localUsersLoading ? 'Loading users...' : 'Select destination user'}
+                  disabled={localUsersLoading || localUsers.length === 0 || migratingOwnership}
+                  className='max-w-2xl'
+                />
+                <p className='text-xs text-stone-500 dark:text-stone-400 break-all'>
+                  Destination ID: {toUserId || '—'}
+                </p>
+              </div>
+
+              <div className='flex flex-wrap items-center gap-3 pt-2 border-t border-stone-200 dark:border-stone-700'>
+                <Button
+                  variant='outline2'
+                  size='small'
+                  onClick={fetchLocalUsers}
+                  disabled={localUsersLoading || migratingOwnership}
+                >
+                  {localUsersLoading ? 'Refreshing users...' : 'Refresh user list'}
+                </Button>
+
+                <Button
+                  variant='outline2'
+                  size='small'
+                  onClick={handleManualOwnershipMigration}
+                  disabled={
+                    localUsersLoading ||
+                    migratingOwnership ||
+                    localUsers.length < 2 ||
+                    !fromUserId ||
+                    !toUserId ||
+                    fromUserId === toUserId
+                  }
+                >
+                  {migratingOwnership ? 'Migrating...' : 'Migrate local ownership'}
+                </Button>
+              </div>
+
+              <p className='text-xs text-amber-700 dark:text-amber-300'>
+                This only updates local SQLite ownership (projects, conversations, provider costs).
+              </p>
+            </div>
+          </section>
+        )}
+
+                <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+          <div className='flex flex-col gap-1'>
+            <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Typography</h2>
+            <p className='text-sm text-stone-500 dark:text-stone-200'>
+              Set app font from a Google Fonts URL or a local font file.
+            </p>
+          </div>
+
+          <div className='mt-4 flex flex-col gap-5'>
+            <div className='flex flex-col gap-2'>
+              <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Google Fonts URL</p>
+              <p className='text-sm text-stone-500 dark:text-stone-400'>
+                Only <code>https://fonts.googleapis.com/css</code> and <code>/css2</code> links are accepted.
+              </p>
+              <input
+                type='url'
+                value={googleFontUrlInput}
+                onChange={event => setGoogleFontUrlInput(event.target.value)}
+                placeholder='https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap'
+                className='w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+              />
+              <div className='flex flex-wrap items-center gap-2'>
+                <Button variant='primary' size='small' onClick={handleGoogleFontUrlApply}>
+                  Apply Google Font
+                </Button>
+                <Button variant='outline2' size='small' onClick={handleResetAppFont}>
+                  Reset to DM Sans
+                </Button>
+              </div>
+            </div>
+
+            <div className='pt-3 border-t border-stone-200 dark:border-stone-700 flex flex-col gap-2'>
+              <input
+                ref={fontFileInputRef}
+                type='file'
+                accept={LOCAL_FONT_ACCEPT}
+                className='hidden'
+                onChange={handleLocalFontUpload}
+              />
+              <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Local Font Upload</p>
+              <p className='text-sm text-stone-500 dark:text-stone-400'>
+                Upload <code>.woff2</code>, <code>.ttf</code>, or <code>.otf</code> (max{' '}
+                {formatSize(MAX_FONT_UPLOAD_SIZE_BYTES)}).
+              </p>
+              <div className='flex flex-wrap items-center gap-2'>
+                <Button
+                  variant='acrylic'
+                  size='small'
+                  onClick={() => fontFileInputRef.current?.click()}
+                  disabled={fontUploading}
+                >
+                  {fontUploading ? 'Uploading…' : 'Upload Local Font'}
+                </Button>
+                <Button variant='outline2' size='small' onClick={handleUseLocalFont} disabled={!hasLocalFontSaved}>
+                  Use Local Font
+                </Button>
+                <Button variant='outline2' size='small' onClick={handleRemoveLocalFont} disabled={!hasLocalFontSaved}>
+                  Remove Local Font
+                </Button>
+              </div>
+              <p className='text-xs text-stone-500 dark:text-stone-400'>
+                Active source:{' '}
+                <span className='font-mono'>
+                  {fontSettings.source === 'google'
+                    ? `google (${fontSettings.googleFontFamily ?? 'unknown'})`
+                    : fontSettings.source}
+                </span>
+              </p>
+            </div>
+          </div>
+        </section>
 
         <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
           <div className='flex flex-col gap-1'>
@@ -3718,7 +3799,77 @@ const Settings: React.FC = () => {
           </div>
         </section>
 
-        {openaiLoginModalOpen && (
+        {false && (
+          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+            <div className='flex flex-col gap-1'>
+              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Services</h2>
+              <p className='text-sm text-stone-500 dark:text-stone-200'>
+                Connect third-party services so tools can access them through the proxy.
+              </p>
+            </div>
+            <div className='mt-4 flex flex-col gap-4 md:flex-row md:items-center md:justify-between'>
+              <div className='flex items-center gap-3'>
+                <div>
+                  <div className='flex items-center gap-2'>
+                    <p className='text-base font-semibold text-stone-900 dark:text-stone-100'>Google Drive</p>
+                    {googleDriveStatus?.connected && (
+                      <span className='rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300'>
+                        Connected
+                      </span>
+                    )}
+                  </div>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    {googleDriveStatus?.connected
+                      ? `Connected ${googleDriveStatus.connectedAt ? new Date(googleDriveStatus.connectedAt).toLocaleDateString() : ''}`
+                      : 'Sign in once to enable Drive-powered tools.'}
+                  </p>
+                </div>
+              </div>
+              <div className='flex gap-2'>
+                {googleDriveStatus?.connected ? (
+                  <>
+                    <Button
+                      variant='outline2'
+                      size='large'
+                      onClick={handleGoogleDriveConnect}
+                      disabled={googleConnecting}
+                      className='group'
+                    >
+                      <p className='transition-transform duration-100 group-active:scale-95'>
+                        {googleConnecting ? 'Opening…' : 'Reconnect'}
+                      </p>
+                    </Button>
+                    <Button
+                      variant='outline2'
+                      size='large'
+                      onClick={handleGoogleDriveDisconnect}
+                      disabled={googleDisconnecting}
+                      className='group text-rose-600 hover:text-rose-700 dark:text-rose-400'
+                    >
+                      <p className='transition-transform duration-100 group-active:scale-95'>
+                        {googleDisconnecting ? 'Disconnecting…' : 'Disconnect'}
+                      </p>
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    variant='outline2'
+                    size='large'
+                    onClick={handleGoogleDriveConnect}
+                    disabled={googleConnecting}
+                    className='group'
+                  >
+                    <p className='transition-transform duration-100 group-active:scale-95'>
+                      {googleConnecting ? 'Opening…' : 'Connect Google Drive'}
+                    </p>
+                  </Button>
+                )}
+              </div>
+            </div>
+          </section>
+        )}
+
+{openaiLoginModalOpen && (
           <div
             className='fixed inset-0 z-[100] flex items-center justify-center bg-black/50 px-4'
             onClick={closeOpenaiLoginModal}

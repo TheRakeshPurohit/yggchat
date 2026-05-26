@@ -154,7 +154,10 @@ export const TextArea: React.FC<TextAreaProps> = ({
     true,
     100
   )
-  const selectedMentionedPaths = useMemo(() => new Set(selectedFilesForChat.map(file => file.path)), [selectedFilesForChat])
+  const selectedMentionedPaths = useMemo(
+    () => new Set(selectedFilesForChat.map(file => file.path)),
+    [selectedFilesForChat]
+  )
   const fallbackMentionableFiles = useMemo(() => {
     const source = activeMentionTerm ? fallbackFileSearchData?.files || [] : fallbackDirectoryData?.files || []
     return source.map(toMentionableOption).filter(file => !selectedMentionedPaths.has(file.path))
@@ -166,7 +169,9 @@ export const TextArea: React.FC<TextAreaProps> = ({
     : false
   const fallbackMentionError = activeMentionTerm ? fallbackFileSearchError : fallbackDirectoryError
   const shouldShowFallbackFileListState =
-    shouldUseLocalFileFallback && !!activeMention && (isFallbackMentionLoading || !!fallbackMentionError || filteredFiles.length === 0)
+    shouldUseLocalFileFallback &&
+    !!activeMention &&
+    (isFallbackMentionLoading || !!fallbackMentionError || filteredFiles.length === 0)
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     if (state === 'disabled') return
@@ -543,19 +548,22 @@ export const TextArea: React.FC<TextAreaProps> = ({
     }
   }, [showFileList])
 
-  const baseStyles = `${width} resize-none px-4 py-3 rounded-xl transition-all duration-200 overflow-hidden bg-neutral-50 dark:bg-neutral-900 text-[16px] sm:text-[14px] md:text-[14px] lg:text-[14px] 2xl:text-[16px] `
+  const baseStyles = `${width} resize-none px-4 py-3 rounded-xl transition-all duration-200 overflow-hidden border-1 border-neutral-300 dark:border-neutral-600 bg-neutral-50 dark:bg-neutral-900 text-[16px] sm:text-[14px] md:text-[14px] lg:text-[13px] 2xl:text-[14px] `
   const labelClasses = state === 'disabled' ? 'opacity-40' : ''
   // focus:border-gray-500 focus:ring-2 focus:ring-gray-500 focus:ring-opacity-50 dark:focus:ring-2 dark:focus:ring-secondary-600
   const stateStyles = {
-    default: `${baseStyles} dark:bg-neutral-800 mica-medium text-stone-800 dark:text-stone-200 placeholder-gray-400 border-gray-600 outline-none`,
-    error: `${baseStyles} bg-gray-800 text-stone-800 mica-medium dark:text-stone-200 placeholder-gray-400 border-red-500 outline-none focus:border-red-400 focus:ring-2 focus:ring-red-500 focus:ring-opacity-50`,
-    disabled: `${baseStyles} bg-gray-900 text-stone-800 mica-medium dark:text-stone-200 border-gray-700 placeholder-gray-600 cursor-not-allowed`,
+    default: `${baseStyles} dark:bg-neutral-800 text-stone-800 dark:text-stone-200 placeholder-gray-400 border-gray-600 outline-none`,
+    error: `${baseStyles} bg-gray-800 text-stone-800 dark:text-stone-200 placeholder-gray-400 border-red-500 outline-none focus:border-red-400 focus:ring-2 focus:ring-red-500 focus:ring-opacity-50`,
+    disabled: `${baseStyles} bg-gray-900 text-stone-800 dark:text-stone-200 border-gray-700 placeholder-gray-600 cursor-not-allowed`,
   }
 
   return (
     <div className={`flex flex-col gap-1 ${fillAvailableHeight ? 'flex-1 h-full' : ''}`}>
       {label && (
-        <label htmlFor={id} className={`text-sm font-medium text-gray-200 ${labelClasses}`}>
+        <label
+          htmlFor={id}
+          className={`text-[13px] text-gray-500 dark:text-gray-200 leading-none pl-1 pb-1 ${labelClasses}`}
+        >
           {label}
         </label>
       )}
