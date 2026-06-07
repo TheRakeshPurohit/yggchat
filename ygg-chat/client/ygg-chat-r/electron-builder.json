@@ -54,9 +54,15 @@
     "icon": "public/img/graviton-dark.icns"
   },
   "linux": {
-    "target": ["AppImage"],
+    "target": [
+      {
+        "target": "deb",
+        "arch": ["x64"]
+      }
+    ],
     "category": "Office",
-    "icon": "public/img/graviton-dark.png"
+    "icon": "public/img/graviton-dark.png",
+    "maintainer": "YggChat <support@yggchat.com>"
   },
   "npmRebuild": true,
   "nativeRebuilder": "sequential",
