@@ -1867,15 +1867,9 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         normalizedToolCardName === 'plan_md' && String(group.args?.action || '').toLowerCase() === 'display'
       if (isPlanMdDisplayTool && group.args) {
         const planResult = group.results.length > 0 ? group.results[0].content : {}
-        const hasPlanError = group.results.some(result => result.is_error)
         return (
           <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
-            <div className='flex min-w-0 items-start gap-2'>
-              <span className={hasPlanError ? TOOL_NAME_ERROR_CLASS : group.results.length ? TOOL_NAME_SUCCESS_CLASS : TOOL_NAME_RUNNING_CLASS}>
-                {group.name || 'plan_md'}
-              </span>
-              <PlanMdToolView args={group.args} result={planResult} />
-            </div>
+            <PlanMdToolView args={group.args} result={planResult} />
           </div>
         )
       }
