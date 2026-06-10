@@ -29,6 +29,7 @@ export interface ProviderRailwayTurnInput {
   serviceTier?: 'priority'
   openaiHostedTools?: any
   promptCacheRetention?: 'in_memory' | '24h'
+  runId?: string | null
   previousResponseId?: string | null
 }
 

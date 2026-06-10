@@ -37,6 +37,21 @@ describe('OpenAiChatgptProvider', () => {
       expect(headers.get('ChatGPT-Account-ID')).toBe('acct-1')
       expect(headers.get('originator')).toBe('codex_cli_rs')
       expect(headers.get('x-client-request-id')).toBe(body.prompt_cache_key)
+      expect(headers.get('session-id')).toBe(body.prompt_cache_key)
+      expect(headers.get('thread-id')).toBe(body.prompt_cache_key)
+      expect(headers.get('user-agent')).toBe('Qubit/0.1 Codex')
+      expect(body.service_tier).toBeUndefined()
+      expect(body.include).toEqual(['reasoning.encrypted_content', 'web_search_call.action.sources'])
+      expect(body.tools).toEqual(expect.arrayContaining([{ type: 'web_search' }, { type: 'image_generation' }]))
+      expect(body.tools.find((tool: any) => tool.name === 'read_file')).toEqual(
+        expect.objectContaining({
+          type: 'function',
+          name: 'read_file',
+          description: 'Read a file',
+          strict: false,
+          parameters: { type: 'object', properties: {} },
+        })
+      )
 
       return {
         ok: true,
@@ -171,7 +186,7 @@ describe('OpenAiChatgptProvider', () => {
       expect.objectContaining({
         model: 'gpt-5.3-codex',
         responseId: 'resp-1',
-        requestMode: 'full_replay',
+        requestMode: 'qubit_exact_full_replay',
         hasPreviousResponseId: false,
         inputTokens: 100,
         cachedInputTokens: 40,
@@ -194,6 +209,12 @@ describe('OpenAiChatgptProvider', () => {
     vi.spyOn(console, 'info').mockImplementation(() => {})
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
       capturedBody = JSON.parse(String(init?.body || '{}'))
+      const headers = new Headers(init?.headers as any)
+      expect(headers.get('originator')).toBe('codex_cli_rs')
+      expect(headers.get('session-id')).toBe('conversation-cache-key')
+      expect(headers.get('thread-id')).toBe('conversation-cache-key')
+      expect(headers.get('x-client-request-id')).toBe('run-cache-key')
+      expect(headers.get('ChatGPT-Account-ID')).toBe('acct-3')
       return {
         ok: true,
         status: 200,
@@ -233,6 +254,7 @@ describe('OpenAiChatgptProvider', () => {
       tools: [{ name: 'read_file', description: 'Read a file', inputSchema: { type: 'object', properties: {} } }],
       railwayTurn: {
         conversationId: 'conversation-cache-key',
+        runId: 'run-cache-key',
         previousResponseId: 'resp-prior-should-not-be-sent',
       },
       history: [
@@ -243,17 +265,30 @@ describe('OpenAiChatgptProvider', () => {
         {
           role: 'assistant',
           content: '',
+          tool_calls: JSON.stringify([
+            {
+              id: 'call-1',
+              name: 'read_file',
+              arguments: { path: 'README.md' },
+            },
+          ]),
           content_blocks: JSON.stringify([
             {
               type: 'responses_output_items',
               items: [
                 {
-                  id: 'call-item-1',
-                  type: 'function_call',
-                  call_id: 'call-1',
-                  name: 'read_file',
-                  arguments: '{"path":"README.md"}',
+                  id: 'volatile-response-item-id',
+                  type: 'reasoning',
+                  encrypted_content: 'volatile-encrypted-reasoning-should-not-replay',
                   output_index: 0,
+                },
+                {
+                  id: 'volatile-call-item-id',
+                  type: 'function_call',
+                  call_id: 'call-from-raw-response-items-should-not-replay',
+                  name: 'raw_response_item_tool',
+                  arguments: '{"path":"SHOULD_NOT_REPLAY.md"}',
+                  output_index: 1,
                 },
               ],
             },
@@ -271,6 +306,8 @@ describe('OpenAiChatgptProvider', () => {
     expect(capturedBody).toBeTruthy()
     expect(capturedBody.prompt_cache_key).toBe('conversation-cache-key')
     expect(capturedBody.client_metadata).toEqual({ 'x-codex-installation-id': 'conversation-cache-key' })
+    expect(capturedBody.include).toEqual(['reasoning.encrypted_content', 'web_search_call.action.sources'])
+    expect(capturedBody.service_tier).toBeUndefined()
     expect(capturedBody.previous_response_id).toBeUndefined()
     expect(capturedBody.input).toEqual(
       expect.arrayContaining([
@@ -279,7 +316,19 @@ describe('OpenAiChatgptProvider', () => {
         expect.objectContaining({ type: 'function_call_output', call_id: 'call-1', output: expect.stringContaining('README body') }),
       ])
     )
+    expect(capturedBody.input).toEqual([
+      expect.objectContaining({ type: 'message', role: 'user' }),
+      expect.objectContaining({ type: 'function_call', call_id: 'call-1', name: 'read_file' }),
+      expect.objectContaining({ type: 'function_call_output', call_id: 'call-1', output: expect.stringContaining('README body') }),
+    ])
     expect(capturedBody.input).not.toHaveLength(1)
+    expect(capturedBody.input).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'reasoning' }),
+        expect.objectContaining({ call_id: 'call-from-raw-response-items-should-not-replay' }),
+        expect.objectContaining({ id: 'volatile-call-item-id' }),
+      ])
+    )
   })
 
   it('throws on incomplete responses surfaced by SSE', async () => {
