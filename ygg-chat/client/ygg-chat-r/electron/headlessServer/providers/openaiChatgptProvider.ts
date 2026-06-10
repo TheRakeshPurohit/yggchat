@@ -1,15 +1,12 @@
 import path from 'path'
 import WebSocket from 'ws'
 import {
-  CHATGPT_BASE_URL,
-  CHATGPT_CODEX_ENDPOINT,
   JWT_CLAIM_PATH,
   OPENAI_CLIENT_ID,
   OPENAI_TOKEN_URL,
 } from '../../openaiChatgptOAuth.js'
 import type { ProviderTokenStore } from './tokenStore.js'
-import { openStreamingWithPreFirstByteRetry } from './streamResilience.js'
-import { createOpenAIHostedTools } from './openaiHostedTools.js'
+import { CodexResponsesProvider, toCodexMessages } from './codex/index.js'
 import { buildToolNameMap, sanitizeToolResultContentForModel } from './toolResultSanitizer.js'
 import type {
   HeadlessProvider,
@@ -460,20 +457,6 @@ function getToolCallName(raw: any): string {
   return ''
 }
 
-function parseStoredResponseOutputItems(raw: any): any[] {
-  if (!raw) return []
-  if (Array.isArray(raw)) return raw
-  if (typeof raw === 'string') {
-    try {
-      const parsed = JSON.parse(raw)
-      return Array.isArray(parsed) ? parsed : []
-    } catch {
-      return []
-    }
-  }
-  return []
-}
-
 function normalizeResponseMessageContent(content: any): Array<{ type: 'output_text'; text: string }> {
   if (!Array.isArray(content)) return []
 
@@ -572,62 +555,54 @@ function normalizeResponseOutputItemsForReplay(items: any[]): any[] {
   return normalized
 }
 
-function extractStoredResponseOutputItemsFromMessage(msg: any): any[] {
-  const direct = normalizeResponseOutputItemsForReplay(parseStoredResponseOutputItems(msg?.responses_output_items))
-  if (direct.length > 0) return direct
-
-  const contentBlocks = parseContentBlocks(msg?.content_blocks)
-  for (const block of contentBlocks) {
-    if (block?.type === 'responses_output_items' && Array.isArray(block?.items)) {
-      const fromBlock = normalizeResponseOutputItemsForReplay(block.items)
-      if (fromBlock.length > 0) return fromBlock
+function parseJsonArray(value: any): any[] {
+  if (!value) return []
+  if (Array.isArray(value)) return value
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
     }
   }
-
   return []
 }
 
-function collectToolOutputCallIds(messages: any[]): Set<string> {
-  const ids = new Set<string>()
-
-  for (const msg of messages || []) {
-    if (msg?.role === 'assistant' && msg?.content_blocks) {
-      const contentBlocks = parseContentBlocks(msg.content_blocks)
-      for (const block of contentBlocks) {
-        if (block?.type !== 'tool_result') continue
-        const callId = typeof block.tool_use_id === 'string' ? block.tool_use_id : ''
-        if (callId) ids.add(callId)
-      }
-    }
-
-    if (msg?.role === 'tool' && typeof msg?.tool_call_id === 'string' && msg.tool_call_id) {
-      ids.add(msg.tool_call_id)
-    }
+function toolCallArgumentsForCodex(toolCall: any): string {
+  if (typeof toolCall?.arguments === 'string') return toolCall.arguments
+  const rawArgs = toolCall?.arguments ?? toolCall?.args ?? toolCall?.input ?? {}
+  try {
+    return JSON.stringify(rawArgs ?? {})
+  } catch {
+    return '{}'
   }
-
-  return ids
 }
 
-function getFinalFunctionCallOutputDelta(history: any[]): any[] | null {
-  const last = Array.isArray(history) && history.length > 0 ? history[history.length - 1] : null
-  if (!last || last.role !== 'tool' || typeof last.tool_call_id !== 'string' || !last.tool_call_id) return null
+function toolCallToCodexItem(toolCall: any): any | null {
+  const callId = typeof toolCall?.id === 'string' && toolCall.id ? toolCall.id : ''
+  const name = getToolCallName(toolCall)
+  if (!callId || !name) return null
+  return {
+    type: 'function_call',
+    name,
+    arguments: toolCallArgumentsForCodex(toolCall),
+    call_id: callId,
+  }
+}
 
-  const toolNameById = buildToolNameMap(history)
-  const sanitized = sanitizeToolResultContentForModel(last.content, toolNameById.get(last.tool_call_id) || null)
-  return [
-    {
-      type: 'function_call_output',
-      call_id: last.tool_call_id,
-      output: typeof sanitized === 'string' ? sanitized : (sanitized ?? null),
-    },
-  ]
+function toolOutputToCodexItem(callId: string, content: any, toolName?: string | null): any {
+  const sanitized = sanitizeToolResultContentForModel(content, toolName || null)
+  return {
+    type: 'function_call_output',
+    call_id: callId,
+    output: typeof sanitized === 'string' ? sanitized : (sanitized ?? null),
+  }
 }
 
 function transformMessagesForCodex(history: any[], fallbackUserContent: string): any[] {
   const input: any[] = []
-  const toolCallIds = new Set<string>()
   const toolOutputIds = new Set<string>()
-  const availableToolOutputCallIds = collectToolOutputCallIds(history)
   const toolNameById = buildToolNameMap(history)
 
   for (const msg of history || []) {
@@ -651,75 +626,24 @@ function transformMessagesForCodex(history: any[], fallbackUserContent: string):
     }
 
     if (msg?.role === 'assistant') {
-      const storedResponseItems = extractStoredResponseOutputItemsFromMessage(msg)
-      let hasStoredFunctionCalls = false
-
-      for (const item of storedResponseItems) {
-        if (item?.type === 'reasoning') {
-          input.push(item)
-          continue
-        }
-
-        if (item?.type === 'image_generation_call') {
-          if (typeof item.result === 'string' && item.result.trim().length > 0) {
-            input.push(item)
-          }
-          continue
-        }
-
-        if (item?.type === 'function_call') {
-          const callId = typeof item.call_id === 'string' ? item.call_id : ''
-          if (!callId) continue
-          if (!availableToolOutputCallIds.has(callId)) continue
-          hasStoredFunctionCalls = true
-          toolCallIds.add(callId)
-          input.push(item)
-        }
-      }
-
       const assistantContent = toOutputTextContent(msg?.content)
       if (assistantContent.length > 0) {
         input.push({ type: 'message', role: 'assistant', content: assistantContent })
       }
 
-      if (!hasStoredFunctionCalls && Array.isArray(msg?.tool_calls)) {
-        for (const toolCall of msg.tool_calls) {
-          const callId = typeof toolCall?.id === 'string' ? toolCall.id : ''
-          if (!callId) continue
-          if (!availableToolOutputCallIds.has(callId)) continue
-
-          const name = getToolCallName(toolCall)
-          if (!name) continue
-
-          const args =
-            typeof toolCall?.arguments === 'string'
-              ? toolCall.arguments
-              : JSON.stringify(toolCall?.arguments ?? toolCall?.input ?? {})
-
-          toolCallIds.add(callId)
-          input.push({
-            type: 'function_call',
-            call_id: callId,
-            name,
-            arguments: args,
-          })
-        }
+      for (const toolCall of parseJsonArray(msg?.tool_calls)) {
+        const toolCallItem = toolCallToCodexItem(toolCall)
+        if (toolCallItem) input.push(toolCallItem)
       }
 
       const contentBlocks = parseContentBlocks(msg?.content_blocks)
       for (const block of contentBlocks) {
         if (block?.type !== 'tool_result') continue
         const callId = typeof block?.tool_use_id === 'string' ? block.tool_use_id : ''
-        if (!callId || toolOutputIds.has(callId) || !toolCallIds.has(callId)) continue
-
-        const sanitized = sanitizeToolResultContentForModel(block.content, toolNameById.get(callId) || null)
+        if (!callId || toolOutputIds.has(callId)) continue
 
         toolOutputIds.add(callId)
-        input.push({
-          type: 'function_call_output',
-          call_id: callId,
-          output: typeof sanitized === 'string' ? sanitized : (sanitized ?? null),
-        })
+        input.push(toolOutputToCodexItem(callId, block.content, toolNameById.get(callId) || null))
       }
 
       continue
@@ -728,15 +652,9 @@ function transformMessagesForCodex(history: any[], fallbackUserContent: string):
     if (msg?.role === 'tool' && msg?.tool_call_id) {
       const callId = String(msg.tool_call_id)
       if (toolOutputIds.has(callId)) continue
-      if (!toolCallIds.has(callId)) continue
 
-      const sanitized = sanitizeToolResultContentForModel(msg?.content, toolNameById.get(callId) || null)
       toolOutputIds.add(callId)
-      input.push({
-        type: 'function_call_output',
-        call_id: callId,
-        output: typeof sanitized === 'string' ? sanitized : (sanitized ?? null),
-      })
+      input.push(toolOutputToCodexItem(callId, msg?.content, toolNameById.get(callId) || msg?.name || null))
       continue
     }
   }
@@ -945,6 +863,10 @@ function isOpenAiChatgptDebugLoggingEnabled(): boolean {
   return /^(1|true|yes|on)$/i.test(process.env.YGG_OPENAI_CHATGPT_DEBUG_LOGS || '')
 }
 
+function isCodexDevLoggingEnabled(): boolean {
+  return /^(1|true|yes|on)$/i.test(process.env.YGG_CODEX_DEV_LOGS || '')
+}
+
 function createOpenAiChatgptTraceId(input: ProviderGenerateInput): string {
   const base = input.railwayTurn?.conversationId?.trim() || input.userId || 'ygg-chat'
   return `${base}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`
@@ -1040,7 +962,7 @@ function summarizeOpenAiEvent(parsed: any): Record<string, unknown> {
 }
 
 function logOpenAiChatgpt(level: 'info' | 'warn' | 'error', message: string, details?: Record<string, unknown>) {
-  if (level === 'info' && !isOpenAiChatgptDebugLoggingEnabled()) return
+  if (!isOpenAiChatgptDebugLoggingEnabled()) return
   const logger = level === 'error' ? console.error : level === 'warn' ? console.warn : console.info
   logger(`[OpenAI ChatGPT] ${message}`, details || {})
 }
@@ -1050,10 +972,12 @@ function logCodexUsage(params: {
   responseId?: string
   promptCacheKey?: string
   promptCacheRetention: 'in_memory' | '24h'
+  requestMode?: 'full_replay' | 'qubit_exact_full_replay'
+  inputItems?: number
+  hasPreviousResponseId?: boolean
   usage?: OpenAiResponseUsage
 }) {
-  // Keep Codex usage logs always-on for now. If this gets too noisy, gate this with an env var.
-  // if (!/^(1|true|yes|on)$/i.test(process.env.YGG_CODEX_USAGE_LOGS || '')) return
+  if (!isCodexDevLoggingEnabled()) return
 
   const usage = params.usage
   if (!usage) return
@@ -1071,6 +995,9 @@ function logCodexUsage(params: {
     responseId: params.responseId,
     promptCacheKey: params.promptCacheKey,
     promptCacheRetention: params.promptCacheRetention,
+    requestMode: params.requestMode,
+    inputItems: params.inputItems,
+    hasPreviousResponseId: params.hasPreviousResponseId,
     inputTokens,
     cachedInputTokens,
     uncachedInputTokens,
@@ -1546,7 +1473,7 @@ async function readCodexWebSocketOutput(params: {
     })
     ws.on('error', fail)
     ws.on('close', (code, reason) => {
-      logOpenAiChatgpt('warn', 'WebSocket close', {
+      logOpenAiChatgpt('info', 'WebSocket close', {
         traceId: params.traceId,
         code,
         reason: reason?.length ? reason.toString() : '',
@@ -2048,247 +1975,91 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
       toolDefinitions: Array.isArray(input.tools) ? input.tools.length : 0,
       hasUserContent: typeof input.userContent === 'string' && input.userContent.length > 0,
     })
+
     const auth = await this.resolveAuth(input)
-    logOpenAiChatgpt('info', 'auth resolved', {
-      traceId,
-      accountId: auth.accountId,
-      accessTokenLength: auth.accessToken.length,
+    const model = normalizeModel(input.modelName)
+    const sessionId = input.railwayTurn?.conversationId?.trim() || traceId
+    const requestId = (input.railwayTurn as any)?.runId?.trim?.() || sessionId
+    const messages = toCodexMessages(input)
+    const codexProvider = new CodexResponsesProvider({ auth })
+    const parsed = await codexProvider.generate({
+      model,
+      providerInput: input,
+      messages,
+      tools: input.tools || [],
+      sessionId,
+      runId: requestId,
+      emit,
     })
-
-    const hostedTools = createOpenAIHostedTools({
-      config: input.railwayTurn?.openaiHostedTools,
-      enableImageGeneration: hasImageGenerationIntent(input),
-    })
-    const requestTools = [...mapTools(input.tools || []), ...hostedTools]
-    const previousResponseId = input.railwayTurn?.previousResponseId?.trim() || undefined
-    const incrementalToolOutput = previousResponseId ? getFinalFunctionCallOutputDelta(input.history || []) : null
-    const transformedInput = incrementalToolOutput
-      ? incrementalToolOutput
-      : appendImageAttachmentsToLatestUserMessage(
-          transformMessagesForCodex(input.history || [], input.userContent),
-          input.railwayTurn?.attachmentsBase64 ?? null
-        )
-
-    const serviceTier = input.railwayTurn?.serviceTier === 'priority' ? 'priority' : undefined
-    const requestId = input.railwayTurn?.conversationId?.trim() || traceId || 'ygg-chat'
-    const promptCacheKey = input.railwayTurn?.conversationId?.trim() || requestId
-    const promptCacheRetention = input.railwayTurn?.promptCacheRetention === '24h' ? '24h' : 'in_memory'
-    const requestBody = {
-      model: normalizeModel(input.modelName),
-      instructions: input.systemPrompt && input.systemPrompt.trim() ? input.systemPrompt : 'You are ChatGPT.',
-      input: transformedInput,
-      tools: requestTools.length ? requestTools : undefined,
-      tool_choice: requestTools.length ? 'auto' : undefined,
-      parallel_tool_calls: requestTools.length ? true : undefined,
-      store: false,
-      include: ['reasoning.encrypted_content'],
-      reasoning: {
-        effort: 'medium',
-        summary: 'auto',
-      },
-      service_tier: serviceTier,
-      prompt_cache_key: promptCacheKey,
-      client_metadata: {
-        'x-codex-installation-id': promptCacheKey,
-      },
-      ...(promptCacheRetention === '24h' ? { prompt_cache_retention: '24h' } : {}),
-      stream: true,
-    }
-    const effectiveRequestBody = incrementalToolOutput
-      ? {
-          ...requestBody,
-          previous_response_id: previousResponseId,
-          input: incrementalToolOutput,
-        }
-      : requestBody
-
-    const endpoint = `${CHATGPT_BASE_URL}${CHATGPT_CODEX_ENDPOINT}`
-    let parsed: CodexParsedOutput
-
-    logOpenAiChatgpt('info', 'request prepared', {
-      traceId,
-      endpoint,
-      hostedTools: hostedTools.length,
-      mappedTools: requestTools.length - hostedTools.length,
-      incrementalToolOutput: Boolean(incrementalToolOutput),
-      incrementalToolOutputItems: incrementalToolOutput?.length,
-      attachmentsBase64: Array.isArray(input.railwayTurn?.attachmentsBase64)
-        ? input.railwayTurn?.attachmentsBase64.length
-        : 0,
-      request: summarizeOpenAiChatgptRequestBody(effectiveRequestBody),
-    })
-
-    try {
-      logOpenAiChatgpt('info', 'transport attempt WebSocket', { traceId, endpoint })
-      parsed = await readCodexWebSocketOutput({
-        endpoint,
-        headers: {
-          Authorization: `Bearer ${auth.accessToken}`,
-          'ChatGPT-Account-ID': auth.accountId,
-          'OpenAI-Beta': 'responses_websockets=2026-02-06',
-          originator: 'codex_cli_rs',
-          'x-client-request-id': requestId,
-        },
-        body: effectiveRequestBody,
-        emit,
-        modelName: input.modelName,
-        traceId,
-      })
-    } catch (websocketError) {
-      logOpenAiChatgpt('warn', 'WebSocket transport failed; falling back to HTTP/SSE', {
-        traceId,
-        error: websocketError instanceof Error ? websocketError.message : String(websocketError),
-        stack: websocketError instanceof Error ? websocketError.stack : undefined,
-      })
-      const streamOpen = await openStreamingWithPreFirstByteRetry({
-        endpoint,
-        openAttempt: async (signal, attempt) => {
-          logOpenAiChatgpt('info', 'HTTP/SSE fetch attempt', { traceId, endpoint, attempt })
-          const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${auth.accessToken}`,
-              'ChatGPT-Account-ID': auth.accountId,
-              originator: 'codex_cli_rs',
-              'x-client-request-id': requestId,
-              accept: 'text/event-stream',
-            },
-            body: JSON.stringify(effectiveRequestBody),
-            signal,
-          })
-          logOpenAiChatgpt('info', 'HTTP/SSE fetch response', {
-            traceId,
-            attempt,
-            ok: response.ok,
-            status: response.status,
-            statusText: response.statusText,
-            contentType: response.headers.get('content-type'),
-          })
-          return response
-        },
-      })
-
-      if (!streamOpen.response.ok) {
-        const text = await streamOpen.response.text().catch(() => '')
-        logOpenAiChatgpt('error', 'HTTP/SSE non-OK response body', {
-          traceId,
-          status: streamOpen.response.status,
-          statusText: streamOpen.response.statusText,
-          bodyPreview: previewForLog(text, 2000),
-        })
-        throw new Error(`ChatGPT backend request failed (${streamOpen.response.status}): ${text}`)
-      }
-
-      if (!streamOpen.reader) {
-        logOpenAiChatgpt('error', 'HTTP/SSE missing reader', {
-          traceId,
-          status: streamOpen.response.status,
-          contentType: streamOpen.response.headers.get('content-type'),
-        })
-        throw new Error('ChatGPT backend returned no readable stream body')
-      }
-
-      logOpenAiChatgpt('info', 'HTTP/SSE stream opened', {
-        traceId,
-        attempt: streamOpen.attempt,
-        firstReadDone: streamOpen.firstRead?.done,
-        firstReadBytes: streamOpen.firstRead?.value?.byteLength || 0,
-      })
-      parsed = await readCodexSseOutput({
-        reader: streamOpen.reader,
-        firstRead: streamOpen.firstRead,
-        emit,
-        modelName: input.modelName,
-        traceId,
-      })
-    }
 
     logOpenAiChatgpt('info', 'transport parsed output', {
       traceId,
       elapsedMs: Date.now() - startedAt,
-      ...summarizeParsedOpenAiChatgptOutput(parsed),
+      responseId: parsed.responseId,
+      textLength: parsed.content.length,
+      reasoningLength: parsed.reasoningContent?.length || 0,
+      toolCalls: parsed.toolCalls.length,
+      responseOutputItems: parsed.outputItems?.length || 0,
+      usage: parsed.usage,
+      requestMode: 'qubit_exact_full_replay',
     })
 
-    if (!parsed.text.trim() && parsed.toolCalls.length === 0 && parsed.responseOutputItems.length === 0) {
-      logOpenAiChatgpt('warn', 'parsed output is empty', {
-        traceId,
-        eventCounts: parsed.debug?.eventCounts,
-        usage: parsed.usage,
-      })
-    }
-
-    if (incrementalToolOutput && isOpenAiChatgptDebugLoggingEnabled()) {
-      console.info('[OpenAI Responses Continuation]', {
-        model: requestBody.model,
-        previousResponseId,
-        inputItems: incrementalToolOutput.length,
-      })
-    }
-
     logCodexUsage({
-      model: requestBody.model,
+      model,
       responseId: parsed.responseId,
-      promptCacheKey,
-      promptCacheRetention,
+      promptCacheKey: parsed.promptCacheKey,
+      promptCacheRetention: 'in_memory',
+      requestMode: 'qubit_exact_full_replay',
+      inputItems: parsed.diagnostics.inputItems,
+      hasPreviousResponseId: false,
       usage: parsed.usage,
     })
 
+    const responseOutputItems = parsed.outputItems || []
     const contentBlocks: any[] = []
+    if (parsed.reasoningContent) contentBlocks.push({ type: 'thinking', content: parsed.reasoningContent })
+    if (parsed.content) contentBlocks.push({ type: 'text', content: parsed.content })
 
-    if (parsed.reasoning) {
-      contentBlocks.push({ type: 'thinking', content: parsed.reasoning })
-    }
-
-    if (parsed.text) {
-      contentBlocks.push({ type: 'text', content: parsed.text })
-    }
-
-    const imageBlocks = extractImageBlocksFromResponseItems(parsed.responseOutputItems)
+    const imageBlocks = extractImageBlocksFromResponseItems(responseOutputItems)
     for (const imageBlock of imageBlocks) {
       contentBlocks.push(imageBlock)
       emit?.({ type: 'chunk', part: 'image', url: imageBlock.url, mimeType: imageBlock.mimeType })
     }
 
     for (const toolCall of parsed.toolCalls) {
-      contentBlocks.push({
-        type: 'tool_use',
-        id: toolCall.id,
-        name: toolCall.name,
-        input: toolCall.arguments,
-      })
+      contentBlocks.push({ type: 'tool_use', id: toolCall.id, name: toolCall.name, input: toolCall.arguments })
     }
 
-    if (parsed.responseOutputItems.length > 0) {
-      contentBlocks.push({
-        type: 'responses_output_items',
-        items: parsed.responseOutputItems,
-      })
+    if (responseOutputItems.length > 0) {
+      contentBlocks.push({ type: 'responses_output_items', items: responseOutputItems })
     }
 
-    const output = {
-      content: parsed.text,
-      reasoning: parsed.reasoning || undefined,
+    const output: ProviderGenerateOutput = {
+      content: parsed.content,
+      reasoning: parsed.reasoningContent || undefined,
       toolCalls: parsed.toolCalls,
       contentBlocks,
       raw: {
-        responses_output_items: parsed.responseOutputItems,
-        response_items_added: parsed.responseItemsAdded,
+        responses_output_items: responseOutputItems,
+        response_items_added: parsed.responseItemsAdded || [],
         response_id: parsed.responseId,
-        used_previous_response_id: previousResponseId,
-        used_incremental_tool_output: Boolean(incrementalToolOutput),
+        request_mode: 'qubit_exact_full_replay',
+        used_previous_response_id: null,
+        used_incremental_tool_output: false,
         usage: parsed.usage,
+        request_shape: parsed.diagnostics,
         generatedImagesDirectoryHint: getGeneratedImagesDirectoryHint(),
       },
     }
+
     logOpenAiChatgpt('info', 'generate finish', {
       traceId,
       elapsedMs: Date.now() - startedAt,
       contentLength: output.content.length,
       reasoningLength: output.reasoning?.length || 0,
-      toolCalls: output.toolCalls.length,
-      contentBlocks: output.contentBlocks.length,
-      rawResponseId: output.raw.response_id,
+      toolCalls: output.toolCalls?.length || 0,
+      contentBlocks: output.contentBlocks?.length || 0,
+      rawResponseId: output.raw?.response_id,
     })
     return output
   }
