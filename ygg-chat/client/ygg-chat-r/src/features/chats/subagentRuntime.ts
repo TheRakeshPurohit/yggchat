@@ -5,6 +5,7 @@ import type { OperationMode, ToolDefinition } from './chatTypes'
 import { createStreamingRequest, environment, localApi } from '../../utils/api'
 import { isCommunityMode } from '../../config/runtimeMode'
 import { loadAgentSettings } from '../../helpers/agentSettingsStorage'
+import { getDefaultSubagentModePrompt } from '../../helpers/operationModePromptStorage'
 import {
   getSubagentEnabledTools,
   getSubagentMaxTurns,
@@ -111,6 +112,12 @@ const resolveSubagentDefaults = async (
 
 const shouldUseCommunityLocalEphemeral = () => isCommunityMode && isElectronEnvironment
 
+const resolveSubagentSystemPrompt = (requestedSystemPrompt: unknown): string => {
+  const customSystemPrompt = typeof requestedSystemPrompt === 'string' ? requestedSystemPrompt.trim() : ''
+  const defaultSystemPrompt = getDefaultSubagentModePrompt().prompt.trim()
+  return [defaultSystemPrompt, customSystemPrompt].filter(Boolean).join('\n\n')
+}
+
 const getRuntimeToolCallName = (toolCall: any): string =>
   typeof toolCall?.name === 'string'
     ? toolCall.name
@@ -165,6 +172,7 @@ export const executeSimpleSubagentCall = async (
   const args = toolCall.arguments || {}
   const { prompt, model, systemPrompt, maxTokens, temperature, response_format, responseFormat } = args
   const effectiveResponseFormat = response_format ?? responseFormat
+  const effectiveSystemPrompt = resolveSubagentSystemPrompt(systemPrompt)
 
   if (!prompt) {
     throw new Error('Subagent requires a prompt')
@@ -180,7 +188,7 @@ export const executeSimpleSubagentCall = async (
         model: resolvedModel,
         maxTokens,
         temperature: temperature ?? 0.7,
-        systemPrompt,
+        systemPrompt: effectiveSystemPrompt,
         response_format: effectiveResponseFormat,
       })
 
@@ -205,7 +213,7 @@ export const executeSimpleSubagentCall = async (
         model: resolvedModel,
         maxTokens,
         temperature: temperature ?? 0.7,
-        systemPrompt,
+        systemPrompt: effectiveSystemPrompt,
         response_format: effectiveResponseFormat,
       }),
     })
@@ -454,6 +462,7 @@ export const executeSubagentCall = async (
     resume = false,
   } = args
   const effectiveResponseFormat = response_format ?? responseFormat
+  const effectiveSystemPrompt = resolveSubagentSystemPrompt(systemPrompt)
 
   if (!prompt) {
     throw new Error('Subagent requires a prompt')
@@ -497,7 +506,7 @@ export const executeSubagentCall = async (
     prompt,
     provider: resolvedProvider || null,
     modelName: resolvedModel,
-    systemPrompt: typeof systemPrompt === 'string' ? systemPrompt : null,
+    systemPrompt: effectiveSystemPrompt,
   })
   await appendSubagentMessage(subagentSessionId, {
     role: 'user',
@@ -531,7 +540,7 @@ export const executeSubagentCall = async (
         model: resolvedModel,
         maxTokens,
         temperature: temperature ?? 0.7,
-        systemPrompt,
+        systemPrompt: effectiveSystemPrompt,
         response_format: effectiveResponseFormat,
         tools: subagentTools.length > 0 ? subagentTools : undefined,
       }
@@ -988,7 +997,7 @@ export const executeSubagentCall = async (
       model: resolvedModel,
       maxTokens,
       temperature: temperature ?? 0.3,
-      systemPrompt,
+      systemPrompt: effectiveSystemPrompt,
       tools: undefined, // Force no tool calls for finalization
     }
 

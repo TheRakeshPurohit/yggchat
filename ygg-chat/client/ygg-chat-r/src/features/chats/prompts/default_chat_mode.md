@@ -5,7 +5,6 @@ agentMetadata:
   agentType: 'Plan'
   model: 'inherit'
   disallowedTools:
-    - subagent
     - create_file
     - edit_file
     - multi_edit

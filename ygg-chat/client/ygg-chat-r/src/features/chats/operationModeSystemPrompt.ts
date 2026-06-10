@@ -61,6 +61,7 @@ const CHAT_MODE_ALLOWED_TOOL_NAMES = new Set([
   'time',
   'view_image',
   'weather',
+  'subagent',
 ])
 
 const CHAT_MODE_BLOCKED_TOOL_NAMES = new Set([
@@ -70,7 +71,6 @@ const CHAT_MODE_BLOCKED_TOOL_NAMES = new Set([
   'edit_file',
   'multi_edit',
   'delete_file',
-  'subagent',
   'custom_tool_manager',
   'theme_manager',
   'todo_list',
@@ -92,7 +92,7 @@ export function assertToolAllowedForOperationMode(toolCall: any, operationMode: 
 
   if (CHAT_MODE_BLOCKED_TOOL_NAMES.has(toolName) || toolName.startsWith('mcp__')) {
     throw new Error(
-      `Tool "${toolName}" is not available in Chat Mode. Switch to Agent Mode to run tools that can modify files, system state, app state, or spawn agents.`
+      `Tool "${toolName}" is not available in Chat Mode. Switch to Agent Mode to run tools that can modify files, system state, or app state.`
     )
   }
 }

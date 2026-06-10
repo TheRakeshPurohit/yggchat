@@ -1,11 +1,13 @@
 import defaultChatModePromptMarkdown from '../features/chats/prompts/default_chat_mode.md?raw'
 import defaultAgentModePromptMarkdown from '../features/chats/prompts/default_agent_mode.md?raw'
+import defaultSubagentModePromptMarkdown from '../features/chats/prompts/default_subagent_mode.md?raw'
 
 const STORAGE_KEY = 'ygg_operation_mode_prompt_settings'
 
 export const OPERATION_MODE_PROMPT_SETTINGS_CHANGE_EVENT = 'ygg-operation-mode-prompt-settings-change'
 export const DEFAULT_CHAT_MODE_PROMPT_ID = 'default-chat-mode'
 export const DEFAULT_AGENT_MODE_PROMPT_ID = 'default-agent-mode'
+export const DEFAULT_SUBAGENT_MODE_PROMPT_ID = 'default-subagent-mode'
 
 export interface OperationModePrompt {
   id: string
@@ -30,6 +32,12 @@ const defaultAgentPrompt: OperationModePrompt = {
   id: DEFAULT_AGENT_MODE_PROMPT_ID,
   name: 'Default Agent Mode',
   prompt: defaultAgentModePromptMarkdown.trim(),
+}
+
+const defaultSubagentPrompt: OperationModePrompt = {
+  id: DEFAULT_SUBAGENT_MODE_PROMPT_ID,
+  name: 'Default Subagent Mode',
+  prompt: defaultSubagentModePromptMarkdown.trim(),
 }
 
 const makeId = (): string => {
@@ -84,6 +92,10 @@ export function getDefaultChatModePrompt(): OperationModePrompt {
 
 export function getDefaultAgentModePrompt(): OperationModePrompt {
   return { ...defaultAgentPrompt }
+}
+
+export function getDefaultSubagentModePrompt(): OperationModePrompt {
+  return { ...defaultSubagentPrompt }
 }
 
 export function loadOperationModePromptSettings(): OperationModePromptSettings {
