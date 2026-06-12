@@ -8,7 +8,7 @@ import { editFile, multiEdit } from './tools/editFile.js'
 import { globSearch } from './tools/glob.js'
 import htmlRenderer from './tools/htmlRenderer.js'
 import { readFileContinuation, readTextFile } from './tools/readFile.js'
-import { readMultipleTextFiles } from './tools/readFiles.js'
+import { formatReadFilesContent, readMultipleTextFiles } from './tools/readFiles.js'
 import { ripgrepSearch } from './tools/ripgrep.js'
 import { viewImage } from './tools/viewImage.js'
 import { customToolRegistry } from './tools/customToolLoader.js'
@@ -144,11 +144,12 @@ function initializeBuiltInToolRegistry(): void {
   })
 
   builtInTools.set('read_files', async (args, { rootPath }) => {
-    const { paths, baseDir, maxBytes, startLine, endLine, cwd } = args
+    const { paths, baseDir, maxBytes, startLine, endLine, ranges, cwd } = args
     if (!paths) throw new Error('paths are required')
     const effectiveCwd = resolveToolWorkspaceCwd(cwd, rootPath)
-    const filesRes = await readMultipleTextFiles(paths, { baseDir, maxBytes, startLine, endLine, cwd: effectiveCwd })
-    return { success: true, files: filesRes }
+    const filesRes = await readMultipleTextFiles(paths, { baseDir, maxBytes, startLine, endLine, ranges, cwd: effectiveCwd })
+    const content = formatReadFilesContent(filesRes)
+    return { success: true, content, text: content, files: filesRes }
   })
 
   builtInTools.set('create_file', async (args, { rootPath, operationMode }) => {

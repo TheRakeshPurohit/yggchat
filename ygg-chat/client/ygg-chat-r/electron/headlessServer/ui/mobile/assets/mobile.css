@@ -374,25 +374,50 @@ body {
   gap: 9px;
 }
 
-.mobile-header-icon-button {
-  width: 40px;
+.mobile-header-icon-button,
+.mobile-header-mode-button {
   height: 40px;
   border-radius: 11px;
   border: 1px solid #dbe2ec;
   background: #f8fafc;
   color: #334155;
-  font-size: 19px;
   line-height: 1;
   box-shadow: none;
 }
 
-.mobile-header-icon-button:hover:not(:disabled) {
+.mobile-header-icon-button {
+  width: 40px;
+  font-size: 19px;
+}
+
+.mobile-header-mode-button {
+  min-width: 58px;
+  padding: 0 10px;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.mobile-header-mode-button.is-chat {
+  color: #1d4ed8;
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.mobile-header-mode-button.is-agent {
+  color: #7c2d12;
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+
+.mobile-header-icon-button:hover:not(:disabled),
+.mobile-header-mode-button:hover:not(:disabled) {
   color: #111827;
   border-color: #cfd8e4;
   background: #f1f5f9;
 }
 
-.mobile-header-icon-button:disabled {
+.mobile-header-icon-button:disabled,
+.mobile-header-mode-button:disabled {
   opacity: 0.45;
 }
 
@@ -531,13 +556,48 @@ body {
   color: var(--muted);
 }
 
-.mobile-settings-font-zoom {
+.mobile-settings-font-zoom,
+.mobile-settings-mode-prompts {
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
   background: color-mix(in srgb, var(--panel) 88%, transparent);
   padding: 12px 14px;
   display: grid;
   gap: 9px;
+}
+
+.mobile-settings-mode-prompts {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.mobile-settings-mode-prompts strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.mobile-settings-mode-prompts p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.mobile-settings-toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mobile-settings-toggle-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
 }
 
 .mobile-settings-font-zoom-header,

@@ -10,6 +10,12 @@ function isCodexDevLoggingEnabled(): boolean {
   return /^(1|true|yes|on)$/i.test(process.env.YGG_CODEX_DEV_LOGS || '')
 }
 
+function previewForCodexLog(value: unknown, maxLength = 1200): string {
+  const raw = typeof value === 'string' ? value : JSON.stringify(value)
+  if (!raw) return ''
+  return raw.length > maxLength ? `${raw.slice(0, maxLength)}...<truncated:${raw.length}>` : raw
+}
+
 export class CodexResponsesProvider {
   private readonly options: CodexProviderOptions
   private readonly fetchImpl: typeof fetch
@@ -24,9 +30,10 @@ export class CodexResponsesProvider {
     const parts = toCodexRequestParts(input.messages, input.tools)
     const requestId = input.runId || input.sessionId || `ygg-codex-${Date.now()}`
     const promptCacheKey = input.sessionId || requestId
+    const instructions = parts.instructions?.trim() || 'You are ChatGPT.'
     const body: Record<string, any> = {
       model: input.model,
-      ...(parts.instructions ? { instructions: parts.instructions } : {}),
+      instructions,
       input: parts.input,
       ...(parts.tools.length ? { tools: parts.tools, tool_choice: 'auto', parallel_tool_calls: true } : {}),
       reasoning: {
@@ -58,11 +65,22 @@ export class CodexResponsesProvider {
     const diagnostics = buildCodexRequestDiagnostics({
       promptCacheKey,
       requestId,
-      instructions: parts.instructions,
+      instructions,
       input: parts.input,
       tools: parts.tools,
     })
-    if (isCodexDevLoggingEnabled()) console.info('[Codex Request Shape]', diagnostics)
+    if (isCodexDevLoggingEnabled()) {
+      console.info('[Codex Request Shape]', {
+        ...diagnostics,
+        model: input.model,
+        transport: this.resolveTransport(),
+        instructionsLength: instructions.length,
+        usedFallbackInstructions: !parts.instructions?.trim(),
+        hasInstructionsInBody: typeof body.instructions === 'string' && body.instructions.length > 0,
+        inputItems: parts.input.length,
+        tools: parts.tools.length,
+      })
+    }
 
     const transport = this.resolveTransport()
     const parsed =
@@ -78,7 +96,12 @@ export class CodexResponsesProvider {
   private async generateAuto(input: CodexGenerateInput, headers: Headers, body: Record<string, any>) {
     try {
       return await this.generateWebSocket(input, headers, body)
-    } catch {
+    } catch (error) {
+      if (isCodexDevLoggingEnabled()) {
+        console.warn('[Codex Transport] websocket failed; falling back to http', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
       input.signal?.throwIfAborted()
       return await this.generateHttp(input, headers, body)
     }
@@ -100,6 +123,24 @@ export class CodexResponsesProvider {
           signal,
         }),
     })
+    if (!streamOpen.response.ok) {
+      let errorBody = ''
+      try {
+        errorBody = await streamOpen.response.text()
+      } catch (error) {
+        errorBody = `Failed to read error body: ${error instanceof Error ? error.message : String(error)}`
+      }
+      console.warn('[Codex HTTP] non-OK response', {
+        status: streamOpen.response.status,
+        statusText: streamOpen.response.statusText,
+        requestId: input.runId || input.sessionId || null,
+        model: input.model,
+        instructionsLength: typeof body.instructions === 'string' ? body.instructions.length : 0,
+        inputItems: Array.isArray(body.input) ? body.input.length : 0,
+        bodyPreview: previewForCodexLog(errorBody),
+      })
+      throw new Error(`ChatGPT backend request failed (${streamOpen.response.status}): ${errorBody || streamOpen.response.statusText}`)
+    }
     return await parseCodexSseResponse(streamOpen.response, {
       emit: input.emit,
       modelName: input.model,

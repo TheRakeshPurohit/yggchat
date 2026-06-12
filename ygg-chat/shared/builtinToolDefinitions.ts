@@ -269,6 +269,47 @@ export const BUILTIN_TOOL_DEFINITIONS: SharedToolDefinition[] = [
     },
   },
   {
+    name: 'multi_call',
+    enabled: true,
+    description:
+      'Execute multiple tool calls sequentially in one tool invocation. Each nested call is { tool, args } and uses normal yggchat permission checks, hooks, operation-mode restrictions, and job execution. Nested multi_call is not supported.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        calls: {
+          type: 'array',
+          minItems: 1,
+          description:
+            'Ordered list of tool calls to execute sequentially. Each call should specify a tool name and optional args object.',
+          items: {
+            type: 'object',
+            properties: {
+              tool: {
+                type: 'string',
+                description: 'Tool name to execute, e.g. read_file, glob, ripgrep, bash, or a custom/MCP tool name.',
+              },
+              toolName: {
+                type: 'string',
+                description: 'Alias for tool. Prefer tool unless compatibility requires toolName.',
+              },
+              args: {
+                type: 'object',
+                description: 'Arguments object for the nested tool call. Defaults to an empty object.',
+                additionalProperties: true,
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+        stopOnError: {
+          type: 'boolean',
+          description: 'If true, stop after the first failed nested call. Defaults to true.',
+        },
+      },
+      required: ['calls'],
+    },
+  },
+  {
     name: 'read_file',
     enabled: true,
     description:
@@ -325,7 +366,7 @@ export const BUILTIN_TOOL_DEFINITIONS: SharedToolDefinition[] = [
     name: 'read_files',
     enabled: true,
     description:
-      "Read multiple text/code/config files and return a single concatenated string, separated by each file's relative path header.",
+      "Read multiple text/code/config files and return both a single concatenated content string separated by each file's relative path header and a structured files array.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -360,6 +401,19 @@ export const BUILTIN_TOOL_DEFINITIONS: SharedToolDefinition[] = [
           type: 'integer',
           minimum: 1,
           description: 'Optional 1-based line number to stop reading at (inclusive). Applies to all files.',
+        },
+        ranges: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              startLine: { type: 'integer', minimum: 1, description: '1-based start line (inclusive)' },
+              endLine: { type: 'integer', minimum: 1, description: '1-based end line (inclusive)' },
+            },
+            required: ['startLine', 'endLine'],
+          },
+          description:
+            'Array of line range objects to read multiple disjoint sections from every file. Format: [{"startLine": 10, "endLine": 50}, {"startLine": 100, "endLine": 150}]. Takes precedence over startLine/endLine.',
         },
       },
       required: ['paths'],

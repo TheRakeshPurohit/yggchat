@@ -12,6 +12,7 @@
     "electron/main.mjs",
     "electron/preload.mjs",
     "electron/toolRuntimeUtility.mjs",
+    "src/features/chats/prompts/*.md",
     "electron/headlessServer/ui/mobile/**/*",
     "electron/headlessServer/routes/**/*.html"
   ],

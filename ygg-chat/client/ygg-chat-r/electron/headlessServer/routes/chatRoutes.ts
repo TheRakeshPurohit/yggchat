@@ -52,7 +52,13 @@ function buildHeadlessMessageRequest(req: Request, operation: HeadlessChatOperat
     promptCacheRetention: body.promptCacheRetention ?? body.prompt_cache_retention,
     tools: Array.isArray(body.tools) ? body.tools : undefined,
     rootPath: body.rootPath ?? body.root_path ?? body.cwd ?? null,
-    operationMode: body.operationMode ?? body.operation_mode ?? 'execute',
+    operationMode: body.operationMode === 'plan' || body.operation_mode === 'plan' ? 'plan' : 'execute',
+    includeOperationModePrompt:
+      typeof body.includeOperationModePrompt === 'boolean'
+        ? body.includeOperationModePrompt
+        : typeof body.include_operation_mode_prompt === 'boolean'
+          ? body.include_operation_mode_prompt
+          : true,
     streamId: body.streamId ?? body.stream_id ?? null,
     toolTimeoutMs:
       typeof body.toolTimeoutMs === 'number'

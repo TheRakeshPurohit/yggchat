@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { LocalUserProfile, MobileCustomTool, MobileProviderName } from '../types'
+import type { LocalUserProfile, MobileCustomTool, MobileOperationMode, MobileProviderName } from '../types'
 import { ProfilePicker } from './ProfilePicker'
 import { ToolTogglePanel } from './ToolTogglePanel'
 import { Badge, Button, Input, Select, Textarea } from './ui'
@@ -15,6 +15,10 @@ interface MobileHeaderProps {
   minAgentTextFontSizePx: number
   maxAgentTextFontSizePx: number
   onAgentTextFontSizeChange: (value: number) => void
+  operationMode: MobileOperationMode
+  includeOperationModePrompts: boolean
+  onOperationModeToggle: () => void
+  onIncludeOperationModePromptsChange: (enabled: boolean) => void
   users: LocalUserProfile[]
   selectedUserId: string | null
   onProviderChange: (value: MobileProviderName) => void
@@ -70,6 +74,10 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
   minAgentTextFontSizePx,
   maxAgentTextFontSizePx,
   onAgentTextFontSizeChange,
+  operationMode,
+  includeOperationModePrompts,
+  onOperationModeToggle,
+  onIncludeOperationModePromptsChange,
   users,
   selectedUserId,
   onProviderChange,
@@ -242,6 +250,22 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
                     compact
                   />
                 </div>
+
+                <section className='mobile-settings-mode-prompts' aria-label='Default operation mode prompts'>
+                  <div>
+                    <strong>Default mode prompts</strong>
+                    <p>Include built-in Chat/Agent instructions before project and conversation prompts.</p>
+                  </div>
+                  <label className='mobile-settings-toggle-row'>
+                    <input
+                      type='checkbox'
+                      checked={includeOperationModePrompts}
+                      onChange={event => onIncludeOperationModePromptsChange(event.target.checked)}
+                      disabled={selectorsDisabled}
+                    />
+                    <span>{includeOperationModePrompts ? 'Enabled' : 'Disabled'}</span>
+                  </label>
+                </section>
 
                 <section className='mobile-settings-font-zoom' aria-label='Assistant text zoom'>
                   <div className='mobile-settings-font-zoom-header'>
@@ -424,6 +448,17 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
             <Button
               variant='ghost'
               size='sm'
+              className={`mobile-header-mode-button ${operationMode === 'plan' ? 'is-chat' : 'is-agent'}`}
+              onClick={onOperationModeToggle}
+              disabled={selectorsDisabled}
+              aria-label={operationMode === 'plan' ? 'Switch to Agent Mode' : 'Switch to Chat Mode'}
+              title={operationMode === 'plan' ? 'Chat Mode: planning/read-only' : 'Agent Mode: tool execution'}
+            >
+              {operationMode === 'plan' ? 'Chat' : 'Agent'}
+            </Button>
+            <Button
+              variant='ghost'
+              size='sm'
               className='mobile-header-icon-button'
               onClick={onOpenProjectConversationPicker}
               disabled={!canOpenProjectConversationPicker}
@@ -449,7 +484,7 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
 
         <div className='mobile-header-summary mobile-header-summary--compact'>
           <div className='mobile-header-summary-item'>
-            <span>{PROVIDER_LABELS[providerName]}</span>
+            <span>{PROVIDER_LABELS[providerName]} · {operationMode === 'plan' ? 'Chat Mode' : 'Agent Mode'}</span>
             <strong>{modelName}</strong>
             <Button
               variant='ghost'

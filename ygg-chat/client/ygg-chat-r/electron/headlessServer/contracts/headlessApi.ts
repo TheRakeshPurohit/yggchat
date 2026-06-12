@@ -30,6 +30,7 @@ export interface HeadlessMessageRequest {
   tools?: Array<{ name: string; description?: string; inputSchema?: Record<string, any> }>
   rootPath?: string | null
   operationMode?: 'plan' | 'execute'
+  includeOperationModePrompt?: boolean
   streamId?: string | null
   toolTimeoutMs?: number
 }

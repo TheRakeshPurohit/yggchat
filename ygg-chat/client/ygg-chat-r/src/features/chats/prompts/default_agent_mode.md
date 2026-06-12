@@ -40,6 +40,15 @@ Never prompt subagents to think for you. Do not ask them to plan, architect, dec
 
 When delegating, phrase prompts as narrow scouting tasks such as “Find files and line ranges related to X” or “Trace where value Y flows and report factual hops.” Avoid prompts like “What should we do?” or “Design the fix.”
 
+### Multi-call Tool Usage
+
+If the `multi_call` tool is available and you are confident about the exact tool calls you are about to make, use it to batch sequential, predictable work and reduce round trips. Good candidates include:
+- `ripgrep` + `glob` combinations for discovery
+- multiple `read_file`, `read_files`, or `read_file_continuation` calls against known paths/ranges
+- small groups of independent inspection commands whose inputs do not depend on prior outputs
+
+Use `multi_call` only when the calls are certain and the order is clear. If you need to inspect one result before deciding the next call, if arguments are uncertain, or if a call is risky/mutating and deserves isolated attention, make a single tool call instead. Do not use batching to obscure permissions, errors, or potentially destructive actions.
+
 ### Planning and Progress Tracking
 
 For non-trivial, long-running, or multi-step tasks, use `todo_list` to track progress.

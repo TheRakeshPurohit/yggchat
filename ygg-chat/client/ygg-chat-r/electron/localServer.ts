@@ -56,7 +56,7 @@ import htmlRenderer from './tools/htmlRenderer.js'
 import { execute as executeMcpManagerTool } from './tools/mcpManagerTool.js'
 import { JobFilter, JobOptions, toolOrchestrator } from './tools/orchestrator/index.js'
 import { readFileContinuation, readTextFile } from './tools/readFile.js'
-import { readMultipleTextFiles } from './tools/readFiles.js'
+import { formatReadFilesContent, readMultipleTextFiles } from './tools/readFiles.js'
 import { ripgrepSearch } from './tools/ripgrep.js'
 import { viewImage } from './tools/viewImage.js'
 import { UtilityToolRuntimeHost } from './tools/runtime/UtilityToolRuntimeHost.js'
@@ -515,11 +515,12 @@ function initializeBuiltInToolRegistry() {
   })
 
   builtInTools.set('read_files', async (args, { rootPath }) => {
-    const { paths, baseDir, maxBytes, startLine, endLine, cwd } = args
+    const { paths, baseDir, maxBytes, startLine, endLine, ranges, cwd } = args
     if (!paths) throw new Error('paths are required')
     const effectiveCwd = resolveToolWorkspaceCwd(cwd, rootPath)
-    const filesRes = await readMultipleTextFiles(paths, { baseDir, maxBytes, startLine, endLine, cwd: effectiveCwd })
-    return { success: true, files: filesRes }
+    const filesRes = await readMultipleTextFiles(paths, { baseDir, maxBytes, startLine, endLine, ranges, cwd: effectiveCwd })
+    const content = formatReadFilesContent(filesRes)
+    return { success: true, content, text: content, files: filesRes }
   })
 
   builtInTools.set('create_file', async (args, { rootPath, operationMode }) => {
@@ -3391,6 +3392,7 @@ function setupServer() {
       refreshToken: string
       expiresAt: number
       accountId: string
+      email: string | null
       createdAt: number
     }
   >()
@@ -3456,6 +3458,7 @@ function setupServer() {
           access_token?: string
           refresh_token?: string
           expires_in?: number
+          id_token?: string
         }
 
         if (!tokens.access_token || !tokens.refresh_token) {
@@ -3464,17 +3467,25 @@ function setupServer() {
           return
         }
 
-        // Extract account ID from JWT
-        let accountId = ''
-        try {
-          const parts = tokens.access_token.split('.')
-          if (parts.length === 3) {
-            const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString())
-            accountId = payload['https://api.openai.com/auth']?.chatgpt_account_id || ''
+        const decodeJwtPayload = (token: string | undefined): any | null => {
+          if (!token) return null
+          try {
+            const parts = token.split('.')
+            if (parts.length !== 3) return null
+            const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+            const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4)
+            return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'))
+          } catch (e) {
+            console.error('[OAuthServer] Failed to decode JWT:', e)
+            return null
           }
-        } catch (e) {
-          console.error('[OAuthServer] Failed to decode JWT:', e)
         }
+
+        const accessPayload = decodeJwtPayload(tokens.access_token)
+        const idPayload = decodeJwtPayload(tokens.id_token)
+        const accountId = accessPayload?.['https://api.openai.com/auth']?.chatgpt_account_id || ''
+        const rawEmail = typeof idPayload?.email === 'string' ? idPayload.email : typeof accessPayload?.email === 'string' ? accessPayload.email : ''
+        const email = rawEmail.trim() || null
 
         // Store tokens for frontend to retrieve
         const expiresAt = Date.now() + (tokens.expires_in || 3600) * 1000
@@ -3483,6 +3494,7 @@ function setupServer() {
           refreshToken: tokens.refresh_token,
           expiresAt,
           accountId,
+          email,
           createdAt: Date.now(),
         })
 
@@ -3628,6 +3640,7 @@ function setupServer() {
         refreshToken: tokens.refreshToken,
         expiresAt: tokens.expiresAt,
         accountId: tokens.accountId,
+        email: tokens.email,
       })
     } catch (error) {
       console.error('[LocalServer] OpenAI OAuth complete error:', error)
@@ -4950,8 +4963,33 @@ function setupServer() {
   })
 
   app.post('/api/hooks/run', async (req, res) => {
+    const startedAt = Date.now()
+    const body = req.body || {}
+    const shouldLogHookRun = /^(1|true|yes|on)$/i.test(process.env.YGG_HOOK_DEBUG_LOGS || '')
+    if (shouldLogHookRun) {
+      console.info('[LocalServer] Hook run request', {
+        event: body?.event ?? null,
+        conversationId: body?.conversationId ?? null,
+        streamId: body?.streamId ?? null,
+        operation: body?.operation ?? null,
+        cwd: body?.cwd ?? null,
+        messageId: body?.messageId ?? null,
+        parentId: body?.parentId ?? null,
+      })
+    }
     try {
-      const result = await runHookRequest(req.body || {})
+      const result = await runHookRequest(body)
+      if (shouldLogHookRun || (Array.isArray(result.errors) && result.errors.length > 0)) {
+        console.info('[LocalServer] Hook run result', {
+          event: body?.event ?? null,
+          elapsedMs: Date.now() - startedAt,
+          matched: result.matched,
+          hookCount: result.hookCount,
+          blocked: result.blocked ?? false,
+          hasAdditionalContext: Boolean(result.additionalContext),
+          errors: result.errors ?? [],
+        })
+      }
       res.json(result)
     } catch (error) {
       console.error('[LocalServer] Hook execution error:', error)

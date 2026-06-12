@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .ygg/hooks/inject_branch_point_prompt.py",
+            "command": "python3 .ygg/hooks/inject_branch_point_prompt.py",
             "timeoutMs": 30000
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .ygg/hooks/root_note_stop.py",
+            "command": "python3 .ygg/hooks/root_note_stop.py",
             "timeoutMs": 60000
           }
         ]

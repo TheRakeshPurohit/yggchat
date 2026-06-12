@@ -36,24 +36,34 @@ type PowerShellCwdResolution = {
  * path is supplied, try to convert it to the matching \\wsl$ UNC path so native
  * PowerShell can use it as a working directory.
  */
+function getEffectiveCwd(inputCwd?: string): string {
+  const trimmed = inputCwd?.trim()
+
+  // Treat empty/default placeholder cwd values as "use the tool process cwd".
+  if (!trimmed || trimmed === '.' || trimmed === '/') {
+    return process.cwd()
+  }
+
+  return trimmed
+}
+
 export async function resolvePowerShellCwd(inputCwd?: string): Promise<PowerShellCwdResolution> {
-  const cwdCandidate = (inputCwd?.trim() || process.cwd()).trim()
-  const fallback = cwdCandidate || process.cwd()
+  const cwdCandidate = getEffectiveCwd(inputCwd)
 
   if (!isWindows()) {
-    const posix = path.isAbsolute(fallback) ? fallback : path.resolve(fallback)
+    const posix = path.isAbsolute(cwdCandidate) ? cwdCandidate : path.resolve(cwdCandidate)
     return { display: posix, forSpawn: posix }
   }
 
-  const pathType = detectPathType(fallback)
+  const pathType = detectPathType(cwdCandidate)
   if (pathType === 'linux') {
-    const windowsPath = await resolveToWindowsPath(fallback)
+    const windowsPath = await resolveToWindowsPath(cwdCandidate)
     return { display: windowsPath, forSpawn: windowsPath }
   }
 
-  const normalizedWin = path.win32.isAbsolute(fallback)
-    ? path.win32.normalize(fallback)
-    : path.win32.resolve(fallback)
+  const normalizedWin = path.win32.isAbsolute(cwdCandidate)
+    ? path.win32.normalize(cwdCandidate)
+    : path.win32.resolve(cwdCandidate)
 
   return { display: normalizedWin, forSpawn: normalizedWin }
 }

@@ -5187,6 +5187,7 @@ function Chat() {
         refreshToken?: string
         expiresAt?: number
         accountId?: string
+        email?: string | null
       }>('/openai/auth/complete', { state })
 
       if (data.pending) {
@@ -5209,6 +5210,7 @@ function Chat() {
         refreshToken: data.refreshToken,
         expiresAt: data.expiresAt,
         accountId: data.accountId,
+        email: typeof data.email === 'string' && data.email.trim() ? data.email.trim() : null,
       }
       saveTokens(tokens)
 

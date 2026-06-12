@@ -33,6 +33,7 @@ describe('OpenAiChatgptProvider', () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
       const body = JSON.parse(String(init?.body || '{}'))
       const headers = new Headers(init?.headers as any)
+      expect(body.instructions).toBe('You are ChatGPT.')
       expect(body.parallel_tool_calls).toBe(true)
       expect(body.prompt_cache_key).toEqual(expect.stringMatching(/^ygg-chat:/))
       expect(body.client_metadata).toEqual({ 'x-codex-installation-id': body.prompt_cache_key })
@@ -306,6 +307,7 @@ describe('OpenAiChatgptProvider', () => {
 
     expect(result.content).toBe('Final answer after replay')
     expect(capturedBody).toBeTruthy()
+    expect(capturedBody.instructions).toBe('You are ChatGPT.')
     expect(capturedBody.prompt_cache_key).toBe('conversation-cache-key')
     expect(capturedBody.client_metadata).toEqual({ 'x-codex-installation-id': 'conversation-cache-key' })
     expect(capturedBody.include).toEqual(['reasoning.encrypted_content', 'web_search_call.action.sources'])

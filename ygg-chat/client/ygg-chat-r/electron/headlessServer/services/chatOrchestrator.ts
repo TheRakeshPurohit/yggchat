@@ -4,6 +4,7 @@ import { MessageRepo } from '../persistence/messageRepo.js'
 import { ProjectRepo } from '../persistence/projectRepo.js'
 import type { ProviderTokenStore } from '../providers/tokenStore.js'
 import { BranchOrchestrator, type ResolvedExecution } from './branchOrchestrator.js'
+import { buildHeadlessSystemPrompt } from './headlessSystemPrompt.js'
 import { ProviderRouter } from './providerRouter.js'
 import { ToolLoopService, type ToolExecutor } from './toolLoopService.js'
 
@@ -114,7 +115,13 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
       Array.isArray(request.tools) && request.tools.length > 0 ? request.tools : this.defaultToolsProvider()
 
     const project = conversation?.project_id ? this.projectRepo.getById(conversation.project_id) : null
-    const systemPrompt = request.systemPrompt ?? conversation?.system_prompt ?? project?.system_prompt ?? null
+    const systemPrompt = buildHeadlessSystemPrompt({
+      operationMode: request.operationMode ?? 'execute',
+      includeOperationModePrompt: request.includeOperationModePrompt ?? true,
+      requestPrompt: request.systemPrompt ?? null,
+      projectPrompt: project?.system_prompt ?? null,
+      conversationPrompt: conversation?.system_prompt ?? null,
+    })
     const conversationContext = request.conversationContext ?? conversation?.conversation_context ?? null
     const projectContext = request.projectContext ?? project?.context ?? null
 

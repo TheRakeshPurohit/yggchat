@@ -18,6 +18,7 @@ export interface OpenAITokens {
   refreshToken: string
   expiresAt: number
   accountId: string
+  email?: string | null
 }
 
 export interface PKCEPair {
@@ -150,6 +151,11 @@ export function extractAccountId(accessToken: string): string | null {
   return decodeJWT(accessToken)?.[JWT_CLAIM_PATH]?.chatgpt_account_id || null
 }
 
+export function extractEmailFromToken(token: string): string | null {
+  const email = decodeJWT(token)?.email
+  return typeof email === 'string' && email.trim() ? email.trim() : null
+}
+
 export function shouldRefreshToken(expiresAt: number): boolean {
   return Date.now() >= expiresAt - 5 * 60 * 1000
 }
@@ -185,7 +191,13 @@ export async function getValidTokens(storage: TokenStorage): Promise<OpenAIToken
     clearTokens(storage)
     return null
   }
-  const refreshed: OpenAITokens = { accessToken: result.access!, refreshToken: result.refresh!, expiresAt: result.expires!, accountId }
+  const refreshed: OpenAITokens = {
+    accessToken: result.access!,
+    refreshToken: result.refresh!,
+    expiresAt: result.expires!,
+    accountId,
+    email: tokens.email ?? extractEmailFromToken(result.access!),
+  }
   saveTokens(storage, refreshed)
   return refreshed
 }

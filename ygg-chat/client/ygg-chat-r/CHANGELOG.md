@@ -12,6 +12,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+## [0.2.2] - 2026-06-12
+
+### Added
+
+- Added Python hook execution fallback from `python` to `python3`.
+- Added sign-in account stats for Codex.
+- Added the `multi_call` tool for running multiple predictable tool calls sequentially.
+- Added system prompt support in remote and headless mode.
+
+### Changed
+
+- Improved the `read_files` tool.
+- Updated system prompts.
+- Updated Bash and PowerShell tool cwd resolution so cwd values of `''`, `.`, or `/` are treated as the tool process `process.cwd()`.
+
+### Fixed
+
+- Fixed hook execution on systems where only `python3` is available.
+
 ## [0.1.95] - 2026-05-18
 
 ### Fixed

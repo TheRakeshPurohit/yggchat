@@ -19,8 +19,17 @@ describe('PowerShell tool command construction', () => {
 })
 
 describe('PowerShell tool cwd resolution', () => {
-  it('resolves relative cwd to an absolute native path', async () => {
-    const resolved = await resolvePowerShellCwd('.')
+  it('resolves placeholder cwd values to the current process cwd', async () => {
+    for (const cwd of ['', '.', '/']) {
+      const resolved = await resolvePowerShellCwd(cwd)
+
+      expect(resolved.display).toBe(process.cwd())
+      expect(resolved.forSpawn).toBe(process.cwd())
+    }
+  })
+
+  it('resolves non-placeholder relative cwd to an absolute native path', async () => {
+    const resolved = await resolvePowerShellCwd('electron')
 
     expect(path.isAbsolute(resolved.display)).toBe(true)
     expect(path.isAbsolute(resolved.forSpawn)).toBe(true)

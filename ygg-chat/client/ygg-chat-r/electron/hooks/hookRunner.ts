@@ -16,6 +16,81 @@ const YGG_SETTINGS_FILES = ['settings.json', 'settings.local.json'] as const
 const DEFAULT_HOOK_TIMEOUT_MS = 30_000
 const DEFAULT_HOOK_MAX_OUTPUT_CHARS = 60_000
 
+function isHookDebugLoggingEnabled(): boolean {
+  return /^(1|true|yes|on)$/i.test(process.env.YGG_HOOK_DEBUG_LOGS || '')
+}
+
+function previewForHookLog(value: unknown, maxLength = 800): string {
+  const raw = typeof value === 'string' ? value : JSON.stringify(value)
+  if (!raw) return ''
+  return raw.length > maxLength ? `${raw.slice(0, maxLength)}...<truncated:${raw.length}>` : raw
+}
+
+function logHookRunner(message: string, details?: Record<string, unknown>): void {
+  if (!isHookDebugLoggingEnabled()) return
+  console.info(`[HookRunner] ${message}`, details || {})
+}
+
+function warnHookRunner(message: string, details?: Record<string, unknown>): void {
+  if (!isHookDebugLoggingEnabled()) return
+  console.warn(`[HookRunner] ${message}`, details || {})
+}
+
+type HookCommandExecutionResult = Awaited<ReturnType<typeof runBashCommand>>
+
+function getPythonFallbackCommand(command: string): string | null {
+  const trimmed = command.trimStart()
+  const leadingWhitespace = command.slice(0, command.length - trimmed.length)
+  if (trimmed.startsWith('python3 ')) return `${leadingWhitespace}python ${trimmed.slice('python3 '.length)}`
+  if (trimmed.startsWith('python ')) return `${leadingWhitespace}python3 ${trimmed.slice('python '.length)}`
+  return null
+}
+
+function isMissingPythonInterpreter(result: HookCommandExecutionResult): boolean {
+  const combined = `${result.error || ''}\n${result.stderr || ''}\n${result.stdout || ''}`.toLowerCase()
+  return (
+    /(^|\s)(python3?|\/usr\/bin\/env:\s*['"]?python3?)[:\s]/i.test(combined) &&
+    /(command not found|no such file or directory|not found)/i.test(combined)
+  )
+}
+
+async function runHookCommandWithPythonFallback(params: {
+  command: string
+  cwd?: string
+  input: string
+  timeoutMs: number
+  maxOutputChars: number
+}): Promise<{ executionResult: HookCommandExecutionResult; command: string; fallbackAttempted: boolean }> {
+  const first = await runBashCommand(params.command, {
+    cwd: params.cwd,
+    input: params.input,
+    timeoutMs: params.timeoutMs,
+    maxOutputChars: params.maxOutputChars,
+  })
+
+  const fallbackCommand = getPythonFallbackCommand(params.command)
+  if (first.success || !fallbackCommand || !isMissingPythonInterpreter(first)) {
+    return { executionResult: first, command: params.command, fallbackAttempted: false }
+  }
+
+  warnHookRunner('python interpreter missing; retrying hook with fallback interpreter', {
+    command: params.command,
+    fallbackCommand,
+    cwd: params.cwd,
+    error: first.error || null,
+    stderrPreview: previewForHookLog(first.stderr),
+  })
+
+  const second = await runBashCommand(fallbackCommand, {
+    cwd: params.cwd,
+    input: params.input,
+    timeoutMs: params.timeoutMs,
+    maxOutputChars: params.maxOutputChars,
+  })
+
+  return { executionResult: second, command: fallbackCommand, fallbackAttempted: true }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
@@ -159,17 +234,20 @@ async function collectYggSettingsFiles(startDir: string | null): Promise<string[
   const files: string[] = []
 
   const managedHooksDir = await ensureManagedHooksInitialized()
+  logHookRunner('collecting settings files', { startDir, managedHooksDir })
   for (const fileName of YGG_SETTINGS_FILES) {
     const candidate = path.join(managedHooksDir, fileName)
     try {
       await fs.promises.access(candidate, fs.constants.R_OK)
       files.push(candidate)
+      logHookRunner('found managed settings file', { candidate })
     } catch {
-      // ignore missing files
+      logHookRunner('managed settings file not readable', { candidate })
     }
   }
 
   if (files.length > 0) {
+    logHookRunner('using managed settings files', { files })
     return files
   }
 
@@ -188,6 +266,7 @@ async function collectYggSettingsFiles(startDir: string | null): Promise<string[
         try {
           await fs.promises.access(candidate, fs.constants.R_OK)
           files.push(candidate)
+          logHookRunner('found fallback settings file', { candidate })
         } catch {
           // ignore missing files
         }
@@ -202,6 +281,7 @@ async function collectYggSettingsFiles(startDir: string | null): Promise<string[
   await visitChain(startDir)
   await visitChain(os.homedir())
 
+  logHookRunner('finished collecting settings files', { startDir, files })
   return files
 }
 
@@ -209,19 +289,34 @@ async function loadHookEntriesForEvent(event: HookEventName, cwd: string | null 
   const searchCwd = await resolveConfigSearchCwd(cwd)
   const settingsFiles = await collectYggSettingsFiles(searchCwd)
   const entries: NormalizedHookEntry[] = []
+  logHookRunner('loading hook entries for event', { event, cwd, searchCwd, settingsFiles })
 
   for (const settingsFile of settingsFiles) {
     try {
       const raw = await fs.promises.readFile(settingsFile, 'utf8')
       const parsed = JSON.parse(raw)
-      if (!isRecord(parsed) || !isRecord(parsed.hooks)) continue
+      if (!isRecord(parsed) || !isRecord(parsed.hooks)) {
+        logHookRunner('settings file has no hooks object', { settingsFile })
+        continue
+      }
       const eventEntries = normalizeEventEntries(parsed.hooks[event], settingsFile)
+      logHookRunner('loaded hook entries from settings file', {
+        event,
+        settingsFile,
+        entryCount: eventEntries.length,
+        handlerCount: eventEntries.reduce((sum, entry) => sum + entry.handlers.length, 0),
+      })
       entries.push(...eventEntries)
     } catch (error) {
       console.warn(`[HookRunner] Failed to load ${settingsFile}:`, error)
     }
   }
 
+  logHookRunner('loaded hook entries summary', {
+    event,
+    entryCount: entries.length,
+    handlerCount: entries.reduce((sum, entry) => sum + entry.handlers.length, 0),
+  })
   return entries
 }
 
@@ -402,11 +497,40 @@ function mergeHookDecision(
 
 async function executeCommandHook(handler: NormalizedHookHandler, req: HookRunRequest): Promise<Partial<HookRunResult>> {
   const payload = buildHookPayload(req)
-  const executionResult = await runBashCommand(handler.command, {
-    cwd: handler.workingDirectory || req.cwd || undefined,
-    input: JSON.stringify(payload),
-    timeoutMs: handler.timeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS,
+  const cwd = handler.workingDirectory || req.cwd || undefined
+  const timeoutMs = handler.timeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS
+  logHookRunner('executing command hook', {
+    event: req.event,
+    command: handler.command,
+    cwd,
+    timeoutMs,
+    conversationId: req.conversationId ?? null,
+    messageId: req.messageId ?? null,
+    parentId: req.parentId ?? null,
+  })
+  const commandInput = JSON.stringify(payload)
+  const {
+    executionResult,
+    command: executedCommand,
+    fallbackAttempted,
+  } = await runHookCommandWithPythonFallback({
+    command: handler.command,
+    cwd,
+    input: commandInput,
+    timeoutMs,
     maxOutputChars: DEFAULT_HOOK_MAX_OUTPUT_CHARS,
+  })
+
+  logHookRunner('command hook completed', {
+    event: req.event,
+    command: handler.command,
+    executedCommand,
+    fallbackAttempted,
+    cwd,
+    success: executionResult.success,
+    error: executionResult.error || null,
+    stdoutPreview: previewForHookLog(executionResult.stdout),
+    stderrPreview: previewForHookLog(executionResult.stderr),
   })
 
   const combinedOutput = [executionResult.stdout, executionResult.stderr].filter(Boolean).join('\n').trim()
@@ -418,9 +542,24 @@ async function executeCommandHook(handler: NormalizedHookHandler, req: HookRunRe
   }
 
   try {
-    return normalizeDecision(req.event, JSON.parse(combinedOutput))
+    const decision = normalizeDecision(req.event, JSON.parse(combinedOutput))
+    logHookRunner('parsed command hook JSON output', {
+      event: req.event,
+      command: executedCommand,
+      configuredCommand: handler.command,
+      decisionKeys: Object.keys(decision),
+      additionalContextPreview: previewForHookLog(decision.additionalContext),
+    })
+    return decision
   } catch {
     const interpreted = interpretTextResult(req.event, combinedOutput)
+    logHookRunner('interpreted command hook text output', {
+      event: req.event,
+      command: executedCommand,
+      configuredCommand: handler.command,
+      interpretedKeys: Object.keys(interpreted),
+      outputPreview: previewForHookLog(combinedOutput),
+    })
     if (!executionResult.success && !interpreted.blocked && !interpreted.permissionDecision) {
       throw new Error(combinedOutput)
     }
@@ -429,10 +568,31 @@ async function executeCommandHook(handler: NormalizedHookHandler, req: HookRunRe
 }
 
 export async function runHookRequest(req: HookRunRequest): Promise<HookRunResult> {
+  logHookRunner('run request start', {
+    event: req.event,
+    cwd: req.cwd ?? null,
+    conversationId: req.conversationId ?? null,
+    streamId: req.streamId ?? null,
+    operation: req.operation ?? null,
+    messageId: req.messageId ?? null,
+    parentId: req.parentId ?? null,
+  })
   const entries = await loadHookEntriesForEvent(req.event, req.cwd)
   const matchingHandlers = entries.flatMap(entry => {
     if (!matchesHookMatcher(req.event, entry.matcher, req)) return []
     return entry.handlers.filter(handler => handler.enabled !== false && matchesHookMatcher(req.event, handler.matcher, req))
+  })
+
+  logHookRunner('matched handlers', {
+    event: req.event,
+    entryCount: entries.length,
+    handlerCount: matchingHandlers.length,
+    handlers: matchingHandlers.map(handler => ({
+      command: handler.command,
+      cwd: handler.workingDirectory || req.cwd || null,
+      timeoutMs: handler.timeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS,
+      matcher: handler.matcher ?? null,
+    })),
   })
 
   let result: HookRunResult = {
@@ -449,6 +609,12 @@ export async function runHookRequest(req: HookRunRequest): Promise<HookRunResult
       result = mergeHookDecision(result, req.event, decision, additionalContexts)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      warnHookRunner('command hook failed', {
+        event: req.event,
+        command: handler.command,
+        cwd: handler.workingDirectory || req.cwd || null,
+        error: message,
+      })
       pushUnique(result.errors || (result.errors = []), message)
     }
   }
@@ -456,6 +622,15 @@ export async function runHookRequest(req: HookRunRequest): Promise<HookRunResult
   if (!result.errors || result.errors.length === 0) {
     delete result.errors
   }
+
+  logHookRunner('run request finished', {
+    event: req.event,
+    matched: result.matched,
+    hookCount: result.hookCount,
+    blocked: result.blocked ?? false,
+    hasAdditionalContext: Boolean(result.additionalContext),
+    errors: result.errors ?? [],
+  })
 
   return result
 }

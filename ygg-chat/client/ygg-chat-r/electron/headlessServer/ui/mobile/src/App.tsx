@@ -16,6 +16,7 @@ import type {
   MobileInferenceTool,
   MobileMessage,
   MobileMessageTreeNode,
+  MobileOperationMode,
   MobileProject,
   MobileProviderModelInfo,
   MobileProviderName,
@@ -44,6 +45,8 @@ const projectKey = (projectId: string | null | undefined) => projectId || '__non
 const MOBILE_LAST_USER_STORAGE_KEY = 'mobile:lastUserId'
 const MOBILE_LAST_PROVIDER_STORAGE_KEY = 'mobile:lastProvider'
 const MOBILE_AGENT_TEXT_FONT_SIZE_STORAGE_KEY = 'mobile:agentTextFontSizePx'
+const MOBILE_OPERATION_MODE_STORAGE_KEY = 'mobile:operationMode'
+const MOBILE_INCLUDE_OPERATION_MODE_PROMPTS_STORAGE_KEY = 'mobile:includeOperationModePrompts'
 const mobileLastConversationStorageKey = (userId: string) => `mobile:lastConversationId:${userId}`
 const DEFAULT_PROVIDER: MobileProviderName = 'openaichatgpt'
 const DEFAULT_AGENT_TEXT_FONT_SIZE_PX = 14
@@ -82,6 +85,17 @@ const normalizeCwd = (value: string | null | undefined): string | null => {
 const normalizeProviderName = (value: string | null | undefined): MobileProviderName => {
   if (value === 'openrouter' || value === 'lmstudio' || value === 'openaichatgpt' || value === 'zai') return value
   return DEFAULT_PROVIDER
+}
+
+const normalizeOperationMode = (value: string | null | undefined): MobileOperationMode => {
+  return value === 'execute' ? 'execute' : 'plan'
+}
+
+const readBooleanStorageValue = (key: string, fallback: boolean): boolean => {
+  const value = readStorageValue(key)
+  if (value === 'true') return true
+  if (value === 'false') return false
+  return fallback
 }
 
 const clampAgentTextFontSize = (value: number): number => {
@@ -314,6 +328,12 @@ export const App: React.FC = () => {
   const [modelName, setModelName] = useState('gpt-5.4')
   const [statusText, setStatusText] = useState('Loading…')
   const [agentTextFontSizePx, setAgentTextFontSizePx] = useState(readAgentTextFontSize)
+  const [operationMode, setOperationMode] = useState<MobileOperationMode>(() =>
+    normalizeOperationMode(readStorageValue(MOBILE_OPERATION_MODE_STORAGE_KEY))
+  )
+  const [includeOperationModePrompts, setIncludeOperationModePrompts] = useState(() =>
+    readBooleanStorageValue(MOBILE_INCLUDE_OPERATION_MODE_PROMPTS_STORAGE_KEY, true)
+  )
 
   const [users, setUsers] = useState<LocalUserProfile[]>([])
   const [selectedUserId, setSelectedUserId] = useState<string | null>(() => readStorageValue(MOBILE_LAST_USER_STORAGE_KEY))
@@ -969,6 +989,14 @@ export const App: React.FC = () => {
   }, [agentTextFontSizePx])
 
   useEffect(() => {
+    writeStorageValue(MOBILE_OPERATION_MODE_STORAGE_KEY, operationMode)
+  }, [operationMode])
+
+  useEffect(() => {
+    writeStorageValue(MOBILE_INCLUDE_OPERATION_MODE_PROMPTS_STORAGE_KEY, String(includeOperationModePrompts))
+  }, [includeOperationModePrompts])
+
+  useEffect(() => {
     const models = providerModels.find(provider => provider.name === selectedProvider)?.models || []
     if (models.length === 0) return
     if (models.includes(modelName)) return
@@ -1317,6 +1345,8 @@ export const App: React.FC = () => {
         content,
         parentId,
         operation: streamOperation,
+        operationMode,
+        includeOperationModePrompt: includeOperationModePrompts,
         messageId: branchSourceMessage?.id,
         cwd: activeProjectCwd,
         rootPath: activeProjectCwd,
@@ -1354,6 +1384,10 @@ export const App: React.FC = () => {
         minAgentTextFontSizePx={MIN_AGENT_TEXT_FONT_SIZE_PX}
         maxAgentTextFontSizePx={MAX_AGENT_TEXT_FONT_SIZE_PX}
         onAgentTextFontSizeChange={value => setAgentTextFontSizePx(clampAgentTextFontSize(value))}
+        operationMode={operationMode}
+        includeOperationModePrompts={includeOperationModePrompts}
+        onOperationModeToggle={() => setOperationMode(previous => (previous === 'plan' ? 'execute' : 'plan'))}
+        onIncludeOperationModePromptsChange={setIncludeOperationModePrompts}
         users={users}
         selectedUserId={selectedUserId}
         onProviderChange={setSelectedProvider}
