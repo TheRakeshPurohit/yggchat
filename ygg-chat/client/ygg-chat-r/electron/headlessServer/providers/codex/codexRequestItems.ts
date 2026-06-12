@@ -8,6 +8,7 @@ type CodexInputMessage = CodexMessage
 const AUTO_COMPACTION_NOTE = '__auto_compaction_summary__'
 const AUTO_COMPACTION_SUMMARY_RESUME_LINE = 'Following is summary of the session, you have to resume the work.'
 const GENERATED_IMAGE_PATH_HINT_NOTE = '__generated_image_path_hint__'
+const DEFAULT_CODEX_INSTRUCTIONS = 'You are ChatGPT.'
 
 export function toCodexMessages(input: ProviderGenerateInput): CodexMessage[] {
   const messages: CodexMessage[] = []
@@ -84,7 +85,8 @@ export function toCodexRequestParts(messages: CodexInputMessage[], tools: Provid
     messages
       .filter(message => (message.role === 'system' || message.role === 'developer') && message.content)
       .map(message => (message.role === 'developer' ? `<developer>\n${message.content}\n</developer>` : message.content))
-      .join('\n\n') || undefined
+      .join('\n\n')
+      .trim() || DEFAULT_CODEX_INSTRUCTIONS
   const input = messages.flatMap((message, index) => messageToCodexItems(message, index))
   return { instructions, input, tools: [...(tools || []).map(toCodexTool), ...codexHostedTools()] }
 }

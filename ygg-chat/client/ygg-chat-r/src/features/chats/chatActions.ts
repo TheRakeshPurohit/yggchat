@@ -81,7 +81,7 @@ const getRemoteApiBase = (): string | null =>
   isCommunityMode ? null : import.meta.env.VITE_API_URL || 'https://webdrasil-production.up.railway.app/api'
 // Tools that should not prompt for user permission before execution.
 // Server-executed tools (e.g., brave_search) are already excluded upstream.
-const TOOL_PERMISSION_ALWAYS_BYPASS = new Set(['skill_manager', 'mcp_manager'])
+const TOOL_PERMISSION_ALWAYS_BYPASS = new Set(['skill_manager', 'mcp_manager', 'multi_call'])
 const CUSTOM_TOOL_MANAGER_BYPASS_ACTIONS = new Set([
   'list',
   'get',
@@ -1465,6 +1465,189 @@ const abortGenerationControllers = (streamId?: string | null) => {
   generationAbortControllersByStream.clear()
 }
 
+type MultiCallItemResult = {
+  index: number
+  tool: string
+  ok: boolean
+  data?: unknown
+  error?: string
+}
+
+type MultiCallResult = {
+  success: boolean
+  message: string
+  results: MultiCallItemResult[]
+  completed: number
+  failed: number
+  stoppedEarly: boolean
+}
+
+const isPlainRecord = (value: unknown): value is Record<string, any> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+
+const getMultiCallToolName = (call: any): string => {
+  const rawName = typeof call?.tool === 'string' ? call.tool : typeof call?.toolName === 'string' ? call.toolName : ''
+  return rawName.trim()
+}
+
+const getMultiCallItemArgs = (call: any): Record<string, any> | null => {
+  if (call?.args === undefined || call?.args === null) return {}
+  return isPlainRecord(call.args) ? call.args : null
+}
+
+const isToolResultFailurePayload = (value: unknown): boolean =>
+  isPlainRecord(value) && (value.success === false || value.isError === true)
+
+const getToolResultErrorMessage = (value: unknown): string | undefined => {
+  if (!isPlainRecord(value)) return undefined
+  if (typeof value.error === 'string' && value.error.trim()) return value.error
+  if (typeof value.message === 'string' && value.message.trim() && isToolResultFailurePayload(value)) return value.message
+  if (typeof value.text === 'string' && value.text.trim() && isToolResultFailurePayload(value)) return value.text
+  return undefined
+}
+
+const buildMultiCallFailureResult = (
+  index: number,
+  tool: string,
+  error: string
+): MultiCallItemResult => ({
+  index,
+  tool,
+  ok: false,
+  error,
+})
+
+const summarizeMultiCallResults = (
+  callsLength: number,
+  results: MultiCallItemResult[],
+  stoppedEarly: boolean
+): MultiCallResult => {
+  const completed = results.filter(entry => entry.ok).length
+  const failed = results.length - completed
+  const latest = results[results.length - 1]
+
+  return {
+    success: failed === 0,
+    message:
+      failed === 0
+        ? `Successfully processed ${results.length} multi_call item(s).`
+        : stoppedEarly && latest
+          ? `Multi-call stopped after failure at item ${latest.index + 1}${latest.tool ? ` (${latest.tool})` : ''}: ${
+              latest.error || 'unknown error'
+            }`
+          : `Processed ${results.length} multi_call item(s) with ${failed} failure(s).`,
+    results,
+    completed,
+    failed,
+    stoppedEarly: stoppedEarly && results.length < callsLength,
+  }
+}
+
+const executeMultiCallTool = async (
+  toolCall: any,
+  rootPath: string | null,
+  operationMode: OperationMode,
+  context: {
+    conversationId?: string
+    messageId?: string
+    streamId?: string
+    priority?: 'low' | 'normal' | 'high' | 'critical'
+    timeoutMs?: number
+    accessToken?: string | null
+    callerProvider?: string | null
+    queryClient?: QueryClient | null
+    subagentDepth?: number
+    dispatch?: any
+    getState?: () => RootState
+    enableHooks?: boolean
+    provider?: string | null
+    model?: string | null
+    operation?: 'send' | 'branch' | 'edit-branch'
+    onHookAdditionalContext?: (value: string) => void
+  } = {}
+): Promise<MultiCallResult> => {
+  if (!context.dispatch || !context.getState) {
+    throw new Error('multi_call requires renderer dispatch context')
+  }
+
+  const args = getToolCallArgsObject(toolCall)
+  const calls = args?.calls
+  if (!Array.isArray(calls) || calls.length === 0) {
+    return {
+      success: false,
+      message: 'calls must be a non-empty array',
+      results: [],
+      completed: 0,
+      failed: 0,
+      stoppedEarly: false,
+    }
+  }
+
+  const stopOnError = args?.stopOnError !== false
+  const results: MultiCallItemResult[] = []
+
+  for (const [index, call] of calls.entries()) {
+    const nestedToolName = getMultiCallToolName(call)
+    const nestedArgs = getMultiCallItemArgs(call)
+
+    if (!nestedToolName) {
+      results.push(buildMultiCallFailureResult(index, '', 'tool is required for each multi_call item'))
+    } else if (nestedToolName === 'multi_call') {
+      results.push(buildMultiCallFailureResult(index, nestedToolName, 'Nested multi_call is not supported'))
+    } else if (!nestedArgs) {
+      results.push(buildMultiCallFailureResult(index, nestedToolName, 'args must be an object when provided'))
+    } else {
+      try {
+        const nestedToolCall = {
+          id: `${typeof toolCall?.id === 'string' ? toolCall.id : 'multi_call'}-${index}-${nestedToolName}`,
+          name: nestedToolName,
+          arguments: nestedArgs,
+        }
+        const nestedResult = await executeToolWithPermissionCheck(
+          context.dispatch,
+          context.getState,
+          nestedToolCall,
+          rootPath,
+          operationMode,
+          {
+            conversationId: context.conversationId,
+            messageId: context.messageId,
+            streamId: context.streamId,
+            priority: context.priority,
+            timeoutMs: context.timeoutMs,
+            accessToken: context.accessToken,
+            queryClient: context.queryClient,
+            enableHooks: context.enableHooks,
+            provider: context.provider ?? context.callerProvider ?? null,
+            model: context.model,
+            operation: context.operation,
+            onHookAdditionalContext: context.onHookAdditionalContext,
+          }
+        )
+        const ok = !isToolResultFailurePayload(nestedResult)
+        results.push({
+          index,
+          tool: nestedToolName,
+          ok,
+          data: nestedResult,
+          ...(ok ? {} : { error: getToolResultErrorMessage(nestedResult) || 'Tool returned success=false' }),
+        })
+      } catch (error) {
+        results.push(
+          buildMultiCallFailureResult(index, nestedToolName, error instanceof Error ? error.message : String(error))
+        )
+      }
+    }
+
+    const latest = results[results.length - 1]
+    if (latest && !latest.ok && stopOnError) {
+      return summarizeMultiCallResults(calls.length, results, true)
+    }
+  }
+
+  return summarizeMultiCallResults(calls.length, results, false)
+}
+
 /**
  * Execute a tool via orchestrator (blocking, immediate execution)
  */
@@ -1482,9 +1665,14 @@ export const executeLocalTool = async (
     callerProvider?: string | null
     queryClient?: QueryClient | null
     subagentDepth?: number
-    // For subagent execution
+    // For renderer-local tools and subagent execution
     dispatch?: any
     getState?: () => RootState
+    enableHooks?: boolean
+    provider?: string | null
+    model?: string | null
+    operation?: 'send' | 'branch' | 'edit-branch'
+    onHookAdditionalContext?: (value: string) => void
   }
 ) => {
   const timeoutMs = resolveToolTimeoutMs(toolCall, context?.timeoutMs)
@@ -1513,6 +1701,11 @@ export const executeLocalTool = async (
       executeLocalTool,
       executeToolWithPermissionCheck,
     })
+  }
+
+  // Renderer-orchestrated batching keeps nested permissions and hooks intact.
+  if (preparedToolCall?.name === 'multi_call') {
+    return await executeMultiCallTool(preparedToolCall, rootPath, operationMode, context)
   }
 
   // Renderer-interactive plan clarification must not be submitted to the Electron job runner.

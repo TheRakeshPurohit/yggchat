@@ -49443,6 +49443,8 @@ var mobileApi = {
         modelName: params.modelName,
         userId: params.userId,
         parentId: params.parentId ?? null,
+        operationMode: params.operationMode || "execute",
+        includeOperationModePrompt: params.includeOperationModePrompt ?? true,
         rootPath: params.rootPath ?? params.cwd ?? null,
         cwd: params.cwd ?? params.rootPath ?? null,
         tools: Array.isArray(params.tools) && params.tools.length > 0 ? params.tools : void 0
@@ -65250,6 +65252,10 @@ var MobileHeader = ({
   minAgentTextFontSizePx,
   maxAgentTextFontSizePx,
   onAgentTextFontSizeChange,
+  operationMode,
+  includeOperationModePrompts,
+  onOperationModeToggle,
+  onIncludeOperationModePromptsChange,
   users,
   selectedUserId,
   onProviderChange,
@@ -65383,7 +65389,15 @@ var MobileHeader = ({
         disabled: selectorsDisabled,
         compact: true
       }
-    )), /* @__PURE__ */ import_react34.default.createElement("section", { className: "mobile-settings-font-zoom", "aria-label": "Assistant text zoom" }, /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-settings-font-zoom-header" }, /* @__PURE__ */ import_react34.default.createElement("span", null, "Agent text zoom"), /* @__PURE__ */ import_react34.default.createElement("strong", null, agentTextFontSizePx, "px")), /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-settings-font-zoom-row" }, /* @__PURE__ */ import_react34.default.createElement("span", { "aria-hidden": "true" }, "A"), /* @__PURE__ */ import_react34.default.createElement(
+    )), /* @__PURE__ */ import_react34.default.createElement("section", { className: "mobile-settings-mode-prompts", "aria-label": "Default operation mode prompts" }, /* @__PURE__ */ import_react34.default.createElement("div", null, /* @__PURE__ */ import_react34.default.createElement("strong", null, "Default mode prompts"), /* @__PURE__ */ import_react34.default.createElement("p", null, "Include built-in Chat/Agent instructions before project and conversation prompts.")), /* @__PURE__ */ import_react34.default.createElement("label", { className: "mobile-settings-toggle-row" }, /* @__PURE__ */ import_react34.default.createElement(
+      "input",
+      {
+        type: "checkbox",
+        checked: includeOperationModePrompts,
+        onChange: (event) => onIncludeOperationModePromptsChange(event.target.checked),
+        disabled: selectorsDisabled
+      }
+    ), /* @__PURE__ */ import_react34.default.createElement("span", null, includeOperationModePrompts ? "Enabled" : "Disabled"))), /* @__PURE__ */ import_react34.default.createElement("section", { className: "mobile-settings-font-zoom", "aria-label": "Assistant text zoom" }, /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-settings-font-zoom-header" }, /* @__PURE__ */ import_react34.default.createElement("span", null, "Agent text zoom"), /* @__PURE__ */ import_react34.default.createElement("strong", null, agentTextFontSizePx, "px")), /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-settings-font-zoom-row" }, /* @__PURE__ */ import_react34.default.createElement("span", { "aria-hidden": "true" }, "A"), /* @__PURE__ */ import_react34.default.createElement(
       Input,
       {
         type: "range",
@@ -65483,6 +65497,18 @@ var MobileHeader = ({
     {
       variant: "ghost",
       size: "sm",
+      className: `mobile-header-mode-button ${operationMode === "plan" ? "is-chat" : "is-agent"}`,
+      onClick: onOperationModeToggle,
+      disabled: selectorsDisabled,
+      "aria-label": operationMode === "plan" ? "Switch to Agent Mode" : "Switch to Chat Mode",
+      title: operationMode === "plan" ? "Chat Mode: planning/read-only" : "Agent Mode: tool execution"
+    },
+    operationMode === "plan" ? "Chat" : "Agent"
+  ), /* @__PURE__ */ import_react34.default.createElement(
+    Button,
+    {
+      variant: "ghost",
+      size: "sm",
       className: "mobile-header-icon-button",
       onClick: onOpenProjectConversationPicker,
       disabled: !canOpenProjectConversationPicker,
@@ -65503,7 +65529,7 @@ var MobileHeader = ({
       title: "Open chat settings"
     },
     "\u2699"
-  ))), /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-header-summary mobile-header-summary--compact" }, /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-header-summary-item" }, /* @__PURE__ */ import_react34.default.createElement("span", null, PROVIDER_LABELS[providerName]), /* @__PURE__ */ import_react34.default.createElement("strong", null, modelName), /* @__PURE__ */ import_react34.default.createElement(
+  ))), /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-header-summary mobile-header-summary--compact" }, /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-header-summary-item" }, /* @__PURE__ */ import_react34.default.createElement("span", null, PROVIDER_LABELS[providerName], " \xB7 ", operationMode === "plan" ? "Chat Mode" : "Agent Mode"), /* @__PURE__ */ import_react34.default.createElement("strong", null, modelName), /* @__PURE__ */ import_react34.default.createElement(
     Button,
     {
       variant: "ghost",
@@ -65616,6 +65642,8 @@ var projectKey = (projectId) => projectId || "__none__";
 var MOBILE_LAST_USER_STORAGE_KEY = "mobile:lastUserId";
 var MOBILE_LAST_PROVIDER_STORAGE_KEY = "mobile:lastProvider";
 var MOBILE_AGENT_TEXT_FONT_SIZE_STORAGE_KEY = "mobile:agentTextFontSizePx";
+var MOBILE_OPERATION_MODE_STORAGE_KEY = "mobile:operationMode";
+var MOBILE_INCLUDE_OPERATION_MODE_PROMPTS_STORAGE_KEY = "mobile:includeOperationModePrompts";
 var mobileLastConversationStorageKey = (userId) => `mobile:lastConversationId:${userId}`;
 var DEFAULT_PROVIDER = "openaichatgpt";
 var DEFAULT_AGENT_TEXT_FONT_SIZE_PX = 14;
@@ -65649,6 +65677,15 @@ var normalizeCwd = (value) => {
 var normalizeProviderName = (value) => {
   if (value === "openrouter" || value === "lmstudio" || value === "openaichatgpt" || value === "zai") return value;
   return DEFAULT_PROVIDER;
+};
+var normalizeOperationMode = (value) => {
+  return value === "execute" ? "execute" : "plan";
+};
+var readBooleanStorageValue = (key, fallback) => {
+  const value = readStorageValue(key);
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return fallback;
 };
 var clampAgentTextFontSize = (value) => {
   if (!Number.isFinite(value)) return DEFAULT_AGENT_TEXT_FONT_SIZE_PX;
@@ -65819,6 +65856,12 @@ var App = () => {
   const [modelName, setModelName] = (0, import_react36.useState)("gpt-5.4");
   const [statusText, setStatusText] = (0, import_react36.useState)("Loading\u2026");
   const [agentTextFontSizePx, setAgentTextFontSizePx] = (0, import_react36.useState)(readAgentTextFontSize);
+  const [operationMode, setOperationMode] = (0, import_react36.useState)(
+    () => normalizeOperationMode(readStorageValue(MOBILE_OPERATION_MODE_STORAGE_KEY))
+  );
+  const [includeOperationModePrompts, setIncludeOperationModePrompts] = (0, import_react36.useState)(
+    () => readBooleanStorageValue(MOBILE_INCLUDE_OPERATION_MODE_PROMPTS_STORAGE_KEY, true)
+  );
   const [users, setUsers] = (0, import_react36.useState)([]);
   const [selectedUserId, setSelectedUserId] = (0, import_react36.useState)(() => readStorageValue(MOBILE_LAST_USER_STORAGE_KEY));
   const [projects, setProjects] = (0, import_react36.useState)([]);
@@ -66354,6 +66397,12 @@ ${nextPath}`;
     writeStorageValue(MOBILE_AGENT_TEXT_FONT_SIZE_STORAGE_KEY, String(agentTextFontSizePx));
   }, [agentTextFontSizePx]);
   (0, import_react36.useEffect)(() => {
+    writeStorageValue(MOBILE_OPERATION_MODE_STORAGE_KEY, operationMode);
+  }, [operationMode]);
+  (0, import_react36.useEffect)(() => {
+    writeStorageValue(MOBILE_INCLUDE_OPERATION_MODE_PROMPTS_STORAGE_KEY, String(includeOperationModePrompts));
+  }, [includeOperationModePrompts]);
+  (0, import_react36.useEffect)(() => {
     const models = providerModels.find((provider) => provider.name === selectedProvider)?.models || [];
     if (models.length === 0) return;
     if (models.includes(modelName)) return;
@@ -66642,6 +66691,8 @@ ${nextPath}`;
         content: content3,
         parentId,
         operation: streamOperation,
+        operationMode,
+        includeOperationModePrompt: includeOperationModePrompts,
         messageId: branchSourceMessage?.id,
         cwd: activeProjectCwd,
         rootPath: activeProjectCwd,
@@ -66676,6 +66727,10 @@ ${nextPath}`;
       minAgentTextFontSizePx: MIN_AGENT_TEXT_FONT_SIZE_PX,
       maxAgentTextFontSizePx: MAX_AGENT_TEXT_FONT_SIZE_PX,
       onAgentTextFontSizeChange: (value) => setAgentTextFontSizePx(clampAgentTextFontSize(value)),
+      operationMode,
+      includeOperationModePrompts,
+      onOperationModeToggle: () => setOperationMode((previous3) => previous3 === "plan" ? "execute" : "plan"),
+      onIncludeOperationModePromptsChange: setIncludeOperationModePrompts,
       users,
       selectedUserId,
       onProviderChange: setSelectedProvider,

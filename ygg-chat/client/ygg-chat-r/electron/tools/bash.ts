@@ -54,12 +54,19 @@ type CwdResolution = {
  * - Windows + Linux path (/home/...): 'wsl'
  * - Windows + Windows path (C:\...): 'powershell'
  */
-function resolveCwd(inputCwd?: string): CwdResolution {
-  const cwdCandidate = (inputCwd?.trim() || process.cwd()).trim()
-  if (!cwdCandidate) {
-    const fallback = process.cwd()
-    return { display: fallback, forSpawn: fallback, shellMode: isWindows() ? 'powershell' : 'bash' }
+function getEffectiveCwd(inputCwd?: string): string {
+  const trimmed = inputCwd?.trim()
+
+  // Treat empty/default placeholder cwd values as "use the tool process cwd".
+  if (!trimmed || trimmed === '.' || trimmed === '/') {
+    return process.cwd()
   }
+
+  return trimmed
+}
+
+function resolveCwd(inputCwd?: string): CwdResolution {
+  const cwdCandidate = getEffectiveCwd(inputCwd)
 
   if (!isWindows()) {
     // Linux/Mac: always use bash natively

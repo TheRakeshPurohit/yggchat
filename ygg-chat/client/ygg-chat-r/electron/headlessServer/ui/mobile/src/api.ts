@@ -9,6 +9,7 @@ import type {
   MobileMessage,
   MobileMessageTreePayload,
   MobileProject,
+  MobileOperationMode,
   MobileProviderModelInfo,
   MobileProviderName,
 } from './types'
@@ -551,6 +552,8 @@ export const mobileApi = {
     content: string
     parentId?: string | null
     operation?: 'send' | 'branch' | 'edit-branch'
+    operationMode?: MobileOperationMode
+    includeOperationModePrompt?: boolean
     messageId?: string | null
     cwd?: string | null
     rootPath?: string | null
@@ -578,6 +581,8 @@ export const mobileApi = {
         modelName: params.modelName,
         userId: params.userId,
         parentId: params.parentId ?? null,
+        operationMode: params.operationMode || 'execute',
+        includeOperationModePrompt: params.includeOperationModePrompt ?? true,
         rootPath: params.rootPath ?? params.cwd ?? null,
         cwd: params.cwd ?? params.rootPath ?? null,
         tools: Array.isArray(params.tools) && params.tools.length > 0 ? params.tools : undefined,

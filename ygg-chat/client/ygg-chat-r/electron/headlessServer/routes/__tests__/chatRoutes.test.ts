@@ -8,9 +8,11 @@ describe('registerChatRoutes', () => {
   let appServer: Server
   let baseUrl = ''
   const seenOperations: string[] = []
+  const seenRequests: any[] = []
 
   beforeEach(() => {
     seenOperations.length = 0
+    seenRequests.length = 0
 
     const app = express()
     app.use(express.json())
@@ -19,6 +21,7 @@ describe('registerChatRoutes', () => {
       orchestrator: {
         async runMessage(request, emit) {
           seenOperations.push(request.operation)
+          seenRequests.push(request)
           emit({
             type: 'started',
             operation: request.operation,
@@ -93,5 +96,22 @@ describe('registerChatRoutes', () => {
     })
 
     expect(seenOperations).toEqual(['repeat', 'branch', 'edit-branch'])
+  })
+
+  it('forwards operation mode prompt settings', async () => {
+    await fetch(`${baseUrl}/api/conversations/c1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        content: 'test',
+        operationMode: 'plan',
+        includeOperationModePrompt: false,
+      }),
+    })
+
+    expect(seenRequests[0]).toMatchObject({
+      operationMode: 'plan',
+      includeOperationModePrompt: false,
+    })
   })
 })

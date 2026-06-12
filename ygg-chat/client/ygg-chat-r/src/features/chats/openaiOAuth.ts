@@ -64,6 +64,7 @@ export interface OpenAITokens {
   refreshToken: string
   expiresAt: number
   accountId: string
+  email?: string | null
 }
 
 export interface OpenAIUsageWindow {
@@ -407,6 +408,18 @@ export function extractAccountId(accessToken: string): string | null {
   return authClaim?.chatgpt_account_id || null
 }
 
+export function extractEmailFromToken(token: string): string | null {
+  const decoded = decodeJWT(token)
+  const email = typeof decoded?.email === 'string' ? decoded.email.trim() : ''
+  return email || null
+}
+
+export function getOpenAIAccountEmail(): string | null {
+  const tokens = loadTokens()
+  const email = typeof tokens?.email === 'string' ? tokens.email.trim() : ''
+  return email || null
+}
+
 // Check if token needs refresh (5 minute buffer)
 export function shouldRefreshToken(expiresAt: number): boolean {
   const buffer = 5 * 60 * 1000 // 5 minutes
@@ -501,6 +514,7 @@ export async function getValidTokens(): Promise<OpenAITokens | null> {
       refreshToken: result.refresh!,
       expiresAt: result.expires!,
       accountId,
+      email: tokens.email ?? extractEmailFromToken(result.access!),
     }
     saveTokens(newTokens)
     return newTokens

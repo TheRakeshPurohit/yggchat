@@ -409,3 +409,114 @@ describeIfSqlite('ChatOrchestrator continuation semantics', () => {
     expect(latestCall.tools?.[0]?.name).toBe('read_file')
   })
 })
+
+
+describeIfSqlite('ChatOrchestrator prompt resolution', () => {
+  let db: Database.Database
+  let statements: any
+  let providerRouter: FakeProviderRouter
+  let orchestrator: ChatOrchestrator
+
+  beforeEach(() => {
+    if (!BetterSqlite3Ctor) {
+      throw new Error('better-sqlite3 is unavailable in this runtime')
+    }
+
+    db = new BetterSqlite3Ctor(':memory:')
+    createSchema(db)
+    statements = createStatements(db)
+    providerRouter = new FakeProviderRouter()
+    orchestrator = new ChatOrchestrator({ db, statements, providerRouter: providerRouter as any })
+  })
+
+  afterEach(() => {
+    if (db) {
+      db.close()
+    }
+  })
+
+  it('uses sqlite project and conversation prompts for provider instructions', async () => {
+    const now = new Date().toISOString()
+    db.prepare(
+      `INSERT INTO projects (id, name, user_id, context, system_prompt, storage_mode, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('p1', 'Project', 'u1', 'Project context', 'Project prompt from sqlite', 'local', now, now)
+
+    statements.upsertConversation.run(
+      'c-prompts',
+      'p1',
+      'u1',
+      'Conversation',
+      'gpt-5.5',
+      'Conversation prompt from sqlite',
+      'Conversation context from sqlite',
+      null,
+      null,
+      'local',
+      now,
+      now
+    )
+
+    await orchestrator.runMessage(
+      {
+        operation: 'send',
+        conversationId: 'c-prompts',
+        parentId: null,
+        content: 'hello',
+        provider: 'openaichatgpt',
+        modelName: 'gpt-5.5',
+      },
+      () => {}
+    )
+
+    const providerInput = providerRouter.calls[0]
+    expect(providerInput.systemPrompt).toContain('Agent Prompt: Coding mode')
+    expect(providerInput.systemPrompt).toContain('Project prompt from sqlite')
+    expect(providerInput.systemPrompt).toContain('Conversation prompt from sqlite')
+    expect(providerInput.systemPrompt.indexOf('Agent Prompt: Coding mode')).toBeLessThan(
+      providerInput.systemPrompt.indexOf('Project prompt from sqlite')
+    )
+    expect(providerInput.railwayTurn.conversationContext).toBe('Conversation context from sqlite')
+    expect(providerInput.railwayTurn.projectContext).toBe('Project context')
+  })
+
+  it('uses chat mode prompts for plan mode requests', async () => {
+    const now = new Date().toISOString()
+    statements.upsertConversation.run('c-plan', null, 'u1', 'Conversation', 'gpt-5.5', null, null, null, null, 'local', now, now)
+
+    await orchestrator.runMessage(
+      {
+        operation: 'send',
+        conversationId: 'c-plan',
+        parentId: null,
+        content: 'hello',
+        provider: 'openaichatgpt',
+        modelName: 'gpt-5.5',
+        operationMode: 'plan',
+      },
+      () => {}
+    )
+
+    expect(providerRouter.calls[0].systemPrompt).toContain('Agent Prompt: Plan mode')
+  })
+
+  it('falls back to a non-empty instruction when prompts are disabled and no sqlite prompts exist', async () => {
+    const now = new Date().toISOString()
+    statements.upsertConversation.run('c-empty', null, 'u1', 'Conversation', 'gpt-5.5', null, null, null, null, 'local', now, now)
+
+    await orchestrator.runMessage(
+      {
+        operation: 'send',
+        conversationId: 'c-empty',
+        parentId: null,
+        content: 'hello',
+        provider: 'openaichatgpt',
+        modelName: 'gpt-5.5',
+        includeOperationModePrompt: false,
+      },
+      () => {}
+    )
+
+    expect(providerRouter.calls[0].systemPrompt).toBe('You are ChatGPT.')
+  })
+})

@@ -18,7 +18,12 @@ import {
 import { isCommunityMode, LOCAL_AUTH_USER_ID } from '../config/runtimeMode'
 import { chatSliceActions, selectProviderState } from '../features/chats'
 import { fetchCustomTools, fetchTools, updateToolEnabled } from '../features/chats/chatActions'
-import { clearTokens as clearOpenAITokens, isOpenAIAuthenticated, saveTokens } from '../features/chats/openaiOAuth'
+import {
+  clearTokens as clearOpenAITokens,
+  getOpenAIAccountEmail,
+  isOpenAIAuthenticated,
+  saveTokens,
+} from '../features/chats/openaiOAuth'
 import { getAllTools } from '../features/chats/toolDefinitions'
 import {
   AGENT_SETTINGS_CHANGE_EVENT,
@@ -265,6 +270,7 @@ const Settings: React.FC = () => {
   )
   const [compactionSystemPromptTouched, setCompactionSystemPromptTouched] = useState(false)
   const [openaiLoginModalOpen, setOpenaiLoginModalOpen] = useState(false)
+  const [openaiAccountEmail, setOpenaiAccountEmail] = useState<string | null>(() => getOpenAIAccountEmail())
   const [openaiAuthFlow, setOpenaiAuthFlow] = useState<{ url: string; verifier: string; state: string } | null>(null)
   const [openaiAuthError, setOpenaiAuthError] = useState<string | null>(null)
   const [openaiAuthLoading, setOpenaiAuthLoading] = useState(false)
@@ -851,6 +857,7 @@ const Settings: React.FC = () => {
         refreshToken?: string
         expiresAt?: number
         accountId?: string
+        email?: string | null
       }>('/openai/auth/complete', { state })
 
       if (data.pending) {
@@ -867,12 +874,15 @@ const Settings: React.FC = () => {
         return 'error'
       }
 
+      const signedInEmail = typeof data.email === 'string' && data.email.trim() ? data.email.trim() : null
       saveTokens({
         accessToken: data.accessToken,
         refreshToken: data.refreshToken,
         expiresAt: data.expiresAt,
         accountId: data.accountId,
+        email: signedInEmail,
       })
+      setOpenaiAccountEmail(signedInEmail)
 
       dispatch(chatSliceActions.providerSelected('OpenAI (ChatGPT)'))
       closeOpenaiLoginModal()
@@ -965,6 +975,7 @@ const Settings: React.FC = () => {
 
   const handleOpenAIChatGPTSignOut = () => {
     clearOpenAITokens()
+    setOpenaiAccountEmail(null)
     if (providers.currentProvider === 'OpenAI (ChatGPT)') {
       dispatch(chatSliceActions.providerSelected('OpenRouter'))
     }
@@ -2964,6 +2975,11 @@ const Settings: React.FC = () => {
                   >
                     {isOpenAIAuthenticated() ? 'Signed in' : 'Signed out'}
                   </span>
+                  {isOpenAIAuthenticated() && openaiAccountEmail && (
+                    <span className='max-w-full truncate rounded-full border border-stone-200 bg-stone-50 px-2 py-1 text-xs text-stone-600 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-300'>
+                      {openaiAccountEmail}
+                    </span>
+                  )}
                   <Button
                     variant='outline2'
                     size='small'

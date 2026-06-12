@@ -56,11 +56,17 @@ export async function runChatHook(request: ChatHookRequest): Promise<ChatHookRes
     import.meta.env.VITE_ENVIRONMENT === 'electron' ||
     (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__)
 
+  const isStopEvent = request.event === 'Stop'
+
   if (!isElectronMode) {
+    if (isStopEvent) {
+      console.warn('[chatHookClient][Stop] skipped: not in Electron mode', {
+        viteEnvironment: import.meta.env.VITE_ENVIRONMENT,
+        isElectronGlobal: typeof __IS_ELECTRON__ !== 'undefined' ? __IS_ELECTRON__ : null,
+      })
+    }
     return { matched: false, hookCount: 0 }
   }
-
-  const isStopEvent = request.event === 'Stop'
 
   try {
     if (isStopEvent) {
@@ -77,7 +83,8 @@ export async function runChatHook(request: ChatHookRequest): Promise<ChatHookRes
     const result = await localApi.post<ChatHookResult>('/hooks/run', request)
 
     if (isStopEvent || (Array.isArray(result.errors) && result.errors.length > 0)) {
-      console.debug('[chatHookClient] hook result', {
+      const log = Array.isArray(result.errors) && result.errors.length > 0 ? console.warn : console.info
+      log('[chatHookClient] hook result', {
         event: request.event,
         matched: result.matched,
         hookCount: result.hookCount,

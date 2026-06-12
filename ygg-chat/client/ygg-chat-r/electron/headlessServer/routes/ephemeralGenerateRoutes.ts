@@ -382,9 +382,23 @@ function registerEphemeralChatHandler(
 
 function registerYggHookGenerateRoute(app: Express, openAiProvider: OpenAiChatgptProvider): void {
   app.post('/api/headless/ygg-hooks/generate', async (req, res) => {
+    const startedAt = Date.now()
     try {
       const body = req.body ?? {}
       const provider = typeof body.provider === 'string' ? body.provider.trim().toLowerCase() : 'openai'
+      const shouldLogHookGenerate = /^(1|true|yes|on)$/i.test(process.env.YGG_HOOK_DEBUG_LOGS || '')
+      if (shouldLogHookGenerate) {
+        console.info('[YggHookGenerate] request', {
+          provider,
+          modelName: typeof body.modelName === 'string' ? body.modelName : typeof body.model === 'string' ? body.model : null,
+          contentLength: typeof body.content === 'string' ? body.content.length : 0,
+          promptLength: typeof body.prompt === 'string' ? body.prompt.length : 0,
+          systemPromptLength: typeof body.systemPrompt === 'string' ? body.systemPrompt.length : 0,
+          historyLength: Array.isArray(body.history) ? body.history.length : 0,
+          hasAccessToken: typeof body.accessToken === 'string' && body.accessToken.length > 0,
+          hasAccountId: typeof body.accountId === 'string' && body.accountId.length > 0,
+        })
+      }
       if (provider && provider !== 'openai' && provider !== 'openaichatgpt') {
         res.status(400).json({ success: false, error: 'Only openai/openaichatgpt is supported for ygg hook generation.' })
         return
@@ -401,8 +415,21 @@ function registerYggHookGenerateRoute(app: Express, openAiProvider: OpenAiChatgp
       })
 
       if ('error' in result) {
+        console.warn('[YggHookGenerate] failed', {
+          elapsedMs: Date.now() - startedAt,
+          status: result.status,
+          error: result.error,
+        })
         res.status(result.status).json({ success: false, error: result.error })
         return
+      }
+
+      if (shouldLogHookGenerate) {
+        console.info('[YggHookGenerate] succeeded', {
+          elapsedMs: Date.now() - startedAt,
+          modelName: result.payload.modelName,
+          textLength: typeof result.payload.message?.content === 'string' ? result.payload.message.content.length : 0,
+        })
       }
 
       res.status(200).json({
@@ -415,6 +442,10 @@ function registerYggHookGenerateRoute(app: Express, openAiProvider: OpenAiChatgp
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      console.error('[YggHookGenerate] error', {
+        elapsedMs: Date.now() - startedAt,
+        error: message,
+      })
       res.status(500).json({ success: false, error: message })
     }
   })

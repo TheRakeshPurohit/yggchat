@@ -275,6 +275,7 @@ const OPENAI_LOCALLY_SUPPORTED_BUILTIN_TOOL_NAMES = new Set<string>([
   'fetch_notes',
   'fetch_chats',
   'internalLink',
+  'multi_call',
   'read_file',
   'read_files',
   'read_file_continuation',
