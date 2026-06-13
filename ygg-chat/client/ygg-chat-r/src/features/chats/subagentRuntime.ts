@@ -1,16 +1,15 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { v4 as uuidv4 } from 'uuid'
 import type { RootState } from '../../store/store'
-import type { OperationMode, ToolDefinition } from './chatTypes'
+import type { Model, OperationMode, ToolDefinition } from './chatTypes'
 import { createStreamingRequest, environment, localApi } from '../../utils/api'
 import { isCommunityMode } from '../../config/runtimeMode'
-import { loadAgentSettings } from '../../helpers/agentSettingsStorage'
 import { getDefaultSubagentModePrompt } from '../../helpers/operationModePromptStorage'
 import {
   getSubagentEnabledTools,
   getSubagentMaxTurns,
   isOrchestratorEnabled,
-  shouldUseGlobalAgentModelForSubagentDefault,
+  loadSubagentToolSettings,
 } from '../../helpers/subagentToolSettings'
 import { getAllTools } from './toolDefinitions'
 
@@ -81,32 +80,41 @@ const resolveInheritedSubagentProvider = (
   if (slug === 'openaichatgpt' || slug === 'openai(chatgpt)') return 'openaichatgpt'
   if (slug === 'openrouter') return 'openrouter'
   if (slug === 'lmstudio') return 'lmstudio'
-  if (slug === 'zai' || slug === 'z.ai' || slug === 'glm') return 'zai'
+  if (slug === 'z.ai/glm' || slug === 'zai/glm' || slug === 'zai' || slug === 'z.ai' || slug === 'glm') return 'zai'
   if (slug === 'bedrock' || slug === 'awsbedrock' || slug === 'aws-bedrock' || slug === 'amazonbedrock' || slug === 'amazon-bedrock') return 'bedrock'
   return undefined
 }
 
-const resolveSubagentDefaults = async (
-  requestedModel: unknown,
-  callerProviderName?: string | null
-): Promise<{ model: string; provider?: SubagentInheritedProvider }> => {
-  const normalizedRequestedModel = typeof requestedModel === 'string' ? requestedModel.trim() : ''
+type ModelsCacheEntry = {
+  models?: Model[]
+  default?: Model
+  selected?: Model
+}
 
-  let defaultModel = DEFAULT_SUBAGENT_MODEL
-  if (shouldUseGlobalAgentModelForSubagentDefault()) {
-    try {
-      const agentSettings = await loadAgentSettings()
-      if (typeof agentSettings.model === 'string' && agentSettings.model.trim().length > 0) {
-        defaultModel = agentSettings.model.trim()
-      }
-    } catch (error) {
-      console.warn('[subagent] Failed to load global agent model for defaulting:', error)
-    }
-  }
+const resolveModelFromCache = (queryClient: QueryClient | null | undefined, providerName: string | null | undefined): string | null => {
+  if (!queryClient || !providerName) return null
+  const modelsData = queryClient.getQueryData<ModelsCacheEntry>(['models', providerName])
+  return modelsData?.selected?.name || modelsData?.default?.name || null
+}
+
+const resolveSubagentDefaults = (
+  requestedModel: unknown,
+  callerProviderName?: string | null,
+  queryClient?: QueryClient | null
+): { model: string; provider?: SubagentInheritedProvider } => {
+  const normalizedRequestedModel = typeof requestedModel === 'string' ? requestedModel.trim() : ''
+  const settings = loadSubagentToolSettings()
+  const configuredProvider = settings.defaultProvider?.trim() || null
+  const configuredModel = settings.defaultModel?.trim() || null
+  const providerNameForResolution = configuredProvider || callerProviderName || null
 
   return {
-    model: normalizedRequestedModel || defaultModel,
-    provider: resolveInheritedSubagentProvider(callerProviderName),
+    model:
+      normalizedRequestedModel ||
+      configuredModel ||
+      resolveModelFromCache(queryClient, providerNameForResolution) ||
+      DEFAULT_SUBAGENT_MODEL,
+    provider: resolveInheritedSubagentProvider(providerNameForResolution),
   }
 }
 
@@ -178,7 +186,7 @@ export const executeSimpleSubagentCall = async (
     throw new Error('Subagent requires a prompt')
   }
 
-  const { model: resolvedModel, provider: resolvedProvider } = await resolveSubagentDefaults(model, callerProviderName)
+  const { model: resolvedModel, provider: resolvedProvider } = resolveSubagentDefaults(model, callerProviderName)
 
   try {
     if (shouldUseCommunityLocalEphemeral()) {
@@ -477,7 +485,11 @@ export const executeSubagentCall = async (
   const streamId = context.streamId
   const state = getState()
   const callerProviderName = context.callerProvider ?? state.chat.providerState.currentProvider
-  const { model: resolvedModel, provider: resolvedProvider } = await resolveSubagentDefaults(model, callerProviderName)
+  const { model: resolvedModel, provider: resolvedProvider } = resolveSubagentDefaults(
+    model,
+    callerProviderName,
+    context.queryClient
+  )
 
   // Get filtered tool definitions for this subagent
   const subagentTools = getSubagentToolDefinitions(orchestratorMode, requestedTools)
