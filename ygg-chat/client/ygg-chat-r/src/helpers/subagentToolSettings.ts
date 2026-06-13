@@ -7,8 +7,8 @@ export const SUBAGENT_TOOL_SETTINGS_CHANGE_EVENT = 'ygg-subagent-tool-settings-c
 export interface SubagentToolSettings {
   enabledTools: string[] // Tool names enabled for subagent when orchestratorMode=false
   orchestratorEnabled: boolean // Whether subagent can use tools (orchestrator mode)
-  forceOpenAIProviderWhenChatGPTSelected: boolean // Force provider=openaichatgpt when parent chat provider is OpenAI(ChatGPT)
-  useGlobalAgentModelAsDefault: boolean // Use Global Agent model from Settings as subagent default model when tool call omits model
+  defaultProvider: string | null // Provider used by subagents; null follows the current chat provider
+  defaultModel: string | null // Model used by subagents; null follows the selected/default model for the resolved provider
   maxTurns: number // Maximum model/tool loop turns for one subagent invocation
 }
 
@@ -38,8 +38,8 @@ export const DEFAULT_SUBAGENT_TOOLS = [
 const DEFAULT_SETTINGS: SubagentToolSettings = {
   enabledTools: DEFAULT_SUBAGENT_TOOLS,
   orchestratorEnabled: true, // Subagent can use tools by default
-  forceOpenAIProviderWhenChatGPTSelected: true,
-  useGlobalAgentModelAsDefault: true,
+  defaultProvider: null,
+  defaultModel: null,
   maxTurns: DEFAULT_SUBAGENT_MAX_TURNS,
 }
 
@@ -51,12 +51,18 @@ export function loadSubagentToolSettings(): SubagentToolSettings {
     const stored = localStorage.getItem(STORAGE_KEY)
     if (!stored) return { ...DEFAULT_SETTINGS }
     const parsed = JSON.parse(stored) as Partial<SubagentToolSettings>
+    const defaultProvider = typeof parsed.defaultProvider === 'string' && parsed.defaultProvider.trim()
+      ? parsed.defaultProvider.trim()
+      : null
+    const defaultModel = typeof parsed.defaultModel === 'string' && parsed.defaultModel.trim()
+      ? parsed.defaultModel.trim()
+      : null
+
     return {
       enabledTools: parsed.enabledTools ?? DEFAULT_SETTINGS.enabledTools,
       orchestratorEnabled: parsed.orchestratorEnabled ?? DEFAULT_SETTINGS.orchestratorEnabled,
-      forceOpenAIProviderWhenChatGPTSelected:
-        parsed.forceOpenAIProviderWhenChatGPTSelected ?? DEFAULT_SETTINGS.forceOpenAIProviderWhenChatGPTSelected,
-      useGlobalAgentModelAsDefault: parsed.useGlobalAgentModelAsDefault ?? DEFAULT_SETTINGS.useGlobalAgentModelAsDefault,
+      defaultProvider,
+      defaultModel,
       maxTurns: normalizeMaxTurns(parsed.maxTurns ?? DEFAULT_SETTINGS.maxTurns),
     }
   } catch {
@@ -122,29 +128,24 @@ export function toggleOrchestratorEnabled(): boolean {
   return settings.orchestratorEnabled
 }
 
-/**
- * Whether subagent calls should force provider=openaichatgpt when the parent provider is OpenAI(ChatGPT)
- */
-export function shouldForceSubagentOpenAIProvider(): boolean {
-  return loadSubagentToolSettings().forceOpenAIProviderWhenChatGPTSelected
+export function getSubagentDefaultProvider(): string | null {
+  return loadSubagentToolSettings().defaultProvider
 }
 
-export function setForceSubagentOpenAIProvider(enabled: boolean): void {
+export function setSubagentDefaultProvider(provider: string | null): void {
   const settings = loadSubagentToolSettings()
-  settings.forceOpenAIProviderWhenChatGPTSelected = enabled
+  settings.defaultProvider = typeof provider === 'string' && provider.trim() ? provider.trim() : null
+  settings.defaultModel = null
   saveSubagentToolSettings(settings)
 }
 
-/**
- * Whether subagent should default to Global Agent model when the tool call omits model
- */
-export function shouldUseGlobalAgentModelForSubagentDefault(): boolean {
-  return loadSubagentToolSettings().useGlobalAgentModelAsDefault
+export function getSubagentDefaultModel(): string | null {
+  return loadSubagentToolSettings().defaultModel
 }
 
-export function setUseGlobalAgentModelForSubagentDefault(enabled: boolean): void {
+export function setSubagentDefaultModel(model: string | null): void {
   const settings = loadSubagentToolSettings()
-  settings.useGlobalAgentModelAsDefault = enabled
+  settings.defaultModel = typeof model === 'string' && model.trim() ? model.trim() : null
   saveSubagentToolSettings(settings)
 }
 
