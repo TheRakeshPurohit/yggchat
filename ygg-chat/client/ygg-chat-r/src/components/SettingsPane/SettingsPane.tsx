@@ -1957,10 +1957,11 @@ ${block}`
                         </div>
                       </div>
                     )}
+
+                    <ThemeManager />
                   </div>
                 )}
               </div>
-              <ThemeManager />
             </div>
 
             {/* Tools Section */}

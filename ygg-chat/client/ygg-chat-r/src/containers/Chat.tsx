@@ -1849,6 +1849,11 @@ function Chat() {
   // Track if the user manually scrolled during the current stream; disables bottom pin until finished
   const userScrolledDuringStreamRef = useRef<boolean>(false)
   const streamActiveRef = useRef<boolean>(false)
+  const finalTextStreamingStartedRef = useRef<boolean>(false)
+  const hasFinalTextStreamingRef = useRef<boolean>(false)
+  const lastTrustedScrollTopRef = useRef<number | null>(null)
+  const streamingRowAnchorOffsetRef = useRef<number | null>(null)
+  const streamingAnchorRestoreRafRef = useRef<number | null>(null)
   // Sentinel at the end of the list for robust bottom scrolling
   const bottomRef = useRef<HTMLDivElement>(null)
   // rAF id to coalesce frequent scroll requests during streaming
@@ -2386,11 +2391,14 @@ function Chat() {
     streamState.status === 'aborting'
   const showGenerationLoadingAnimation =
     isCurrentConversationCompacting || streamLifecycleActive || hasRunningToolJobForCurrentBranch
-  const hasStreamingMessageContent =
-    Boolean(streamState.buffer) ||
-    Boolean(streamState.thinkingBuffer) ||
-    streamState.toolCalls.length > 0 ||
-    streamState.events.length > 0
+  const hasFinalTextStreaming = Boolean(streamState.buffer?.trim())
+  const hasProcessStreamingContent =
+    Boolean(streamState.thinkingBuffer) || streamState.toolCalls.length > 0 || streamState.events.length > 0
+  const hasStreamingMessageContent = hasFinalTextStreaming || hasProcessStreamingContent
+
+  useEffect(() => {
+    hasFinalTextStreamingRef.current = hasFinalTextStreaming
+  }, [hasFinalTextStreaming])
   const shouldPreserveProcessStreamRow = streamState.status === 'waiting_for_tool' || hasRunningToolJobForCurrentBranch
   const liveDuplicateSuppressionMessageId = streamState.liveMessageId ?? streamState.streamingMessageId
   const completedDuplicateSuppressionMessageId =
@@ -2513,6 +2521,18 @@ function Chat() {
     benchLatestVirtualRowCountRef.current = virtualRows.length
     benchLatestConversationIdRef.current = currentConversationId != null ? String(currentConversationId) : null
   }, [currentConversationId, renderableMessages.length, virtualRows.length])
+
+  // Consider the user to be "at the bottom" if within this many pixels.
+  // Keep the UI affordance generous, but use a much tighter threshold for automatic
+  // follow/measurement correction so long final streamed answers do not move while reading.
+  const NEAR_BOTTOM_PX = 600
+  const AUTO_FOLLOW_BOTTOM_PX = 120
+  const isNearBottom = (el: HTMLElement, threshold = NEAR_BOTTOM_PX) => {
+    // Distance remaining to bottom within the scroll container
+    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight
+    return remaining <= threshold
+  }
+
 
   // Virtualizer for efficient message list rendering
   const virtualizer = useVirtualizer({
@@ -2640,14 +2660,6 @@ function Chat() {
     streamState.toolCalls.length,
     streamState.events.length,
   ])
-
-  // Consider the user to be "at the bottom" if within this many pixels
-  const NEAR_BOTTOM_PX = 600
-  const isNearBottom = (el: HTMLElement, threshold = NEAR_BOTTOM_PX) => {
-    // Distance remaining to bottom within the scroll container
-    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight
-    return remaining <= threshold
-  }
 
   const updateScrollToBottomButtonVisibility = useCallback(() => {
     const el = messagesContainerRef.current
@@ -3723,6 +3735,7 @@ function Chat() {
   useEffect(() => {
     return () => {
       if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
+      if (streamingAnchorRestoreRafRef.current != null) cancelAnimationFrame(streamingAnchorRestoreRafRef.current)
     }
   }, [])
 
@@ -3730,28 +3743,119 @@ function Chat() {
     streamActiveRef.current = streamState.active
   }, [streamState.active])
 
-  // Listen for user scrolls; while streaming, toggle override based on proximity to bottom
+  const captureStreamingRowAnchor = useCallback(() => {
+    const container = messagesContainerRef.current
+    const streamingRow = container?.querySelector<HTMLElement>('#message-streaming') ?? null
+    if (!container || !streamingRow) return
+
+    const containerRect = container.getBoundingClientRect()
+    const rowRect = streamingRow.getBoundingClientRect()
+    streamingRowAnchorOffsetRef.current = containerRect.top - rowRect.top
+  }, [])
+
+  const restoreStreamingRowAnchor = useCallback(() => {
+    const container = messagesContainerRef.current
+    const streamingRow = container?.querySelector<HTMLElement>('#message-streaming') ?? null
+    const anchorOffset = streamingRowAnchorOffsetRef.current
+    if (!container || !streamingRow || anchorOffset == null) return
+
+    const containerRect = container.getBoundingClientRect()
+    const rowRect = streamingRow.getBoundingClientRect()
+    const rowStart = container.scrollTop + rowRect.top - containerRect.top
+    const nextScrollTop = Math.max(0, rowStart + anchorOffset)
+
+    if (Math.abs(container.scrollTop - nextScrollTop) > 1) {
+      container.scrollTop = nextScrollTop
+    }
+  }, [])
+
+  // Listen for user scroll intent. While final text is streaming, ANY user scroll/wheel/touch
+  // means "stop following the growing message" until the stream finishes. Do not rely on
+  // near-bottom here: when reading a long live block, the user can be near the bottom and still
+  // want the viewport to stop being dragged by remeasurement.
   useEffect(() => {
     const el = messagesContainerRef.current
     if (!el) return
 
+    const disableFollowForUserIntent = () => {
+      if (!streamActiveRef.current) return
+      if (!hasFinalTextStreamingRef.current) return
+      userScrolledDuringStreamRef.current = true
+      captureStreamingRowAnchor()
+    }
+
     const onScroll = (e: Event) => {
       if (!e.isTrusted || !streamActiveRef.current) return
-      const nearBottom = isNearBottom(el, NEAR_BOTTOM_PX)
-      // If the user is near the bottom, allow auto-pinning; otherwise, suppress it
+
+      const currentTop = el.scrollTop
+      const previousTop = lastTrustedScrollTopRef.current
+      lastTrustedScrollTopRef.current = currentTop
+
+      if (hasFinalTextStreamingRef.current) {
+        if (previousTop == null || Math.abs(currentTop - previousTop) > 1) {
+          userScrolledDuringStreamRef.current = true
+          captureStreamingRowAnchor()
+        }
+        return
+      }
+
+      const nearBottom = isNearBottom(el, AUTO_FOLLOW_BOTTOM_PX)
       userScrolledDuringStreamRef.current = !nearBottom
     }
 
+    el.addEventListener('wheel', disableFollowForUserIntent, { passive: true })
+    el.addEventListener('touchmove', disableFollowForUserIntent, { passive: true })
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => {
+      el.removeEventListener('wheel', disableFollowForUserIntent)
+      el.removeEventListener('touchmove', disableFollowForUserIntent)
       el.removeEventListener('scroll', onScroll)
     }
-  }, [])
+  }, [captureStreamingRowAnchor])
+
+  React.useLayoutEffect(() => {
+    if (!streamState.active || !hasFinalTextStreaming || !userScrolledDuringStreamRef.current) return
+    if (streamingRowAnchorOffsetRef.current == null) return
+
+    restoreStreamingRowAnchor()
+
+    if (typeof window === 'undefined') return
+    if (streamingAnchorRestoreRafRef.current != null) {
+      window.cancelAnimationFrame(streamingAnchorRestoreRafRef.current)
+    }
+    streamingAnchorRestoreRafRef.current = window.requestAnimationFrame(() => {
+      streamingAnchorRestoreRafRef.current = null
+      restoreStreamingRowAnchor()
+    })
+  }, [hasFinalTextStreaming, restoreStreamingRowAnchor, streamState.active, streamState.buffer, virtualRows.length])
+
+  useEffect(() => {
+    if (!streamState.active) {
+      finalTextStreamingStartedRef.current = false
+      streamingRowAnchorOffsetRef.current = null
+      return
+    }
+
+    if (hasFinalTextStreaming && !finalTextStreamingStartedRef.current) {
+      finalTextStreamingStartedRef.current = true
+      const container = messagesContainerRef.current
+      if (container && !isNearBottom(container, AUTO_FOLLOW_BOTTOM_PX)) {
+        userScrolledDuringStreamRef.current = true
+      }
+    }
+  }, [hasFinalTextStreaming, streamState.active])
 
   // Reset the user scroll override when the stream finishes
   useEffect(() => {
     if (streamState.finished) {
       userScrolledDuringStreamRef.current = false
+      finalTextStreamingStartedRef.current = false
+      lastTrustedScrollTopRef.current = null
+      streamingRowAnchorOffsetRef.current = null
+      if (streamingAnchorRestoreRafRef.current != null) {
+        cancelAnimationFrame(streamingAnchorRestoreRafRef.current)
+        streamingAnchorRestoreRafRef.current = null
+      }
       if (scrollRafRef.current != null) {
         cancelAnimationFrame(scrollRafRef.current)
         scrollRafRef.current = null
@@ -6291,7 +6395,11 @@ function Chat() {
               className='absolute -top-12 right-5 z-20 !rounded-full !p-2 shadow-[0_12px_32px_-12px_rgba(0,0,0,0.45)] backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:bg-black/5 dark:hover:bg-white/5'
               aria-label='Scroll to latest messages'
               title='Scroll to bottom'
-              onClick={() => scrollToBottomNow('auto')}
+              onClick={() => {
+                userScrolledDuringStreamRef.current = false
+                streamingRowAnchorOffsetRef.current = null
+                scrollToBottomNow('auto')
+              }}
             >
               <i className='bx bx-down-arrow-alt text-lg' aria-hidden='true'></i>
             </Button>
