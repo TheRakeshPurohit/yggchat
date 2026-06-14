@@ -6,6 +6,7 @@ import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
 import { detectPathType, isWindows, resolveToWindowsPath, toWslPath } from './utils/wslBridge.js'
 import type { LocalFileEntry } from '../shared/localFileBrowser.js'
+import { rankFileMatches } from '../shared/fileMatchRanking.js'
 import type {
   LocalGitActionResponse,
   LocalGitBranch,
@@ -21,6 +22,7 @@ const execFile = promisify(execFileCb)
 const IGNORED_DIRS = new Set(['node_modules', '.git', '.svn', '__pycache__', '.venv', 'dist', 'build', '.next'])
 const MAX_SEARCH_RESULTS = 200
 const MAX_SEARCH_DIRECTORIES = 10000
+const MAX_SEARCH_CANDIDATES = 2000
 const GIT_COMMAND_TIMEOUT_MS = 2500
 const GIT_COMMAND_MAX_BUFFER = 16 * 1024 * 1024
 const MAX_EDITOR_FILE_SIZE_BYTES = 10 * 1024 * 1024
@@ -196,17 +198,18 @@ const searchWithGitignore = async (params: {
   }
 
   const needle = query.toLowerCase()
-  const files: LocalSearchEntry[] = []
+  const candidates: LocalSearchEntry[] = []
   const seenRelativePaths = new Set<string>()
+  const candidateLimit = Math.max(limit, Math.min(MAX_SEARCH_CANDIDATES, limit * 10))
 
-  const pushResult = (entry: LocalSearchEntry): boolean => {
+  const pushCandidate = (entry: LocalSearchEntry): boolean => {
     if (!entry.relativePath || seenRelativePaths.has(entry.relativePath)) {
-      return files.length >= limit
+      return candidates.length >= candidateLimit
     }
 
     seenRelativePaths.add(entry.relativePath)
-    files.push(entry)
-    return files.length >= limit
+    candidates.push(entry)
+    return candidates.length >= candidateLimit
   }
 
   const lines = lsFilesOutput
@@ -240,7 +243,7 @@ const searchWithGitignore = async (params: {
 
         if (!directoryHaystack.includes(needle)) continue
 
-        const didReachLimit = pushResult({
+        const didReachLimit = pushCandidate({
           name: directoryName,
           isDirectory: true,
           path: buildResponsePathFromRelative(responseBasePath, currentDirectoryPath, useWslStyleResponse),
@@ -251,7 +254,7 @@ const searchWithGitignore = async (params: {
       }
     }
 
-    if (files.length >= limit) {
+    if (candidates.length >= candidateLimit) {
       break
     }
 
@@ -259,7 +262,7 @@ const searchWithGitignore = async (params: {
     const haystack = `${fileName} ${relativeFromSearchRoot}`.toLowerCase()
     if (!haystack.includes(needle)) continue
 
-    const didReachLimit = pushResult({
+    const didReachLimit = pushCandidate({
       name: fileName,
       isDirectory: false,
       path: buildResponsePathFromRelative(responseBasePath, relativeFromSearchRoot, useWslStyleResponse),
@@ -271,9 +274,11 @@ const searchWithGitignore = async (params: {
     }
   }
 
+  const files = rankFileMatches(candidates, query).slice(0, limit)
+
   return {
     files,
-    truncated: files.length >= limit,
+    truncated: candidates.length > limit,
   }
 }
 
@@ -896,10 +901,11 @@ export function registerLocalOperationsRoutes(app: Express) {
         { fsPath: resolvedPath, responsePath: responseBasePath, relativePath: '' },
       ]
 
-      const files: LocalSearchEntry[] = []
+      const candidates: LocalSearchEntry[] = []
+      const candidateLimit = Math.max(limit, Math.min(MAX_SEARCH_CANDIDATES, limit * 10))
       let visitedDirectories = 0
 
-      while (queue.length > 0 && files.length < limit) {
+      while (queue.length > 0 && candidates.length < candidateLimit) {
         const node = queue.shift()
         if (!node) break
 
@@ -921,13 +927,13 @@ export function registerLocalOperationsRoutes(app: Express) {
           const searchText = `${entry.name} ${entryRelativePath}`.toLowerCase()
 
           if (searchText.includes(normalizedNeedle)) {
-            files.push({
+            candidates.push({
               name: entry.name,
               isDirectory: entry.isDirectory(),
               path: entryPath,
               relativePath: entryRelativePath,
             })
-            if (files.length >= limit) break
+            if (candidates.length >= candidateLimit) break
           }
 
           if (entry.isDirectory()) {
@@ -941,11 +947,13 @@ export function registerLocalOperationsRoutes(app: Express) {
         }
       }
 
+      const files = rankFileMatches(candidates, query).slice(0, limit)
+
       res.json({
         path: responseBasePath,
         query,
         files,
-        truncated: files.length >= limit,
+        truncated: candidates.length > limit,
         respectingGitignore: false,
       })
     } catch (error: any) {
@@ -1204,8 +1212,7 @@ export function registerLocalOperationsRoutes(app: Express) {
       const response: LocalGitActionResponse = {
         ok: true,
         isGitRepo: true,
-        message:
-          files.length > 0 ? `Staged ${files.length} file${files.length === 1 ? '' : 's'}.` : 'Staged all changes.',
+        message: files.length > 0 ? `Staged ${files.length} file${files.length === 1 ? '' : 's'}.` : 'Staged all changes.',
       }
       res.json(response)
     } catch (error) {

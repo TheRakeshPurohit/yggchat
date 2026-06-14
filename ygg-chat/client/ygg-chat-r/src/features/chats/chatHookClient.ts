@@ -1,5 +1,13 @@
 import { localApi } from '../../utils/api'
 
+const isHookDebugLoggingEnabled = (): boolean => {
+  try {
+    return localStorage.getItem('chat:hookDebugLogs') === 'true'
+  } catch {
+    return false
+  }
+}
+
 export interface ChatHookLineage {
   rootMessageId?: string | null
   ancestorIds?: string[]
@@ -14,6 +22,11 @@ export interface ChatHookLookup {
 export interface ChatHookTurnContext {
   lastUserMessageId?: string | null
   lastAssistantMessageId?: string | null
+}
+
+export interface ChatHookProjectContext {
+  projectId?: string | null
+  projectName?: string | null
 }
 
 export type ChatHookEventName = 'UserPromptSubmit' | 'PreToolUse' | 'PostToolUse' | 'PostToolUseFailure' | 'Stop'
@@ -36,6 +49,7 @@ export interface ChatHookRequest {
   lineage?: ChatHookLineage | null
   lookup?: ChatHookLookup | null
   turn?: ChatHookTurnContext | null
+  project?: ChatHookProjectContext | null
 }
 
 export interface ChatHookResult {
@@ -49,6 +63,8 @@ export interface ChatHookResult {
   permissionDecisionReason?: string
   additionalContext?: string
   errors?: string[]
+  asyncHookCount?: number
+  launchedAsyncHookCount?: number
 }
 
 export async function runChatHook(request: ChatHookRequest): Promise<ChatHookResult> {
@@ -69,25 +85,30 @@ export async function runChatHook(request: ChatHookRequest): Promise<ChatHookRes
   }
 
   try {
-    if (isStopEvent) {
-      console.debug('[chatHookClient][Stop] request', {
+    const debugHooks = isHookDebugLoggingEnabled()
+
+    if (isStopEvent || debugHooks) {
+      console.debug('[chatHookClient] hook request', {
         conversationId: request.conversationId ?? null,
         operation: request.operation ?? null,
         messageId: request.messageId ?? null,
         parentId: request.parentId ?? null,
         lineage: request.lineage ?? null,
         turn: request.turn ?? null,
+        project: request.project ?? null,
       })
     }
 
     const result = await localApi.post<ChatHookResult>('/hooks/run', request)
 
-    if (isStopEvent || (Array.isArray(result.errors) && result.errors.length > 0)) {
+    if (isStopEvent || debugHooks || (Array.isArray(result.errors) && result.errors.length > 0)) {
       const log = Array.isArray(result.errors) && result.errors.length > 0 ? console.warn : console.info
       log('[chatHookClient] hook result', {
         event: request.event,
         matched: result.matched,
         hookCount: result.hookCount,
+        asyncHookCount: result.asyncHookCount ?? 0,
+        launchedAsyncHookCount: result.launchedAsyncHookCount ?? 0,
         blocked: result.blocked ?? false,
         reason: result.reason ?? null,
         additionalContext: result.additionalContext ?? null,

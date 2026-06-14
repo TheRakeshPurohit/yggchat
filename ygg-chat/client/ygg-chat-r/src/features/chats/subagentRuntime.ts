@@ -135,6 +135,9 @@ const getRuntimeToolCallName = (toolCall: any): string =>
 
 const isSubagentToolCall = (toolCall: any): boolean => getRuntimeToolCallName(toolCall) === 'subagent'
 
+const stripSubagentThinkingBlocks = (text: string): string =>
+  text.replace(/<thinking>[\s\S]*?<\/thinking>\s*/gi, '').trim()
+
 const runWithConcurrencyLimit = async <T, R>(
   items: T[],
   limit: number,
@@ -205,12 +208,8 @@ export const executeSimpleSubagentCall = async (
       }
 
       const fullText = typeof localPayload?.message?.content === 'string' ? localPayload.message.content : ''
-      const reasoning = typeof localPayload?.reasoning === 'string' ? localPayload.reasoning : ''
 
-      if (reasoning) {
-        return `<thinking>\n${reasoning}\n</thinking>\n\n${fullText}`
-      }
-      return fullText || 'Subagent returned empty response'
+      return stripSubagentThinkingBlocks(fullText) || 'Subagent returned empty response'
     }
     const response = await createStreamingRequest('/generate/ephemeral', accessToken, {
       method: 'POST',
@@ -238,7 +237,6 @@ export const executeSimpleSubagentCall = async (
 
     const decoder = new TextDecoder()
     let fullText = ''
-    let reasoning = ''
     let sseBuffer = ''
 
     while (true) {
@@ -259,8 +257,6 @@ export const executeSimpleSubagentCall = async (
             const parsed = JSON.parse(data)
             if (parsed.text) {
               fullText += parsed.text
-            } else if (parsed.reasoning) {
-              reasoning += parsed.reasoning
             }
           } catch {
             if (data.trim()) {
@@ -271,10 +267,7 @@ export const executeSimpleSubagentCall = async (
       }
     }
 
-    if (reasoning) {
-      return `<thinking>\n${reasoning}\n</thinking>\n\n${fullText}`
-    }
-    return fullText || 'Subagent returned empty response'
+    return stripSubagentThinkingBlocks(fullText) || 'Subagent returned empty response'
   } catch (error) {
     console.error('[executeSimpleSubagentCall] Error:', error)
     throw error instanceof Error ? error : new Error(String(error))
@@ -527,6 +520,7 @@ export const executeSubagentCall = async (
   })
 
   let finalResponse = ''
+  let finalToolResult = ''
   
   const subagentAbortController = new AbortController()
   const unregisterAbortController = registerSubagentAbortController(streamId, subagentAbortController)
@@ -753,6 +747,7 @@ export const executeSubagentCall = async (
       // If no client tool calls AND no server tool results, this is the final response
       if (turnToolCalls.length === 0 && serverToolResults.length === 0) {
         finalResponse = turnReasoning ? `<thinking>\n${turnReasoning}\n</thinking>\n\n${turnText}` : turnText
+        finalToolResult = stripSubagentThinkingBlocks(turnText)
 
         // Build content_blocks for final message (text only, no tool calls/results)
         const finalContentBlocks = buildContentBlocks([])
@@ -811,7 +806,8 @@ export const executeSubagentCall = async (
           })
         }
 
-          finalResponse = turnText
+        finalResponse = turnText
+        finalToolResult = stripSubagentThinkingBlocks(turnText)
 
         // Continue to next turn - model will process the tool results
         continue
@@ -969,6 +965,7 @@ export const executeSubagentCall = async (
       }
 
       finalResponse = turnText
+      finalToolResult = stripSubagentThinkingBlocks(turnText)
     }
   } catch (error) {
     if (subagentAbortController.signal.aborted) {
@@ -1132,6 +1129,7 @@ export const executeSubagentCall = async (
     finalResponse = finalizeReasoning
       ? `<thinking>\n${finalizeReasoning}\n</thinking>\n\n${finalizeText}`
       : finalizeText
+    finalToolResult = stripSubagentThinkingBlocks(finalizeText)
   }
 
   await updateSubagentRun(subagentSessionId, {
@@ -1141,7 +1139,7 @@ export const executeSubagentCall = async (
     tool_calls_used: toolCallsUsed,
   })
 
-  return finalResponse || 'No response generated'
+  return finalToolResult || 'No response generated'
   // legacy summary removed\n\n${finalResponse || 'No response generated'}\n\n---\nTurns: ${turnsUsed}/${maxTurns} | Tool calls: ${totalToolCallsUsed}/${maxToolCalls} | Tools: ${toolSummary}`
 }
 

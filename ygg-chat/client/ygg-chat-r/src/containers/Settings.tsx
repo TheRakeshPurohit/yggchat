@@ -147,7 +147,7 @@ type StatusMessage = {
   text: string
 }
 
-const formatSize = (size?: number) => {
+const formatSize = (size?: number | null) => {
   if (!size) {
     return 'n/a'
   }
@@ -162,6 +162,18 @@ const formatSize = (size?: number) => {
   }
 
   return `${(kilo / 1024).toFixed(1)} MB`
+}
+
+const formatMemoryUpdatedAt = (value?: string | null) => {
+  if (!value) return 'Not created yet'
+  const timestamp = new Date(value)
+  if (Number.isNaN(timestamp.getTime())) return 'Updated recently'
+  return timestamp.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 interface GoogleDriveStatus {
@@ -186,6 +198,34 @@ interface LocalMergeResult {
   conversations: number
   providerCosts: number
   message?: string
+}
+
+type MemoryFileKind = 'global' | 'recent' | 'project'
+
+interface MemoryFileSummary {
+  id: string
+  kind: MemoryFileKind
+  label: string
+  description?: string
+  projectName?: string | null
+  exists: boolean
+  path?: string | null
+  sizeBytes?: number | null
+  updatedAt?: string | null
+}
+
+interface MemoryFilesResponse {
+  success: boolean
+  files: MemoryFileSummary[]
+  directory?: string
+  error?: string
+}
+
+interface MemoryFileContentResponse {
+  success: boolean
+  file?: MemoryFileSummary | null
+  content: string
+  error?: string
 }
 
 const Settings: React.FC = () => {
@@ -258,6 +298,14 @@ const Settings: React.FC = () => {
   const [lmStudioBaseUrlInput, setLmStudioBaseUrlInput] = useState<string>(() => loadProviderSettings().lmStudioBaseUrl ?? '')
   const [lmStudioBaseUrlTouched, setLmStudioBaseUrlTouched] = useState(false)
   const [memoryBackfillRunning, setMemoryBackfillRunning] = useState(false)
+  const [memoryFiles, setMemoryFiles] = useState<MemoryFileSummary[]>([])
+  const [memoryFilesLoading, setMemoryFilesLoading] = useState(false)
+  const [memoryFilesError, setMemoryFilesError] = useState<string | null>(null)
+  const [selectedMemoryFile, setSelectedMemoryFile] = useState<MemoryFileSummary | null>(null)
+  const [memoryModalOpen, setMemoryModalOpen] = useState(false)
+  const [memoryContent, setMemoryContent] = useState('')
+  const [memoryContentLoading, setMemoryContentLoading] = useState(false)
+  const [memoryContentError, setMemoryContentError] = useState<string | null>(null)
   const [compactionSystemPromptInput, setCompactionSystemPromptInput] = useState<string>(
     () => loadProviderSettings().compactionSystemPrompt
   )
@@ -1251,6 +1299,71 @@ const Settings: React.FC = () => {
     setLmStudioBaseUrlTouched(true)
   }
 
+  const loadMemoryFiles = async () => {
+    if (import.meta.env.VITE_ENVIRONMENT !== 'electron') return
+
+    setMemoryFilesLoading(true)
+    setMemoryFilesError(null)
+    try {
+      const response = await localApi.get<MemoryFilesResponse>('/memory/files')
+      const files = Array.isArray(response.files) ? response.files : []
+      setMemoryFiles(
+        [...files].sort((a, b) => {
+          const rank = (file: MemoryFileSummary) => (file.kind === 'global' ? 0 : file.kind === 'recent' ? 1 : 2)
+          const rankDiff = rank(a) - rank(b)
+          if (rankDiff !== 0) return rankDiff
+          if (a.kind === 'project' && b.kind === 'project') {
+            const aUpdated = a.updatedAt ? new Date(a.updatedAt).getTime() : 0
+            const bUpdated = b.updatedAt ? new Date(b.updatedAt).getTime() : 0
+            if (aUpdated !== bUpdated) return bUpdated - aUpdated
+          }
+          return a.label.localeCompare(b.label)
+        })
+      )
+    } catch (error) {
+      console.error('Failed to load memory files:', error)
+      const message = error instanceof Error ? error.message : 'Failed to load memory files.'
+      setMemoryFilesError(message)
+    } finally {
+      setMemoryFilesLoading(false)
+    }
+  }
+
+  const openMemoryFile = async (file: MemoryFileSummary) => {
+    setSelectedMemoryFile(file)
+    setMemoryModalOpen(true)
+    setMemoryContent('')
+    setMemoryContentError(null)
+    setMemoryContentLoading(true)
+
+    try {
+      const response = await localApi.get<MemoryFileContentResponse>(`/memory/file?id=${encodeURIComponent(file.id)}`)
+      setMemoryContent(response.content || '')
+      if (response.file) {
+        setSelectedMemoryFile(response.file)
+      }
+    } catch (error) {
+      console.error('Failed to load memory file:', error)
+      setMemoryContentError(error instanceof Error ? error.message : 'Failed to load memory file.')
+    } finally {
+      setMemoryContentLoading(false)
+    }
+  }
+
+  const closeMemoryModal = () => {
+    setMemoryModalOpen(false)
+    setSelectedMemoryFile(null)
+    setMemoryContent('')
+    setMemoryContentError(null)
+    setMemoryContentLoading(false)
+  }
+
+  const refreshSelectedMemoryFile = async () => {
+    if (!selectedMemoryFile) return
+    await openMemoryFile(selectedMemoryFile)
+    await loadMemoryFiles()
+  }
+
   const handleMemoryBackfill = async () => {
     if (import.meta.env.VITE_ENVIRONMENT !== 'electron') {
       showStatus({ type: 'info', text: 'Memory indexing is only available in the Electron app.' })
@@ -1290,6 +1403,7 @@ const Settings: React.FC = () => {
           ? `Memory backfill finished. Embedded ${result.embedded}/${result.processed} notes${result.failed ? `, ${result.failed} failed` : ''}${result.skipped ? `, ${result.skipped} skipped` : ''}.`
           : 'Memory backfill finished.',
       })
+      await loadMemoryFiles()
     } catch (error) {
       console.error('Failed to backfill memory embeddings:', error)
       showStatus({
@@ -1575,6 +1689,11 @@ const Settings: React.FC = () => {
     fetchLocalUsers()
   }, [userId])
 
+  useEffect(() => {
+    if (import.meta.env.VITE_ENVIRONMENT !== 'electron') return
+    loadMemoryFiles()
+  }, [])
+
   const handleDefaultThinkingToggle = () => {
     const updated: ChatReasoningSettings = {
       ...chatReasoningSettings,
@@ -1829,17 +1948,18 @@ const Settings: React.FC = () => {
   }, [subagentSettings.maxTurns, subagentMaxTurnsTouched])
 
   useEffect(() => {
-    if (!isChangelogOpen) return
+    if (!isChangelogOpen && !memoryModalOpen) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setIsChangelogOpen(false)
+        closeMemoryModal()
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isChangelogOpen])
+  }, [isChangelogOpen, memoryModalOpen])
 
   const handleToolCallTimeoutInputChange = (value: string) => {
     setToolCallTimeoutInput(value)
@@ -2121,6 +2241,29 @@ const Settings: React.FC = () => {
     )
   }
 
+  const globalMemoryFiles = memoryFiles.filter(file => file.kind !== 'project')
+  const projectMemoryFiles = memoryFiles.filter(file => file.kind === 'project')
+
+  const renderMemoryFileButton = (file: MemoryFileSummary) => (
+    <button
+      key={file.id}
+      type='button'
+      onClick={() => openMemoryFile(file)}
+      className='group flex w-full items-center justify-between gap-3 rounded-xl bg-stone-100/70 px-4 py-3 text-left transition hover:bg-stone-200/70 dark:bg-stone-800/45 dark:hover:bg-stone-700/60'
+      aria-label={`View ${file.label}`}
+    >
+      <span className='min-w-0'>
+        <span className='block truncate text-sm font-medium text-stone-800 dark:text-stone-100'>{file.label}</span>
+        <span className='mt-0.5 block truncate text-xs text-stone-500 dark:text-stone-400'>
+          {file.description || 'memory file'} • {file.exists ? formatSize(file.sizeBytes) : 'not created'}
+        </span>
+      </span>
+      <span className='shrink-0 text-right text-[11px] text-stone-400 transition group-hover:text-stone-600 dark:text-stone-500 dark:group-hover:text-stone-300'>
+        {formatMemoryUpdatedAt(file.updatedAt)}
+      </span>
+    </button>
+  )
+
   return (
     <div className='h-full overflow-y-auto thin-scrollbar bg-transparent min-h-full'>
       <div className='mx-auto flex max-w-6xl flex-col gap-6 px-4 py-8'>
@@ -2187,6 +2330,59 @@ const Settings: React.FC = () => {
                     {changelogMarkdown}
                   </ReactMarkdown>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {memoryModalOpen && selectedMemoryFile && (
+          <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4' onClick={closeMemoryModal}>
+            <div
+              className='w-full max-w-4xl max-h-[85vh] overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-zinc-900'
+              onClick={event => event.stopPropagation()}
+            >
+              <div className='flex items-start justify-between gap-4 px-5 py-4'>
+                <div className='min-w-0'>
+                  <p className='truncate text-sm font-semibold text-stone-900 dark:text-stone-100'>{selectedMemoryFile.label}</p>
+                  <p className='mt-1 truncate text-xs text-stone-500 dark:text-stone-400'>
+                    {selectedMemoryFile.description || 'memory.md'} • {selectedMemoryFile.exists ? formatSize(selectedMemoryFile.sizeBytes) : 'not created'}
+                  </p>
+                </div>
+                <div className='flex shrink-0 items-center gap-2'>
+                  <button
+                    type='button'
+                    onClick={refreshSelectedMemoryFile}
+                    disabled={memoryContentLoading}
+                    className='rounded-lg bg-stone-100 px-3 py-1.5 text-xs font-medium text-stone-600 transition hover:bg-stone-200 disabled:opacity-60 dark:bg-stone-800 dark:text-stone-300 dark:hover:bg-stone-700'
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    type='button'
+                    onClick={closeMemoryModal}
+                    aria-label='Close memory preview'
+                    className='rounded-lg px-2 py-1 text-stone-500 transition hover:bg-stone-100 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-stone-800 dark:hover:text-stone-100'
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+              <div className='max-h-[calc(85vh-76px)] overflow-y-auto thin-scrollbar px-5 pb-5'>
+                {memoryContentLoading ? (
+                  <p className='rounded-xl bg-stone-100/70 px-4 py-3 text-sm text-stone-500 dark:bg-stone-800/45 dark:text-stone-300'>
+                    Loading memory file…
+                  </p>
+                ) : memoryContentError ? (
+                  <p className='rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:bg-rose-900/30 dark:text-rose-200'>
+                    {memoryContentError}
+                  </p>
+                ) : (
+                  <div className='prose prose-sm max-w-none dark:prose-invert prose-headings:font-semibold prose-pre:rounded-lg prose-pre:bg-stone-950'>
+                    <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, rehypeKatex]}>
+                      {memoryContent || '_This memory file is empty._'}
+                    </ReactMarkdown>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -2830,6 +3026,58 @@ const Settings: React.FC = () => {
                 <p className='text-xs text-stone-500 dark:text-stone-400'>
                   Uses the LM Studio server configured below. Nothing runs until you click the button.
                 </p>
+              </div>
+
+              <div className='mt-2 flex flex-col gap-3'>
+                <div className='flex flex-wrap items-center justify-between gap-3'>
+                  <div>
+                    <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Runtime memory files</p>
+                    <p className='text-sm text-stone-500 dark:text-stone-400'>
+                      View the markdown memory files currently used by local runtime hooks.
+                    </p>
+                  </div>
+                  <Button variant='outline2' size='small' onClick={loadMemoryFiles} disabled={memoryFilesLoading}>
+                    {memoryFilesLoading ? 'Refreshing…' : 'Refresh'}
+                  </Button>
+                </div>
+
+                {memoryFilesError && (
+                  <p className='rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:bg-rose-900/30 dark:text-rose-200'>
+                    {memoryFilesError}
+                  </p>
+                )}
+
+                <div className='grid gap-3 md:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]'>
+                  <div className='rounded-2xl bg-stone-50/70 p-3 dark:bg-stone-800/25'>
+                    <p className='px-1 pb-2 text-xs font-semibold uppercase tracking-wide text-stone-500 dark:text-stone-400'>
+                      Global
+                    </p>
+                    <div className='flex flex-col gap-2'>
+                      {globalMemoryFiles.length > 0 ? (
+                        globalMemoryFiles.map(renderMemoryFileButton)
+                      ) : (
+                        <p className='px-3 py-2 text-sm text-stone-500 dark:text-stone-400'>No global memory files found.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className='rounded-2xl bg-stone-50/70 p-3 dark:bg-stone-800/25'>
+                    <p className='px-1 pb-2 text-xs font-semibold uppercase tracking-wide text-stone-500 dark:text-stone-400'>
+                      Project memory
+                    </p>
+                    <div className='max-h-64 overflow-y-auto thin-scrollbar pr-1'>
+                      <div className='flex flex-col gap-2'>
+                        {projectMemoryFiles.length > 0 ? (
+                          projectMemoryFiles.map(renderMemoryFileButton)
+                        ) : (
+                          <p className='px-3 py-2 text-sm text-stone-500 dark:text-stone-400'>
+                            No project memory files found yet.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </section>

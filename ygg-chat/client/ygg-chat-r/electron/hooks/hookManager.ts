@@ -1,7 +1,7 @@
 import fs from 'fs/promises'
 import path from 'path'
 import { ensureManagedHooksInitialized } from './hookStorage.js'
-import type { HookEventName } from './hookTypes.js'
+import type { HookEventName, HookExecutionMode } from './hookTypes.js'
 
 const HOOK_EVENT_NAMES: HookEventName[] = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop']
 
@@ -28,6 +28,7 @@ export type ManagedHookListItem = {
   entryIndex: number
   handlerIndex: number
   handlerLocation: HookHandlerLocation
+  executionMode?: HookExecutionMode
 }
 
 type JsonRecord = Record<string, unknown>
@@ -42,6 +43,11 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function toTrimmedString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function parseExecutionMode(value: unknown): HookExecutionMode | undefined {
+  const mode = toTrimmedString(value)?.toLowerCase()
+  return mode === 'sync' || mode === 'async' ? mode : undefined
 }
 
 function toEventEntries(rawValue: unknown): unknown[] {
@@ -86,6 +92,7 @@ function extractManagedHookItemsFromEntry(
         timeoutMs: typeof rawHandler.timeoutMs === 'number' ? rawHandler.timeoutMs : undefined,
         matcher: (rawHandler.matcher as string | string[] | undefined) ?? entryMatcher,
         enabled: entryEnabled && rawHandler.enabled !== false,
+        executionMode: parseExecutionMode(rawHandler.executionMode),
         sourceFile,
         sourceFileName: path.basename(sourceFile),
         entryIndex,
@@ -109,6 +116,7 @@ function extractManagedHookItemsFromEntry(
       timeoutMs: typeof rawEntry.timeoutMs === 'number' ? rawEntry.timeoutMs : undefined,
       matcher: entryMatcher,
       enabled: entryEnabled,
+      executionMode: parseExecutionMode(rawEntry.executionMode),
       sourceFile,
       sourceFileName: path.basename(sourceFile),
       entryIndex,

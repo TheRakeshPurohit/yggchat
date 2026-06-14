@@ -2626,7 +2626,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         {/* Prioritize rendering: streamEvents > contentBlocks > legacy fields */}
         {/* Sequential streaming events - render in order as received */}
         {!editingState && Array.isArray(streamEvents) && streamEvents.length > 0 ? (
-          <div className='space-y-0 mb-3'>{streamRenderedNodes}</div>
+          <div className='space-y-0 mb-0'>{streamRenderedNodes}</div>
         ) : !editingState && Array.isArray(contentBlocks) && contentBlocks.length > 0 ? (
           <div className='space-y-0 mb-0'>{contentBlockRenderedNodes}</div>
         ) : (

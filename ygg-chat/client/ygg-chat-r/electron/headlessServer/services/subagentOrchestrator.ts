@@ -143,11 +143,8 @@ function toToolResultContent(result: any): string {
   }
 }
 
-function formatSubagentBody(content: string, reasoning?: string): string {
-  if (reasoning && reasoning.trim()) {
-    return `<thinking>\n${reasoning}\n</thinking>\n\n${content || ''}`.trim()
-  }
-  return content || ''
+function formatSubagentBody(content: string, _reasoning?: string): string {
+  return (content || '').replace(/<thinking>[\s\S]*?<\/thinking>\s*/gi, '').trim()
 }
 
 function sanitizeTools(tools: ProviderToolDefinition[] | undefined): ProviderToolDefinition[] | undefined {

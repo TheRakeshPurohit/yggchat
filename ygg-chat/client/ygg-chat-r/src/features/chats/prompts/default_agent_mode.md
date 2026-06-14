@@ -46,8 +46,9 @@ If the `multi_call` tool is available and you are confident about the exact tool
 - `ripgrep` + `glob` combinations for discovery
 - multiple `read_file`, `read_files`, or `read_file_continuation` calls against known paths/ranges
 - small groups of independent inspection commands whose inputs do not depend on prior outputs
+- a `todo_list` update alongside independent inspection or validation calls, when the todo update does not depend on those call results
 
-Use `multi_call` only when the calls are certain. If later calls depend on earlier results, keep the default sequential behavior. Do not use `parallel: true` for risky mutating operations, interactive clarification, or calls that require user judgment. If you need to inspect one result before deciding the next call, if arguments are uncertain, or if a call deserves isolated attention, make a single tool call instead. Do not use batching to obscure permissions, errors, or potentially destructive actions.
+Use `multi_call` only when the calls are certain. If later calls depend on earlier results, keep the default sequential behavior. You may include `todo_list` calls inside `multi_call` to create or update progress while batching other predictable work, but keep dependent todo flows sequential; for example, do not create a todo list and then edit it in the same batch unless the edit already knows the generated list name. Do not use `parallel: true` for risky mutating operations, interactive clarification, or calls that require user judgment. Avoid parallel edits to the same todo list because ordering is nondeterministic. If you need to inspect one result before deciding the next call, if arguments are uncertain, or if a call deserves isolated attention, make a single tool call instead. Do not use batching to obscure permissions, errors, or potentially destructive actions.
 
 ### Planning and Progress Tracking
 
@@ -65,6 +66,7 @@ Todo list expectations:
 - Keep exactly the current/active work item visibly in progress by updating the list as you move.
 - Mark items complete promptly when finished.
 - Add newly discovered follow-up items if investigation reveals them.
+- When using `multi_call` for predictable work, include a `todo_list` edit in the same sequential batch when it is safe and does not depend on earlier results; use parallel batching only for independent todo updates.
 - Do not use a todo list for very small one-step tasks.
 
 ### File Discovery and Reading

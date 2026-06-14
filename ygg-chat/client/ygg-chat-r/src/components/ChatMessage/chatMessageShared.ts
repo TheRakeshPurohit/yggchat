@@ -4,8 +4,8 @@ import type { ContentBlock, StreamEvent } from '@/features/chats/chatTypes'
 export const COLLAPSED_CONTENT_WORD_LIMIT = 15
 export const PROCESS_RUN_GROUP_MIN_ITEMS = 4
 
-export const PROCESS_CARD_WRAPPER_CLASS = 'relative pb-4 ml-1 message-remount-fade '
-export const PROCESS_CARD_REASONING_WRAPPER_CLASS = 'relative pb-4 ml-2 mb-2 message-remount-fade '
+export const PROCESS_CARD_WRAPPER_CLASS = 'relative pb-2 ml-1 message-remount-fade '
+export const PROCESS_CARD_REASONING_WRAPPER_CLASS = 'relative pb-2 ml-2 mb-2 message-remount-fade '
 export const TOOL_HEADER_BUTTON_CLASS =
   'flex items-center gap-1.5 group/tool hover:opacity-80 transition-opacity cursor-pointer outline-none'
 export const TOOL_NAME_BASE_CLASS = 'text-xs py-0.5 rounded-md text-neutral-500 dark:text-neutral-400 transition-colors'

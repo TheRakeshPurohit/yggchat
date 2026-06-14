@@ -169,6 +169,7 @@ import { cloneConversation, localApi } from '../utils/api'
 import { getAssetPath } from '../utils/assetPath'
 import { parseId } from '../utils/helpers'
 import { extractTextFromPdf } from '../utils/pdfUtils'
+import { addFileMentionLookupKeys } from '../../shared/fileMatchRanking'
 
 type ParsedMessageData = {
   toolCalls?: ToolCall[]
@@ -1770,23 +1771,13 @@ function Chat() {
       // Build a lookup map of mentionable names -> full paths (changed from contents).
       const nameToPath = new Map<string, string>() // Renamed Map for clarity.
 
-      // Helper function to extract basename (filename without full path).
-      // Handles both Windows (\) and Unix (/) path separators.
-      const basename = (p: string) => {
-        if (!p) return p
-        const parts = p.split(/\\\\|\//) // Regex splits on \\ (escaped for JS) or /.
-        return parts[parts.length - 1] // Returns the last part (e.g., 'api.ts' from '/src/api.ts').
-      }
-
       // Populate the Map from selected files (assuming selectedFilesForChat is SelectedFileContent[]).
-      // Adds multiple variations of the filename as keys for flexible matching.
-      // Values are now f.path (full path).
+      // Adds basename, relative path, absolute path, and normalized slash variants so selector-inserted
+      // mentions resolve consistently in both IDE and local fallback modes.
       for (const f of selectedFilesForChat) {
-        if (f.name && !nameToPath.has(f.name)) nameToPath.set(f.name, f.path)
-        const baseRel = basename(f.relativePath)
-        if (baseRel && !nameToPath.has(baseRel)) nameToPath.set(baseRel, f.path)
-        const basePath = basename(f.path)
-        if (basePath && !nameToPath.has(basePath)) nameToPath.set(basePath, f.path)
+        addFileMentionLookupKeys(nameToPath, f.name, f.path)
+        addFileMentionLookupKeys(nameToPath, f.relativePath, f.path)
+        addFileMentionLookupKeys(nameToPath, f.path, f.path)
       }
 
       // Replace mentions in the message.
@@ -2336,7 +2327,7 @@ function Chat() {
               ? '!rounded-none !rounded-b-md'
               : '!rounded-none'
 
-      const containerClassName = [endsAssistantBlock ? 'pb-4' : '', radiusClassName].filter(Boolean).join(' ')
+      const containerClassName = radiusClassName
 
       if (containerClassName) {
         classByMessageId.set(String(row.message.id), containerClassName)
@@ -6308,7 +6299,7 @@ function Chat() {
 
           {/* Textarea (bottom, grows upward because wrapper is bottom-pinned) */}
           <div
-            className={`slate-input-wrapper ${inputAreaBorderClasses} bg-neutral-100/40 dark:bg-neutral-900/40 backdrop-blur-xl rounded-3xl px-2 py-3 shadow-[0_20px_50px_-12px_rgba(0,0,0,0.25)] dark:shadow-[0_20px_50px_-12px_rgba(0,0,0,0.5)] transition-all duration-300`}
+            className={`slate-input-wrapper ${inputAreaBorderClasses} bg-neutral-100/40 dark:bg-neutral-900/40 backdrop-blur-xl rounded-3xl px-2 py-3 transition-all duration-300`}
             style={
               chatInputBorderAnimationEnabled
                 ? ({

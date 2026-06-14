@@ -8,6 +8,10 @@ import type { Conversation } from '../../features/conversations/conversationType
 import { selectSelectedProject } from '../../features/projects'
 import { useAppDispatch, useAppSelector } from '../../hooks/redux'
 import { useUserSystemPrompts } from '../../hooks/useUserSystemPrompts'
+import {
+  loadLongTermMemoryContextEnabled,
+  saveLongTermMemoryContextEnabled,
+} from '../../helpers/longTermMemorySettingsStorage'
 import { localApi } from '../../utils/api'
 import { extractTextFromPdf } from '../../utils/pdfUtils'
 import { InputTextArea } from '../InputTextArea/InputTextArea'
@@ -62,6 +66,7 @@ type ManagedHookListItem = {
   entryIndex: number
   handlerIndex: number
   handlerLocation: 'entry' | 'hooks'
+  executionMode?: 'sync' | 'async'
 }
 
 type HooksListResult = {
@@ -263,6 +268,10 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
     }
   })
 
+  const [longTermMemoryContextEnabled, setLongTermMemoryContextEnabled] = useState<boolean>(() =>
+    loadLongTermMemoryContextEnabled()
+  )
+
   const handleFontSizeChange = useCallback((value: number) => {
     const next = Math.max(-8, Math.min(16, value)) // Clamp between -8 and +16
     setFontSizeOffset(next)
@@ -292,6 +301,11 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
       // localStorage unavailable; keep in-memory state only
     }
     document.documentElement.classList.toggle('edit-diff-animations-disabled', !enabled)
+  }, [])
+
+  const handleLongTermMemoryContextEnabledChange = useCallback((enabled: boolean) => {
+    setLongTermMemoryContextEnabled(enabled)
+    saveLongTermMemoryContextEnabled(enabled)
   }, [])
 
   // Use the custom hook for system prompt management
@@ -1577,6 +1591,79 @@ ${block}`
               </div>
             </div>
 
+            {/* Long-term Memory Section */}
+            <div className='space-y-2'>
+              <div
+                className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
+                style={
+                  savedCustomThemesColors
+                    ? {
+                        backgroundColor: savedCustomThemesColors.cardBg,
+                        borderColor: savedCustomThemesColors.cardBorder,
+                      }
+                    : undefined
+                }
+              >
+                <div className='flex items-start justify-between gap-3 px-3 py-3'>
+                  <div className='flex min-w-0 items-start gap-3'>
+                    <div
+                      className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-100 text-amber-600 dark:bg-amber-500/15 dark:text-amber-300'
+                      style={
+                        savedCustomThemesColors
+                          ? {
+                              backgroundColor: savedCustomThemesColors.accentBg,
+                              color: savedCustomThemesColors.accentText,
+                            }
+                          : undefined
+                      }
+                    >
+                      <i className='bx bx-brain text-lg' />
+                    </div>
+                    <div className='min-w-0 pr-3'>
+                      <p
+                        className='text-sm font-medium text-stone-700 dark:text-neutral-100'
+                        style={savedCustomThemesColors ? { color: savedCustomThemesColors.titleText } : undefined}
+                      >
+                        Include memory context
+                      </p>
+                      <p
+                        className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-100'
+                        style={savedCustomThemesColors ? { color: savedCustomThemesColors.bodyText } : undefined}
+                      >
+                        Adds <code>.ygg/memory/memory.md</code>, <code>.ygg/memory/recent_memory.md</code>, and the active
+                        project&apos;s <code>project_memory.md</code> to new model requests after the system prompt. Disabling
+                        this does not delete memory or stop the Stop hook from updating the files.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type='button'
+                    onClick={() => handleLongTermMemoryContextEnabledChange(!longTermMemoryContextEnabled)}
+                    className='rounded-lg p-1.5 text-neutral-500 dark:text-neutral-100 transition-all duration-150 hover:bg-neutral-200/90 active:scale-95 active:bg-neutral-300/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-neutral-700/80 dark:active:bg-neutral-700 dark:focus-visible:ring-violet-500/40'
+                    style={
+                      savedCustomThemesColors
+                        ? {
+                            backgroundColor: savedCustomThemesColors.buttonBg,
+                            color: savedCustomThemesColors.buttonText,
+                          }
+                        : undefined
+                    }
+                    title={longTermMemoryContextEnabled ? 'Disable memory context' : 'Enable memory context'}
+                    aria-pressed={longTermMemoryContextEnabled}
+                  >
+                    <i
+                      className={`bx ${longTermMemoryContextEnabled ? 'bx-toggle-right' : 'bx-toggle-left'} text-2xl`}
+                      style={
+                        longTermMemoryContextEnabled && savedCustomThemesColors
+                          ? { color: savedCustomThemesColors.primaryButtonBg }
+                          : undefined
+                      }
+                    ></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+
             {/* Send Button Animation Section */}
             <div className='space-y-2'>
               <SendButtonAnimationSettings sectionThemeColors={savedCustomThemesColors} />
@@ -1959,6 +2046,18 @@ ${block}`
                                       >
                                         {hook.enabled ? 'Enabled' : 'Disabled'}
                                       </span>
+                                      <span
+                                        className={`text-xs px-1.5 py-0.5 rounded ${
+                                          hook.executionMode === 'async'
+                                            ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
+                                            : hook.executionMode === 'sync'
+                                              ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300'
+                                              : 'bg-neutral-200 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400'
+                                        }`}
+                                        title={hook.executionMode ? 'Explicit hook execution mode' : 'Default hook execution mode'}
+                                      >
+                                        {hook.executionMode ?? 'default mode'}
+                                      </span>
                                     </div>
                                     <p className='text-xs text-neutral-500 dark:text-neutral-400 mt-1 break-all'>
                                       {hook.sourceFileName}
@@ -1966,6 +2065,7 @@ ${block}`
                                         ? ` · Matcher: ${Array.isArray(hook.matcher) ? hook.matcher.join(', ') : hook.matcher}`
                                         : ''}
                                       {typeof hook.timeoutMs === 'number' ? ` · Timeout: ${hook.timeoutMs}ms` : ''}
+                                      {hook.executionMode ? ` · Mode: ${hook.executionMode}` : ''}
                                     </p>
                                   </div>
                                   <button

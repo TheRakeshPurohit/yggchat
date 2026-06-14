@@ -8,6 +8,7 @@ import { useIdeContext } from '../../hooks/useIdeContext'
 import { type DirectoryFileEntry, useDirectoryFileSearch, useDirectoryFiles } from '../../hooks/useQueries'
 import type { RootState } from '../../store/store'
 import { readLocalMentionFile } from '../../utils/readLocalMentionFile'
+import { rankFileMatches } from '../../../shared/fileMatchRanking'
 
 type textAreaState = 'default' | 'error' | 'disabled'
 type textAreaWidth = 'w-1/6' | 'w-1/4' | 'w-1/2' | 'w-3/4' | 'w-3/5' | 'w-5/6' | 'w-full' | 'max-w-3xl'
@@ -160,7 +161,8 @@ export const TextArea: React.FC<TextAreaProps> = ({
   )
   const fallbackMentionableFiles = useMemo(() => {
     const source = activeMentionTerm ? fallbackFileSearchData?.files || [] : fallbackDirectoryData?.files || []
-    return source.map(toMentionableOption).filter(file => !selectedMentionedPaths.has(file.path))
+    const options = source.map(toMentionableOption).filter(file => !selectedMentionedPaths.has(file.path))
+    return activeMentionTerm ? rankFileMatches(options, activeMentionTerm) : options
   }, [activeMentionTerm, fallbackDirectoryData?.files, fallbackFileSearchData?.files, selectedMentionedPaths])
   const isFallbackMentionLoading = shouldUseLocalFileFallback
     ? activeMentionTerm
@@ -496,14 +498,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
       return
     }
 
-    const term = activeMention.term.toLowerCase()
-    const filtered = localMentionableFiles.filter(file => {
-      const nameMatches = file.name.toLowerCase().includes(term)
-      const relativePathMatches = file.relativePath.toLowerCase().includes(term)
-      const relativeDirectoryMatches = file.relativeDirectoryPath.toLowerCase().includes(term)
-      const absolutePathMatches = file.path.toLowerCase().includes(term)
-      return nameMatches || relativePathMatches || relativeDirectoryMatches || absolutePathMatches
-    })
+    const filtered = rankFileMatches(localMentionableFiles, activeMention.term)
     setFilteredFiles(filtered)
     setSelectedFileIndex(0)
     setShowFileList(filtered.length > 0)

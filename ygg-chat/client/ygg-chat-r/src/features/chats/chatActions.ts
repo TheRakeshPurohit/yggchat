@@ -44,6 +44,7 @@ import { buildCompactionHistoryLines, buildCompactionWriteOpAppendix } from './c
 import { persistToolResultsWithFallback } from './toolResultPersistence'
 // OpenAI OAuth is handled internally by OpenAIChatGPT module
 import { loadAutoCompactionEnabled } from '../../helpers/chatUiSettingsStorage'
+import { loadLongTermMemoryContextEnabled } from '../../helpers/longTermMemorySettingsStorage'
 import { DEFAULT_COMPACTION_SYSTEM_PROMPT, loadProviderSettings } from '../../helpers/providerSettingsStorage'
 import { getDefaultBashTimeoutMs, getDefaultToolCallTimeoutMs } from '../../helpers/toolExecutionSettings'
 import { updateToolEnabledState } from '../../helpers/toolSettingsStorage'
@@ -61,7 +62,7 @@ import {
   setMcpTools,
   updateToolEnabled as updateToolEnabledInDefinitions,
 } from './toolDefinitions'
-import { runChatHook, type ChatHookLineage, type ChatHookTurnContext } from './chatHookClient'
+import { runChatHook, type ChatHookLineage, type ChatHookProjectContext, type ChatHookTurnContext } from './chatHookClient'
 import {
   normalizePlanClarificationQuestions,
   type PlanClarificationAnswer,
@@ -894,11 +895,72 @@ const appendHookAdditionalContext = (target: string[], value: string | null | un
   target.push(trimmed)
 }
 
+type MemoryContexts = {
+  longTermMemory: string | null
+  recentMemory: string | null
+  projectMemory: string | null
+  projectName: string | null
+}
+
+const maybeLoadMemoryContexts = async (project?: ChatHookProjectContext | null): Promise<MemoryContexts> => {
+  const emptyMemoryContexts: MemoryContexts = { longTermMemory: null, recentMemory: null, projectMemory: null, projectName: null }
+  const isElectronMode =
+    import.meta.env.VITE_ENVIRONMENT === 'electron' ||
+    (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__)
+
+  if (!isElectronMode || !loadLongTermMemoryContextEnabled()) return emptyMemoryContexts
+
+  try {
+    const params = new URLSearchParams({ maxChars: '10000', recentMaxChars: '10000', projectMaxChars: '12000' })
+    if (project?.projectId) params.set('projectId', project.projectId)
+    if (project?.projectName) params.set('projectName', project.projectName)
+    const result = await localApi.get<{
+      success?: boolean
+      memory?: string
+      recentMemory?: string
+      projectMemory?: string
+      projectName?: string | null
+    }>(`/memory/context?${params.toString()}`)
+    const longTermMemory = typeof result?.memory === 'string' ? result.memory.trim() : ''
+    const recentMemory = typeof result?.recentMemory === 'string' ? result.recentMemory.trim() : ''
+    const projectMemory = typeof result?.projectMemory === 'string' ? result.projectMemory.trim() : ''
+    return {
+      longTermMemory: longTermMemory || null,
+      recentMemory: recentMemory || null,
+      projectMemory: projectMemory || null,
+      projectName: typeof result?.projectName === 'string' && result.projectName.trim() ? result.projectName.trim() : project?.projectName ?? null,
+    }
+  } catch (error) {
+    console.warn('[longTermMemory] Failed to load memory context:', error)
+    return emptyMemoryContexts
+  }
+}
+
 const buildSystemPromptWithHookContext = (
   baseSystemPrompt: string | null | undefined,
-  pendingHookContextForNextTurn: string[]
+  pendingHookContextForNextTurn: string[],
+  longTermMemoryContext?: string | null,
+  recentMemoryContext?: string | null,
+  projectMemoryContext?: string | null,
+  projectMemoryName?: string | null
 ): string => {
   const segments = [typeof baseSystemPrompt === 'string' ? baseSystemPrompt.trim() : ''].filter(Boolean)
+  const memoryContext = typeof longTermMemoryContext === 'string' ? longTermMemoryContext.trim() : ''
+  if (memoryContext) {
+    segments.push(`[Long-term memory]\n${memoryContext}`)
+  }
+
+  const recentMemory = typeof recentMemoryContext === 'string' ? recentMemoryContext.trim() : ''
+  if (recentMemory) {
+    segments.push(`[Recent memory]\n${recentMemory}`)
+  }
+
+  const projectMemory = typeof projectMemoryContext === 'string' ? projectMemoryContext.trim() : ''
+  if (projectMemory) {
+    const projectName = typeof projectMemoryName === 'string' && projectMemoryName.trim() ? `: ${projectMemoryName.trim()}` : ''
+    segments.push(`[Project memory${projectName}]\n${projectMemory}`)
+  }
+
   const hookContextBlocks = pendingHookContextForNextTurn
     .map(context => context.trim())
     .filter(Boolean)
@@ -909,6 +971,14 @@ const buildSystemPromptWithHookContext = (
   }
 
   return segments.join('\n\n')
+}
+
+const buildProjectContextForMemory = (project: { id?: string | null; name?: string | null } | null | undefined): ChatHookProjectContext | null => {
+  if (!project?.id && !project?.name) return null
+  return {
+    projectId: project?.id != null ? String(project.id) : null,
+    projectName: typeof project?.name === 'string' ? project.name : null,
+  }
 }
 
 const getAssistantMessageTextForHook = (message: any): string => {
@@ -997,6 +1067,7 @@ const buildHookMetadata = (params: {
   state?: RootState | null
   queryClient?: QueryClient | null
   turn?: ChatHookTurnContext | null
+  project?: ChatHookProjectContext | null
 }) => {
   const conversationId = params.conversationId != null ? String(params.conversationId) : null
   const messageId = params.messageId != null ? String(params.messageId) : null
@@ -1023,6 +1094,7 @@ const buildHookMetadata = (params: {
       localApiBase: getCachedLocalApiBase(),
     },
     turn: params.turn ?? undefined,
+    project: params.project ?? undefined,
   }
 }
 
@@ -1038,12 +1110,14 @@ const maybeApplyUserPromptSubmitHook = async (params: {
   parentId?: MessageId | null
   state?: RootState | null
   queryClient?: QueryClient | null
+  project?: ChatHookProjectContext | null
 }): Promise<string> => {
   const hookMetadata = buildHookMetadata({
     conversationId: params.conversationId,
     parentId: params.parentId ?? null,
     state: params.state ?? null,
     queryClient: params.queryClient ?? null,
+    project: params.project ?? null,
   })
 
   const hookResult = await runChatHook({
@@ -1059,6 +1133,7 @@ const maybeApplyUserPromptSubmitHook = async (params: {
     parentId: hookMetadata.parentId,
     lineage: hookMetadata.lineage,
     lookup: hookMetadata.lookup,
+    project: hookMetadata.project,
   })
 
   appendHookAdditionalContext(params.pendingHookContextForNextTurn, hookResult.additionalContext)
@@ -1081,6 +1156,7 @@ const shouldContinueFromStopHook = async (params: {
   lastAssistantMessage: any
   state?: RootState | null
   queryClient?: QueryClient | null
+  project?: ChatHookProjectContext | null
 }): Promise<boolean> => {
   const lastAssistantMessage = params.lastAssistantMessage
   if (!lastAssistantMessage) return false
@@ -1097,6 +1173,7 @@ const shouldContinueFromStopHook = async (params: {
       lastUserMessageId,
       lastAssistantMessageId,
     },
+    project: params.project ?? null,
   })
 
   const hookResult = await runChatHook({
@@ -1113,6 +1190,7 @@ const shouldContinueFromStopHook = async (params: {
     lineage: hookMetadata.lineage,
     lookup: hookMetadata.lookup,
     turn: hookMetadata.turn,
+    project: hookMetadata.project,
   })
 
   appendHookAdditionalContext(params.pendingHookContextForNextTurn, hookResult.additionalContext)
@@ -2638,6 +2716,8 @@ export const sendMessage = createAsyncThunk<
       const payloadCwd = typeof cwd === 'string' ? cwd.trim() : (cwd ?? null)
       const effectiveToolRootPath = payloadCwd || conversationMeta?.cwd || state.ideContext.workspace?.rootPath || null
       const baseSystemPrompt = systemPrompt
+      const projectMemoryContext = buildProjectContextForMemory(selectedProject)
+      const memoryContexts = await maybeLoadMemoryContexts(projectMemoryContext)
 
       // Determine execution mode
       const isElectronMode =
@@ -2659,6 +2739,7 @@ export const sendMessage = createAsyncThunk<
         parentId: parent ?? null,
         state,
         queryClient: extra.queryClient,
+        project: projectMemoryContext,
       })
       let continueTurn = true
       let turnCount = 0
@@ -2670,7 +2751,14 @@ export const sendMessage = createAsyncThunk<
       while (continueTurn && turnCount < MAX_TURNS) {
         turnCount++
         continueTurn = false // Default to stop unless tool calls occur
-        const systemPrompt = buildSystemPromptWithHookContext(baseSystemPrompt, pendingHookContextForNextTurn)
+        const systemPrompt = buildSystemPromptWithHookContext(
+          baseSystemPrompt,
+          pendingHookContextForNextTurn,
+          memoryContexts.longTermMemory,
+          memoryContexts.recentMemory,
+          memoryContexts.projectMemory,
+          memoryContexts.projectName
+        )
         pendingHookContextForNextTurn.length = 0
 
         // Check if streaming was aborted by user (check this specific stream)
@@ -3001,6 +3089,7 @@ export const sendMessage = createAsyncThunk<
                 lastAssistantMessage: lastMsg,
                 state: getState(),
                 queryClient: extra.queryClient,
+              project: projectMemoryContext,
               })
 
               if (shouldContinueAfterStop) {
@@ -3263,6 +3352,7 @@ export const sendMessage = createAsyncThunk<
                 lastAssistantMessage: lastMsg,
                 state: getState(),
                 queryClient: extra.queryClient,
+              project: projectMemoryContext,
               })
 
               if (shouldContinueAfterStop) {
@@ -3568,6 +3658,7 @@ export const sendMessage = createAsyncThunk<
                 lastAssistantMessage: lastMsg,
                 state: getState(),
                 queryClient: extra.queryClient,
+              project: projectMemoryContext,
               })
 
               if (shouldContinueAfterStop) {
@@ -3845,6 +3936,7 @@ export const sendMessage = createAsyncThunk<
                 lastAssistantMessage: lastMsg,
                 state: getState(),
                 queryClient: extra.queryClient,
+              project: projectMemoryContext,
               })
 
               if (shouldContinueAfterStop) {
@@ -4368,6 +4460,7 @@ export const sendMessage = createAsyncThunk<
               (messageId ? { id: messageId, content: assistantMessageContent } : null),
             state: getState(),
             queryClient: extra.queryClient,
+          project: projectMemoryContext,
           })
 
           if (shouldContinueAfterStop) {
@@ -4665,6 +4758,8 @@ export const editMessageWithBranching = createAsyncThunk<
         projectContext && conversationContextSource
           ? `${projectContext}\n\n${conversationContextSource}`
           : projectContext || conversationContextSource || null
+      const projectMemoryContext = buildProjectContextForMemory(selectedProject)
+      const memoryContexts = await maybeLoadMemoryContexts(projectMemoryContext)
 
       // Gather image drafts (new images being added) captured before send start.
       const drafts = preSendDrafts
@@ -4732,6 +4827,9 @@ export const editMessageWithBranching = createAsyncThunk<
       promptAndContextTokens += safeEstimateTokenCount(selectedProject?.context)
       promptAndContextTokens += safeEstimateTokenCount(state.conversations.systemPrompt)
       promptAndContextTokens += safeEstimateTokenCount(state.conversations.convContext)
+      promptAndContextTokens += safeEstimateTokenCount(memoryContexts.longTermMemory)
+      promptAndContextTokens += safeEstimateTokenCount(memoryContexts.recentMemory)
+      promptAndContextTokens += safeEstimateTokenCount(memoryContexts.projectMemory)
 
       let messageTokens = 0
       currentPathMessages.forEach(message => {
@@ -4857,6 +4955,7 @@ export const editMessageWithBranching = createAsyncThunk<
         parentId: activeParentId ?? null,
         state,
         queryClient: extra.queryClient,
+        project: projectMemoryContext,
       })
       let continueTurn = true
       let turnCount = 0
@@ -4873,7 +4972,14 @@ export const editMessageWithBranching = createAsyncThunk<
       while (continueTurn && turnCount < MAX_TURNS) {
         turnCount++
         continueTurn = false
-        const systemPrompt = buildSystemPromptWithHookContext(baseSystemPrompt, pendingHookContextForNextTurn)
+        const systemPrompt = buildSystemPromptWithHookContext(
+          baseSystemPrompt,
+          pendingHookContextForNextTurn,
+          memoryContexts.longTermMemory,
+          memoryContexts.recentMemory,
+          memoryContexts.projectMemory,
+          memoryContexts.projectName
+        )
         pendingHookContextForNextTurn.length = 0
         let streamReader: ReadableStreamDefaultReader<Uint8Array> | null = null
         let firstRead: ReadableStreamReadResult<Uint8Array> | null = null
@@ -5116,6 +5222,7 @@ export const editMessageWithBranching = createAsyncThunk<
               lastAssistantMessage: lastMsg,
               state: getState(),
               queryClient: extra.queryClient,
+            project: projectMemoryContext,
             })
 
             if (shouldContinueAfterStop) {
@@ -5458,6 +5565,7 @@ export const editMessageWithBranching = createAsyncThunk<
               lastAssistantMessage: lastMsg,
               state: getState(),
               queryClient: extra.queryClient,
+            project: projectMemoryContext,
             })
 
             if (shouldContinueAfterStop) {
@@ -5968,6 +6076,7 @@ export const editMessageWithBranching = createAsyncThunk<
               (messageId ? { id: messageId, content: assistantMessageContent } : null),
             state: getState(),
             queryClient: extra.queryClient,
+          project: projectMemoryContext,
           })
 
           if (shouldContinueAfterStop) {
@@ -6100,6 +6209,8 @@ export const sendMessageToBranch = createAsyncThunk<
       const payloadCwd = typeof cwd === 'string' ? cwd.trim() : (cwd ?? null)
       const effectiveToolRootPath = payloadCwd || conversationMeta?.cwd || state.ideContext.workspace?.rootPath || null
       const baseSystemPrompt = effectiveSystemPrompt
+      const projectMemoryContext = buildProjectContextForMemory(selectedProject)
+      const memoryContexts = await maybeLoadMemoryContexts(projectMemoryContext)
 
       // Determine execution mode
       const isElectronMode =
@@ -6119,6 +6230,7 @@ export const sendMessageToBranch = createAsyncThunk<
         parentId: parentId ?? null,
         state,
         queryClient: extra.queryClient,
+        project: projectMemoryContext,
       })
       let currentParentId = parentId
       let continueTurn = true
@@ -6164,7 +6276,14 @@ export const sendMessageToBranch = createAsyncThunk<
       while (continueTurn && turnCount < MAX_TURNS) {
         turnCount++
         continueTurn = false
-        const effectiveSystemPrompt = buildSystemPromptWithHookContext(baseSystemPrompt, pendingHookContextForNextTurn)
+        const effectiveSystemPrompt = buildSystemPromptWithHookContext(
+          baseSystemPrompt,
+          pendingHookContextForNextTurn,
+          memoryContexts.longTermMemory,
+          memoryContexts.recentMemory,
+          memoryContexts.projectMemory,
+          memoryContexts.projectName
+        )
         pendingHookContextForNextTurn.length = 0
         let streamReader: ReadableStreamDefaultReader<Uint8Array> | null = null
         let firstRead: ReadableStreamReadResult<Uint8Array> | null = null
@@ -6403,6 +6522,7 @@ export const sendMessageToBranch = createAsyncThunk<
               lastAssistantMessage: lastMsg,
               state: getState(),
               queryClient: extra.queryClient,
+            project: projectMemoryContext,
             })
 
             if (shouldContinueAfterStop) {
@@ -6725,6 +6845,7 @@ export const sendMessageToBranch = createAsyncThunk<
               lastAssistantMessage: lastMsg,
               state: getState(),
               queryClient: extra.queryClient,
+            project: projectMemoryContext,
             })
 
             if (shouldContinueAfterStop) {
@@ -7168,6 +7289,7 @@ export const sendMessageToBranch = createAsyncThunk<
               (messageId ? { id: messageId, content: assistantMessageContent } : null),
             state: getState(),
             queryClient: extra.queryClient,
+          project: projectMemoryContext,
           })
 
           if (shouldContinueAfterStop) {
