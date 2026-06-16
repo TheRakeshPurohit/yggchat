@@ -117,13 +117,14 @@ export const createConversation = createAsyncThunk<
     projectId?: string | null
     systemPrompt?: string | null
     conversationContext?: string | null
+    cwd?: string | null
     storageMode?: 'cloud' | 'local' // NEW PARAMETER
   },
   { state: RootState; extra: ThunkExtraArgument }
 >(
   'conversations/create',
   async (
-    { title, projectId: providedProjectId, systemPrompt, conversationContext, storageMode },
+    { title, projectId: providedProjectId, systemPrompt, conversationContext, cwd, storageMode },
     { getState, extra, rejectWithValue }
   ) => {
     try {
@@ -159,6 +160,9 @@ export const createConversation = createAsyncThunk<
         }
       }
 
+      const projectForCwd = projectId ? getState().projects.projects.find(p => String(p.id) === String(projectId)) : null
+      const effectiveCwd = cwd !== undefined ? cwd : projectForCwd?.cwd || null
+
       // Route to local or cloud API
       if (shouldUseLocalApi(effectiveStorageMode, environment)) {
         const conversation = await localApi.post<Conversation>('/app/conversations', {
@@ -167,7 +171,8 @@ export const createConversation = createAsyncThunk<
           project_id: projectId,
           system_prompt: systemPrompt,
           conversation_context: conversationContext,
-          storage_mode: 'local'
+          cwd: effectiveCwd,
+          storage_mode: 'local',
         })
         return conversation
       }

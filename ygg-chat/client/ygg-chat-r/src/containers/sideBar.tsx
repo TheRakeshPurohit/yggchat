@@ -950,6 +950,7 @@ const SideBar: React.FC<SideBarProps> = ({
             projectId: project.id,
             title: `${project.name} Conversation`,
             storageMode: project.storage_mode || 'cloud',
+            cwd: project.cwd || null,
           })
         ).unwrap()
 
@@ -1027,6 +1028,8 @@ const SideBar: React.FC<SideBarProps> = ({
         queryClient.invalidateQueries({ queryKey: ['projects'], refetchType: 'none' })
 
         closeExpandPortal(false)
+        const inheritedCwd = createdConversation.storage_mode === 'local' ? createdConversation.cwd || project.cwd || '' : ''
+        dispatch(chatSliceActions.ccCwdSet(inheritedCwd))
         dispatch(chatSliceActions.conversationSet(createdConversation.id))
         dispatch(activeConversationIdSet(createdConversation.id))
         navigate(`/chat/${createdConversation.project_id || project.id}/${createdConversation.id}`, {

@@ -1455,6 +1455,7 @@ function initializeLocalDatabase(dbPath: string) {
       user_id TEXT,
       context TEXT,
       system_prompt TEXT,
+      cwd TEXT,
       storage_mode TEXT NOT NULL CHECK (storage_mode IN ('cloud','local')) DEFAULT 'cloud',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1481,6 +1482,17 @@ function initializeLocalDatabase(dbPath: string) {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `)
+
+  // Ensure project cwd column exists for older DBs
+  try {
+    const columns = db.prepare(`PRAGMA table_info(projects)`).all() as { name: string }[]
+    const columnNames = new Set(columns.map(col => col.name))
+    if (!columnNames.has('cwd')) {
+      db.exec(`ALTER TABLE projects ADD COLUMN cwd TEXT`)
+    }
+  } catch (error) {
+    console.warn('[LocalServer] Failed to migrate projects table:', error)
+  }
 
   // Ensure favorite column exists for older DBs
   try {
@@ -2186,12 +2198,13 @@ function initializeLocalDatabase(dbPath: string) {
 
     // Projects
     upsertProject: db.prepare(`
-        INSERT INTO projects (id, name, user_id, context, system_prompt, storage_mode, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO projects (id, name, user_id, context, system_prompt, cwd, storage_mode, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           context = excluded.context,
           system_prompt = excluded.system_prompt,
+          cwd = excluded.cwd,
           storage_mode = excluded.storage_mode,
           updated_at = excluded.updated_at
       `),
@@ -2472,8 +2485,8 @@ function ensureProjectExists(projectId: string, userId: string) {
     // console.log('[LocalServer] Auto-creating project stub:', projectId)
     const now = new Date().toISOString()
     db.prepare(
-      'INSERT INTO projects (id, name, user_id, context, system_prompt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(projectId, 'Synced Project', userId, null, null, now, now)
+      'INSERT INTO projects (id, name, user_id, context, system_prompt, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(projectId, 'Synced Project', userId, null, null, null, now, now)
   }
 }
 
@@ -4013,7 +4026,7 @@ function setupServer() {
   // Sync Project
   app.post('/api/sync/project', (req, res) => {
     try {
-      const { id, name, user_id, owner_id, context, system_prompt, storage_mode, created_at, updated_at } = req.body
+      const { id, name, user_id, owner_id, context, system_prompt, cwd, storage_mode, created_at, updated_at } = req.body
 
       // Handle owner_id -> user_id mapping (Railway sends owner_id)
       const effectiveUserId = user_id || owner_id
@@ -4031,6 +4044,7 @@ function setupServer() {
         effectiveUserId,
         context || null,
         system_prompt || null,
+        cwd || null,
         storage_mode || 'cloud',
         created_at || new Date().toISOString(),
         updated_at || new Date().toISOString()
@@ -4852,6 +4866,7 @@ function setupServer() {
                   op.data.user_id,
                   op.data.context || null,
                   op.data.system_prompt || null,
+                  op.data.cwd || null,
                   op.data.storage_mode || 'cloud',
                   op.data.created_at || new Date().toISOString(),
                   op.data.updated_at || new Date().toISOString()
@@ -7143,7 +7158,7 @@ function setupServer() {
 
   app.post('/api/local/projects', (req, res) => {
     try {
-      const { id, name, user_id, context, system_prompt } = req.body
+      const { id, name, user_id, context, system_prompt, cwd } = req.body
       if (!user_id) {
         res.status(400).json({ error: 'user_id required' })
         return
@@ -7156,6 +7171,7 @@ function setupServer() {
         user_id,
         context || null,
         system_prompt || null,
+        cwd || null,
         'local',
         now,
         now
@@ -7199,7 +7215,7 @@ function setupServer() {
   app.patch('/api/local/projects/:id', (req, res) => {
     try {
       const { id } = req.params
-      const { name, context, system_prompt } = req.body
+      const { name, context, system_prompt, cwd } = req.body
 
       const existing = statements.getProjectById.get(id) as any
       if (!existing) {
@@ -7221,6 +7237,7 @@ function setupServer() {
           name = COALESCE(?, name),
           context = ?,
           system_prompt = ?,
+          cwd = ?,
           updated_at = CURRENT_TIMESTAMP 
         WHERE id = ?
       `
@@ -7229,6 +7246,7 @@ function setupServer() {
           name || existing.name,
           context !== undefined ? context : existing.context,
           system_prompt !== undefined ? system_prompt : existing.system_prompt,
+          cwd !== undefined ? cwd : existing.cwd,
           id
         )
 
@@ -8957,7 +8975,7 @@ function setupServer() {
   // POST /api/local/conversations
   app.post('/api/local/conversations', (req, res) => {
     try {
-      const { id, user_id, project_id, title, system_prompt, conversation_context } = req.body
+      const { id, user_id, project_id, title, system_prompt, conversation_context, cwd } = req.body
       if (!user_id) {
         res.status(400).json({ error: 'user_id required' })
         return
@@ -8965,6 +8983,8 @@ function setupServer() {
 
       const conversationId = id || uuidv4()
       const now = new Date().toISOString()
+      const project = project_id ? (statements.getProjectById.get(project_id) as any) : null
+      const inheritedCwd = cwd !== undefined ? cwd : project?.cwd || null
 
       statements.upsertConversation.run(
         conversationId,
@@ -8975,7 +8995,7 @@ function setupServer() {
         system_prompt || null,
         conversation_context || null,
         null, // research_note
-        null, // cwd
+        inheritedCwd || null, // cwd
         'local', // storage_mode
         now,
         now

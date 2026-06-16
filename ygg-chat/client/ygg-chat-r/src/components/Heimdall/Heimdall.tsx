@@ -19,10 +19,12 @@ import { chatSliceActions } from '../../features/chats/chatSlice'
 import { buildBranchPathForMessage } from '../../features/chats/pathUtils'
 import { createConversation, updateCwd } from '../../features/conversations/conversationActions'
 import { makeSelectConversationById } from '../../features/conversations/conversationSelectors'
+import type { Conversation } from '../../features/conversations/conversationTypes'
 // import { selectSelectedProject } from '../../features/projects/projectSelectors'
 import { Message } from '@/features/chats'
 import { ConversationId, MessageId } from '../../../../../shared/types'
 import { useIsMobile } from '../../hooks/useMediaQuery'
+import { useConversations } from '../../hooks/useQueries'
 import type { RootState } from '../../store/store'
 import { parseId } from '../../utils/helpers'
 import stripMarkdownToText from '../../utils/markdownStripper'
@@ -168,6 +170,19 @@ const getHeatmapColor = (progress: number) => {
 //   branches: number
 // }
 
+type ConversationTransferMode = 'copy' | 'move'
+
+type MessageToCopy = {
+  role: 'user' | 'assistant'
+  content: string
+  thinking_block?: string
+  model_name?: string
+  tool_calls?: string
+  note?: string
+  note_color?: string | null
+  content_blocks?: any
+}
+
 interface HeimdallProps {
   chatData?: ChatNode | null
 
@@ -202,6 +217,24 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const allMessages = useSelector((state: RootState) => state.chat.conversation.messages)
   // Get current conversation to access project_id
   const currentConversation = useSelector(conversationId ? makeSelectConversationById(conversationId) : () => null)
+  const [showConversationSelector, setShowConversationSelector] = useState<boolean>(false)
+  const [conversationTransferMode, setConversationTransferMode] = useState<ConversationTransferMode>('copy')
+  const [isAddingToConversation, setIsAddingToConversation] = useState<boolean>(false)
+  const [conversationSelectorError, setConversationSelectorError] = useState<string | null>(null)
+  const {
+    data: conversations = [],
+    isLoading: conversationsLoading,
+    isError: conversationsIsError,
+    refetch: refetchConversations,
+  } = useConversations(showConversationSelector)
+  const selectableConversations = useMemo(
+    () =>
+      conversations.filter(conversation => {
+        const sourceConversationId = conversationId ?? currentConversationId
+        return sourceConversationId == null || String(conversation.id) !== String(sourceConversationId)
+      }),
+    [conversations, conversationId, currentConversationId]
+  )
   // Track total messages to detect a truly empty conversation
   const messagesCount = useSelector((state: RootState) => state.chat.conversation.messages.length)
   // Track if on mobile device for responsive tooltip behavior
@@ -2337,57 +2370,127 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     return sorted
   }
 
-  // Create new chat from selected nodes
-  const handleCreateNewChat = async (): Promise<void> => {
+  const buildMessagesToCopyFromSelection = (): MessageToCopy[] => {
+    const ids = selectedNodes || []
+    if (ids.length === 0) return []
+
+    // Build a map of message ID to full message data from state
+    const messageMap = new Map<string, any>()
+    allMessages.forEach(msg => {
+      messageMap.set(String(msg.id), msg)
+    })
+
+    // Check if all selected nodes belong to same branch and sort if they do
+    const onSameBranch = areNodesOnSameBranch(ids, allMessages)
+    const orderedIds = onSameBranch ? sortMessagesByBranch(ids, allMessages) : ids
+
+    // Collect selected messages in the determined order
+    const messagesToCopy: MessageToCopy[] = []
+    const seen = new Set<string>()
+
+    for (const idNum of orderedIds) {
+      const idStr = String(idNum)
+      if (seen.has(idStr)) continue
+      seen.add(idStr)
+
+      const msg = messageMap.get(idStr)
+      if (msg) {
+        messagesToCopy.push({
+          role: msg.role,
+          content: msg.content,
+          thinking_block: msg.thinking_block || '',
+          model_name: msg.model_name || 'unknown',
+          tool_calls: msg.tool_calls || undefined,
+          note: msg.note || undefined,
+          note_color: msg.note_color || null,
+          content_blocks: msg.content_blocks || undefined,
+        })
+      }
+    }
+
+    return messagesToCopy
+  }
+
+  const handleOpenConversationSelector = (mode: ConversationTransferMode): void => {
+    if (!selectedNodes || selectedNodes.length === 0) {
+      setShowContextMenu(false)
+      return
+    }
+
+    setShowContextMenu(false)
+    setConversationTransferMode(mode)
+    setConversationSelectorError(null)
+    setShowConversationSelector(true)
+    void refetchConversations()
+  }
+
+  const handleCloseConversationSelector = useCallback(() => {
+    if (isAddingToConversation) return
+    setShowConversationSelector(false)
+    setConversationSelectorError(null)
+  }, [isAddingToConversation])
+
+  const handleAddSelectionToConversation = async (targetConversation: Conversation): Promise<void> => {
+    if (isAddingToConversation) return
+
     try {
-      const ids = selectedNodes || []
-      if (ids.length === 0) {
-        setShowContextMenu(false)
+      setConversationSelectorError(null)
+      const messagesToCopy = buildMessagesToCopyFromSelection()
+      const idsToTransfer = [...(selectedNodes || [])]
+
+      if (messagesToCopy.length === 0 || idsToTransfer.length === 0) {
+        setConversationSelectorError('No selected messages could be transferred.')
         return
       }
 
-      // Build a map of message ID to full message data from state
-      const messageMap = new Map<string, any>()
-      allMessages.forEach(msg => {
-        messageMap.set(String(msg.id), msg)
-      })
-
-      // Check if all selected nodes belong to same branch and sort if they do
-      const onSameBranch = areNodesOnSameBranch(ids, allMessages)
-      const orderedIds = onSameBranch ? sortMessagesByBranch(ids, allMessages) : ids
-
-      // Collect selected messages in the determined order
-      const messagesToCopy: Array<{
-        role: 'user' | 'assistant'
-        content: string
-        thinking_block?: string
-        model_name?: string
-        tool_calls?: string
-        note?: string
-        note_color?: string | null
-        content_blocks?: any
-      }> = []
-
-      const seen = new Set<string>()
-      for (const idNum of orderedIds) {
-        const idStr = String(idNum)
-        if (seen.has(idStr)) continue
-        seen.add(idStr)
-
-        const msg = messageMap.get(idStr)
-        if (msg) {
-          messagesToCopy.push({
-            role: msg.role,
-            content: msg.content,
-            thinking_block: msg.thinking_block || '',
-            model_name: msg.model_name || 'unknown',
-            tool_calls: msg.tool_calls || undefined,
-            note: msg.note || undefined,
-            note_color: msg.note_color || null,
-            content_blocks: msg.content_blocks || undefined,
-          })
-        }
+      if (conversationTransferMode === 'move' && !conversationId) {
+        setConversationSelectorError('Cannot move messages because the source chat is unknown.')
+        return
       }
+
+      setIsAddingToConversation(true)
+      const targetStorageMode = (targetConversation.storage_mode || storageMode || 'cloud') as 'cloud' | 'local'
+
+      await (dispatch as any)(
+        insertBulkMessages({
+          conversationId: targetConversation.id,
+          messages: messagesToCopy,
+          storageMode: targetStorageMode,
+        })
+      ).unwrap()
+
+      if (conversationTransferMode === 'move' && conversationId) {
+        await (dispatch as any)(
+          deleteSelectedNodes({ ids: idsToTransfer, conversationId, storageMode })
+        ).unwrap()
+        await (dispatch as any)(fetchMessageTree({ conversationId, storageMode })).unwrap()
+        queryClient.invalidateQueries({ queryKey: ['conversations', conversationId, 'messages'] })
+      }
+
+      queryClient.invalidateQueries({ queryKey: ['conversations'] })
+      queryClient.invalidateQueries({ queryKey: ['conversations', targetConversation.id, 'messages'] })
+      if (targetConversation.project_id) {
+        queryClient.invalidateQueries({ queryKey: ['conversations', 'project', targetConversation.project_id] })
+      }
+
+      setShowConversationSelector(false)
+      dispatch(chatSliceActions.nodesSelected([]))
+    } catch (error) {
+      console.error('Failed to transfer selection to existing chat:', error)
+      setConversationSelectorError(
+        error instanceof Error
+          ? error.message
+          : `Failed to ${conversationTransferMode === 'move' ? 'move' : 'copy'} messages to selected chat.`
+      )
+    } finally {
+      setIsAddingToConversation(false)
+    }
+  }
+
+  // Create new chat from selected nodes
+  const handleCreateNewChat = async (): Promise<void> => {
+    try {
+      const messagesToCopy = buildMessagesToCopyFromSelection()
 
       if (messagesToCopy.length === 0) {
         setShowContextMenu(false)
@@ -2429,17 +2532,19 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         }
       }
 
+      const nextStorageMode = (newConversation.storage_mode || storageMode || 'cloud') as 'cloud' | 'local'
+
       // Insert messages as a chain preserving their structure
       await (dispatch as any)(
         insertBulkMessages({
           conversationId: newConversation.id,
           messages: messagesToCopy,
-          storageMode, // Pass storage mode explicitly since new conversation isn't in cache yet
+          storageMode: nextStorageMode, // Pass storage mode explicitly since new conversation isn't in cache yet
         })
       ).unwrap()
 
       // Fetch messages and tree to populate the new conversation before navigation
-      await (dispatch as any)(fetchMessageTree({ conversationId: newConversation.id, storageMode })).unwrap()
+      await (dispatch as any)(fetchMessageTree({ conversationId: newConversation.id, storageMode: nextStorageMode })).unwrap()
 
       // Invalidate React Query cache to update conversations list in sidebar/dropdowns
       queryClient.invalidateQueries({ queryKey: ['conversations'] })
@@ -2449,7 +2554,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
       // Navigate to the new chat with storageMode in state for immediate API routing
       navigate(`/chat/${newConversation.project_id || 'unknown'}/${newConversation.id}`, {
-        state: { storageMode },
+        state: { storageMode: newConversation.storage_mode || storageMode },
       })
     } catch (error) {
       console.error('Failed to create new chat from selection:', error)
@@ -2476,6 +2581,17 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       window.removeEventListener('keydown', onKey)
     }
   }, [showContextMenu])
+
+  useEffect(() => {
+    if (!showConversationSelector) return
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') handleCloseConversationSelector()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [showConversationSelector, handleCloseConversationSelector])
 
   // Close note dialog only on escape key (not on outside click)
   useEffect(() => {
@@ -3907,13 +4023,113 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           </div>
         </div>
       )}
+      {showConversationSelector && (
+        <div
+          className='absolute inset-0 z-30 flex items-center justify-center bg-black/30 backdrop-blur-[2px]'
+          onClick={handleCloseConversationSelector}
+        >
+          <div
+            className='bg-white dark:bg-neutral-900 border border-stone-200 dark:border-neutral-700 rounded-2xl shadow-2xl flex flex-col max-h-[80vh] w-[92%] max-w-lg'
+            onClick={e => e.stopPropagation()}
+            data-heimdall-wheel-exempt='true'
+          >
+            <div className='flex items-center justify-between px-5 py-4 border-b border-stone-200 dark:border-neutral-800 shrink-0'>
+              <div>
+                <h3 className='text-base font-semibold text-stone-800 dark:text-stone-100'>
+                  {conversationTransferMode === 'move' ? 'Move to Existing Chat' : 'Copy to Existing Chat'}
+                </h3>
+                <p className='text-xs text-stone-500 dark:text-stone-400'>
+                  Choose a chat. Messages will be inserted as a new top-level chain{conversationTransferMode === 'move' ? ' and removed from this chat.' : '.'}
+                </p>
+              </div>
+              <button
+                onClick={handleCloseConversationSelector}
+                disabled={isAddingToConversation}
+                className='p-1.5 hover:bg-stone-200 dark:hover:bg-neutral-800 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed'
+                aria-label='Close conversation selector'
+              >
+                <svg className='w-5 h-5 text-stone-500' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
+                  <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M6 18L18 6M6 6l12 12' />
+                </svg>
+              </button>
+            </div>
+
+            {conversationSelectorError && (
+              <div className='mx-5 mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300'>
+                {conversationSelectorError}
+              </div>
+            )}
+
+            <div className='overflow-y-auto flex-1 thin-scrollbar px-3 py-3' data-heimdall-wheel-exempt='true'>
+              {conversationsLoading && (
+                <div className='px-2 py-8 text-center text-sm text-stone-500 dark:text-stone-400'>Loading chats...</div>
+              )}
+
+              {!conversationsLoading && conversationsIsError && (
+                <div className='px-2 py-8 text-center text-sm text-red-600 dark:text-red-400'>
+                  Failed to load chats. Close and try again.
+                </div>
+              )}
+
+              {!conversationsLoading && !conversationsIsError && selectableConversations.length === 0 && (
+                <div className='px-2 py-8 text-center text-sm text-stone-500 dark:text-stone-400'>
+                  No other chats found.
+                </div>
+              )}
+
+              {!conversationsLoading && !conversationsIsError && selectableConversations.length > 0 && (
+                <div className='space-y-1'>
+                  {selectableConversations.map(conversation => {
+                    const title = conversation.title?.trim() || 'Untitled conversation'
+                    const updatedAt = conversation.updated_at ? new Date(conversation.updated_at) : null
+                    const updatedLabel = updatedAt && !Number.isNaN(updatedAt.getTime()) ? updatedAt.toLocaleDateString() : null
+                    return (
+                      <button
+                        key={String(conversation.id)}
+                        type='button'
+                        disabled={isAddingToConversation}
+                        onClick={() => handleAddSelectionToConversation(conversation)}
+                        className='w-full text-left rounded-xl px-3 py-3 transition-colors hover:bg-stone-100 dark:hover:bg-neutral-800 disabled:opacity-60 disabled:cursor-wait'
+                      >
+                        <div className='flex items-center gap-3'>
+                          <div className='flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-stone-100 text-stone-500 dark:bg-neutral-800 dark:text-neutral-300'>
+                            <i className='bx bx-message-rounded-dots text-lg' />
+                          </div>
+                          <div className='min-w-0 flex-1'>
+                            <div className='truncate text-sm font-medium text-stone-800 dark:text-stone-100'>{title}</div>
+                            <div className='mt-0.5 flex items-center gap-2 text-[11px] text-stone-500 dark:text-stone-400'>
+                              {updatedLabel && <span>{updatedLabel}</span>}
+                              {conversation.storage_mode && (
+                                <span className='rounded-full bg-stone-100 px-1.5 py-0.5 uppercase dark:bg-neutral-800'>
+                                  {conversation.storage_mode}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className='flex items-center justify-between gap-3 border-t border-stone-200 px-5 py-3 text-xs text-stone-500 dark:border-neutral-800 dark:text-stone-400'>
+              <span>{selectedNodes.length} selected message{selectedNodes.length === 1 ? '' : 's'}</span>
+              {isAddingToConversation && (
+                <span>{conversationTransferMode === 'move' ? 'Moving messages...' : 'Copying messages...'}</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {/* Custom context menu after selection */}
       {showContextMenu && contextMenuPos && (
         <div
           className='absolute z-30 w-[240px] rounded-[20px] p-1.5 border border-stone-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 shadow-[0_30px_60px_-12px_rgba(0,0,0,0.25)] dark:shadow-[0_30px_60px_-12px_rgba(0,0,0,0.6)] animate-menuEntrance'
           style={{
             left: Math.max(8, Math.min(contextMenuPos.x, Math.max(0, dimensions.width - 260))),
-            top: Math.max(8, Math.min(contextMenuPos.y, Math.max(0, dimensions.height - 220))),
+            top: Math.max(8, Math.min(contextMenuPos.y, Math.max(0, dimensions.height - 270))),
           }}
           onMouseDown={e => e.stopPropagation()}
         >
@@ -3988,6 +4204,38 @@ export const Heimdall: React.FC<HeimdallProps> = ({
               <path d='M12 4v16m8-8H4' />
             </svg>
             <span>New Chat From Here</span>
+          </button>
+
+          <button
+            className='w-full flex items-center gap-3 px-3 py-2.5 rounded-[14px] text-stone-500 dark:text-neutral-400 text-sm font-medium cursor-pointer transition-all duration-200 hover:bg-stone-100 dark:hover:bg-neutral-800 hover:text-stone-900 dark:hover:text-white hover:pl-4 group'
+            onClick={() => handleOpenConversationSelector('copy')}
+          >
+            <svg
+              className='w-4 h-4 opacity-50 group-hover:opacity-100 transition-opacity'
+              fill='none'
+              viewBox='0 0 24 24'
+              stroke='currentColor'
+              strokeWidth={2}
+            >
+              <path d='M9 12h11m-5-5 5 5-5 5M4 5h4v14H4z' />
+            </svg>
+            <span>Copy to Existing Chat</span>
+          </button>
+
+          <button
+            className='w-full flex items-center gap-3 px-3 py-2.5 rounded-[14px] text-stone-500 dark:text-neutral-400 text-sm font-medium cursor-pointer transition-all duration-200 hover:bg-stone-100 dark:hover:bg-neutral-800 hover:text-stone-900 dark:hover:text-white hover:pl-4 group'
+            onClick={() => handleOpenConversationSelector('move')}
+          >
+            <svg
+              className='w-4 h-4 opacity-50 group-hover:opacity-100 transition-opacity'
+              fill='none'
+              viewBox='0 0 24 24'
+              stroke='currentColor'
+              strokeWidth={2}
+            >
+              <path d='M7 7h10v10M17 7 7 17' />
+            </svg>
+            <span>Move to Existing Chat</span>
           </button>
 
           <div className='h-px bg-stone-200 dark:bg-neutral-700 mx-2 my-1.5' />

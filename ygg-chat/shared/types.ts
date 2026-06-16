@@ -151,6 +151,7 @@ export interface Project {
   context: string
   system_prompt: string
   storage_mode?: StorageMode
+  cwd?: string | null
 }
 
 export interface ProjectWithLatestConversation extends Project {

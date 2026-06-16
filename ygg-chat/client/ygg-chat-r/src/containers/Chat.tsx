@@ -7,7 +7,7 @@ import { MoreVertical, RefreshCw, Settings } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { batch } from 'react-redux'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
-import { ConversationId, ImageConfig, MessageId, OpenAIServiceTier, ReasoningConfig } from '../../../../shared/types'
+import { ConversationId, ImageConfig, MessageId, OpenAIServiceTier, Project, ReasoningConfig } from '../../../../shared/types'
 import {
   ActionPopover,
   Button,
@@ -3627,7 +3627,31 @@ function Chat() {
       try {
         const localConversation = await localApi.get<Conversation>(`/app/conversations/${currentConversationId}`)
         if (cwdLoadSeqRef.current !== loadSeq) return
-        const loadedCwd = typeof localConversation?.cwd === 'string' ? localConversation.cwd : ''
+        let loadedCwd = typeof localConversation?.cwd === 'string' ? localConversation.cwd : ''
+
+        if (!loadedCwd.trim() && projectIdFromUrl) {
+          try {
+            const localProject = await localApi.get<Project>(`/app/projects/${projectIdFromUrl}`)
+            if (cwdLoadSeqRef.current !== loadSeq) return
+            const projectCwd = typeof localProject?.cwd === 'string' ? localProject.cwd : ''
+            if (projectCwd.trim()) {
+              loadedCwd = projectCwd
+              void dispatch(
+                updateCwd({
+                  id: currentConversationId,
+                  cwd: projectCwd,
+                  storageMode: 'local',
+                })
+              )
+            }
+          } catch (projectCwdError) {
+            const message = projectCwdError instanceof Error ? projectCwdError.message : String(projectCwdError)
+            if (!message.includes('HTTP 404')) {
+              console.error('[Chat] Failed to load local project cwd fallback:', projectCwdError)
+            }
+          }
+        }
+
         persistedCcCwdRef.current = loadedCwd.trim()
         setCcCwdFromSystem(loadedCwd)
       } catch (error) {
@@ -3640,7 +3664,7 @@ function Chat() {
         setCcCwdFromSystem('')
       }
     })()
-  }, [currentConversationId, setCcCwdFromSystem])
+  }, [currentConversationId, dispatch, projectIdFromUrl, setCcCwdFromSystem])
 
   // Auto-sync cwd from IDE extension when connected
   // Passive IDE updates should only fill when cwd is empty.

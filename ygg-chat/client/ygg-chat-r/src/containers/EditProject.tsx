@@ -24,6 +24,7 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
   const [newProjectName, setNewProjectName] = useState('')
   const [newProjectContext, setNewProjectContext] = useState('')
   const [newProjectSystemPrompt, setNewProjectSystemPrompt] = useState('')
+  const [projectCwd, setProjectCwd] = useState('')
   const [storageMode, setStorageMode] = useState<StorageMode>(isCommunityMode ? 'local' : 'cloud')
 
   // Check if running in Electron
@@ -65,6 +66,7 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
       setNewProjectName(editingProject.name)
       setNewProjectContext(editingProject.context || '')
       setNewProjectSystemPrompt(editingProject.system_prompt || '')
+      setProjectCwd(editingProject.cwd || '')
       setStorageMode(isCommunityMode ? 'local' : editingProject.storage_mode || 'cloud')
       setSelectedPromptId(null)
     } else if (isOpen) {
@@ -76,10 +78,12 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
   const handleCreateProject = async () => {
     if (!newProjectName.trim()) return
 
+    const normalizedProjectCwd = projectCwd.trim()
     const payload: CreateProjectPayload = {
       name: newProjectName.trim(),
       context: newProjectContext.trim() || undefined,
       system_prompt: newProjectSystemPrompt.trim() || undefined,
+      cwd: normalizedProjectCwd || null,
       storageMode: isCommunityMode ? 'local' : storageMode,
     }
 
@@ -98,11 +102,13 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
   const handleUpdateProject = async () => {
     if (!newProjectName.trim() || !editingProject) return
 
+    const normalizedProjectCwd = projectCwd.trim()
     const payload: UpdateProjectPayload = {
       id: editingProject.id,
       name: newProjectName.trim(),
       context: newProjectContext.trim() || undefined,
       system_prompt: newProjectSystemPrompt.trim() || undefined,
+      cwd: normalizedProjectCwd || null,
       storage_mode: isCommunityMode ? 'local' : storageMode,
     }
 
@@ -120,6 +126,7 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
                 name: updatedProject.name,
                 context: updatedProject.context,
                 system_prompt: updatedProject.system_prompt,
+                cwd: updatedProject.cwd ?? null,
                 updated_at: updatedProject.updated_at,
               }
             : proj
@@ -137,6 +144,7 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
           name: updatedProject.name,
           context: updatedProject.context,
           system_prompt: updatedProject.system_prompt,
+          cwd: updatedProject.cwd ?? null,
           updated_at: updatedProject.updated_at,
         }
       })
@@ -152,6 +160,7 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
     setNewProjectName('')
     setNewProjectContext('')
     setNewProjectSystemPrompt('')
+    setProjectCwd('')
     setStorageMode(isCommunityMode ? 'local' : 'cloud')
     setSelectedPromptId(null)
     resetSaveUI()
@@ -160,6 +169,13 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
   const handleCancel = () => {
     resetForm()
     onClose()
+  }
+
+  const handleSelectProjectCwd = async () => {
+    const result = await window.electronAPI?.dialog?.selectFolder()
+    if (result?.success && result.path) {
+      setProjectCwd(result.path)
+    }
   }
 
   if (!isOpen) return null
@@ -337,6 +353,45 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
                 <div className='mb-4 text-sm text-neutral-500 dark:text-neutral-400'>Loading saved prompts...</div>
               )}
             </div>
+
+            {isElectronMode && (
+              <div>
+                <label className='pb-2 block text-[19px] sm:text-[19px] md:text-[19px] lg:text-[19px] xl:text-[19px] 2xl:text-[19px] 3xl:text-[19px] 4xl:text-[19px] text-neutral-900 font-medium mb-2 dark:text-neutral-200'>
+                  Project Working Directory
+                </label>
+                <div className='flex gap-2'>
+                  <input
+                    type='text'
+                    value={projectCwd}
+                    onChange={event => setProjectCwd(event.target.value)}
+                    placeholder='Working directory for new chats in this project (optional)'
+                    className='flex-1 px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-orange-500/60'
+                    title='Default working directory inherited by new local chats in this project'
+                  />
+                  <button
+                    type='button'
+                    onClick={handleSelectProjectCwd}
+                    className='px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-orange-500/60'
+                    title='Select project working directory'
+                  >
+                    <i className='bx bx-folder-open text-lg' aria-hidden='true'></i>
+                  </button>
+                  {projectCwd.trim() && (
+                    <button
+                      type='button'
+                      onClick={() => setProjectCwd('')}
+                      className='px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-orange-500/60'
+                      title='Clear project working directory'
+                    >
+                      <i className='bx bx-x text-lg' aria-hidden='true'></i>
+                    </button>
+                  )}
+                </div>
+                <p className='mt-2 text-sm text-neutral-600 dark:text-neutral-400'>
+                  New local chats in this project inherit this cwd. Existing chats keep their own cwd.
+                </p>
+              </div>
+            )}
 
             {/* Storage Mode Selection (only in Electron) */}
             {isElectronMode && (
