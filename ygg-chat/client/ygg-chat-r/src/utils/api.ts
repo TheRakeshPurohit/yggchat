@@ -19,6 +19,25 @@ type LoggedNetworkError = Error & {
   [NETWORK_FAILURE_LOGGED_SYMBOL]?: boolean
 }
 
+type ApiErrorPayload = {
+  error?: unknown
+  message?: unknown
+}
+
+export class LocalApiError extends Error {
+  status?: number
+  statusText?: string
+  payload?: unknown
+
+  constructor(message: string, options: { status?: number; statusText?: string; payload?: unknown } = {}) {
+    super(message)
+    this.name = 'LocalApiError'
+    this.status = options.status
+    this.statusText = options.statusText
+    this.payload = options.payload
+  }
+}
+
 type NetworkFailureInput = {
   source: string
   endpoint: string
@@ -32,6 +51,44 @@ type NetworkFailureInput = {
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message
   return String(error)
+}
+
+async function createLocalApiHttpError(response: Response): Promise<LocalApiError> {
+  let payload: unknown
+  let responseText: string | undefined
+
+  try {
+    const contentType = response.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      payload = await response.json()
+    } else {
+      responseText = await response.text()
+      if (responseText) {
+        try {
+          payload = JSON.parse(responseText)
+        } catch {
+          // Keep text fallback below.
+        }
+      }
+    }
+  } catch {
+    // Ignore body parsing failures and use the HTTP status fallback.
+  }
+
+  const apiPayload = payload && typeof payload === 'object' ? (payload as ApiErrorPayload) : undefined
+  const serverMessage =
+    typeof apiPayload?.error === 'string'
+      ? apiPayload.error
+      : typeof apiPayload?.message === 'string'
+        ? apiPayload.message
+        : undefined
+  const message = serverMessage || responseText || `HTTP ${response.status}: ${response.statusText}`
+
+  return new LocalApiError(message, {
+    status: response.status,
+    statusText: response.statusText,
+    payload,
+  })
 }
 
 function markNetworkFailureLogged(error: unknown): void {
@@ -248,6 +305,15 @@ const handleLocalApiError = (error: any, endpoint: string): never => {
         `Please ensure the Electron app is running with the local server enabled.`
     )
   }
+
+  if (error instanceof LocalApiError) {
+    throw new LocalApiError(`Local API error (${endpoint}): ${error.message}`, {
+      status: error.status,
+      statusText: error.statusText,
+      payload: error.payload,
+    })
+  }
+
   // Re-throw other errors
   throw new Error(`Local API error (${endpoint}): ${error.message || 'Unknown error'}`)
 }
@@ -260,7 +326,7 @@ export const localApi = {
     try {
       const response = await fetch(await buildLocalApiUrl(endpoint), { ...options, method })
       if (!response.ok) {
-        const error = new Error(`HTTP ${response.status}: ${response.statusText}`)
+        const error = await createLocalApiHttpError(response)
         markNetworkFailureLogged(error)
         reportNetworkFailure({
           source: 'localApi',
@@ -300,7 +366,7 @@ export const localApi = {
         body: data ? JSON.stringify(data) : undefined,
       })
       if (!response.ok) {
-        const error = new Error(`HTTP ${response.status}: ${response.statusText}`)
+        const error = await createLocalApiHttpError(response)
         markNetworkFailureLogged(error)
         reportNetworkFailure({
           source: 'localApi',
@@ -340,7 +406,7 @@ export const localApi = {
         body: data ? JSON.stringify(data) : undefined,
       })
       if (!response.ok) {
-        const error = new Error(`HTTP ${response.status}: ${response.statusText}`)
+        const error = await createLocalApiHttpError(response)
         markNetworkFailureLogged(error)
         reportNetworkFailure({
           source: 'localApi',
@@ -380,7 +446,7 @@ export const localApi = {
         body: data ? JSON.stringify(data) : undefined,
       })
       if (!response.ok) {
-        const error = new Error(`HTTP ${response.status}: ${response.statusText}`)
+        const error = await createLocalApiHttpError(response)
         markNetworkFailureLogged(error)
         reportNetworkFailure({
           source: 'localApi',
@@ -415,7 +481,7 @@ export const localApi = {
     try {
       const response = await fetch(await buildLocalApiUrl(endpoint), { ...options, method })
       if (!response.ok) {
-        const error = new Error(`HTTP ${response.status}: ${response.statusText}`)
+        const error = await createLocalApiHttpError(response)
         markNetworkFailureLogged(error)
         reportNetworkFailure({
           source: 'localApi',

@@ -81,6 +81,28 @@ type HookToggleResult = {
   hook?: ManagedHookListItem
 }
 
+type SkillInstallCandidate = {
+  name: string
+  path: string
+  url: string
+}
+
+type SkillInstallResult = {
+  success?: boolean
+  skillName?: string
+  skillNames?: string[]
+  error?: string
+  code?: string
+  candidates?: SkillInstallCandidate[]
+}
+
+const formatSkillInstallSuccess = (data: SkillInstallResult) => {
+  if (data.skillNames?.length) {
+    return `Successfully installed ${data.skillNames.length} skills under "${data.skillName}"`
+  }
+  return `Successfully installed "${data.skillName}"`
+}
+
 const HOOK_EVENT_ORDER: ManagedHookListItem['event'][] = [
   'UserPromptSubmit',
   'PreToolUse',
@@ -190,6 +212,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
   const [hookActionStatus, setHookActionStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const [skillInstallStatus, setSkillInstallStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [skillInstallMessage, setSkillInstallMessage] = useState('')
+  const [skillInstallCandidates, setSkillInstallCandidates] = useState<SkillInstallCandidate[]>([])
   const [installedSkills, setInstalledSkills] = useState<
     Array<{ name: string; description: string; enabled: boolean }>
   >([])
@@ -517,9 +540,10 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
 
     setSkillInstallStatus('loading')
     setSkillInstallMessage('Downloading and installing skill...')
+    setSkillInstallCandidates([])
 
     try {
-      const data = await localApi.post<{ success?: boolean; skillName?: string; error?: string }>(
+      const data = await localApi.post<SkillInstallResult>(
         '/skills/install/url',
         {
           url,
@@ -528,11 +552,44 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
 
       if (data.success) {
         setSkillInstallStatus('success')
-        setSkillInstallMessage(`Successfully installed "${data.skillName}"`)
+        setSkillInstallMessage(formatSkillInstallSuccess(data))
         setSkillUrl('')
         // Refresh skills list
         fetchInstalledSkills()
         // Auto-clear success message after 5 seconds
+        setTimeout(() => {
+          setSkillInstallStatus('idle')
+          setSkillInstallMessage('')
+        }, 5000)
+      } else {
+        setSkillInstallStatus('error')
+        setSkillInstallMessage(data.error || 'Installation failed')
+        setSkillInstallCandidates(data.candidates || [])
+      }
+    } catch (error) {
+      setSkillInstallStatus('error')
+      const payload = error && typeof error === 'object' && 'payload' in error ? (error as { payload?: SkillInstallResult }).payload : undefined
+      setSkillInstallMessage(error instanceof Error ? error.message : 'Network error - is the local server running?')
+      setSkillInstallCandidates(Array.isArray(payload?.candidates) ? payload.candidates : [])
+    }
+  }, [skillUrl, fetchInstalledSkills])
+
+  const handleInstallAllSkills = useCallback(async () => {
+    const url = skillUrl.trim()
+    if (!url || skillInstallCandidates.length === 0) return
+
+    setSkillInstallStatus('loading')
+    setSkillInstallMessage('Downloading and installing all skills...')
+
+    try {
+      const data = await localApi.post<SkillInstallResult>('/skills/install/github/all', { source: url })
+
+      if (data.success) {
+        setSkillInstallStatus('success')
+        setSkillInstallMessage(formatSkillInstallSuccess(data))
+        setSkillUrl('')
+        setSkillInstallCandidates([])
+        fetchInstalledSkills()
         setTimeout(() => {
           setSkillInstallStatus('idle')
           setSkillInstallMessage('')
@@ -545,7 +602,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
       setSkillInstallStatus('error')
       setSkillInstallMessage(error instanceof Error ? error.message : 'Network error - is the local server running?')
     }
-  }, [skillUrl, fetchInstalledSkills])
+  }, [skillUrl, skillInstallCandidates.length, fetchInstalledSkills])
 
   // Handle skill enable/disable toggle
   const handleToggleSkill = useCallback(async (skillName: string, currentEnabled: boolean) => {
@@ -2117,7 +2174,7 @@ ${block}`
                     >
                       ClawdHub
                     </a>{' '}
-                    or GitHub. Paste the skill page URL below.
+                    or GitHub. Paste a skill page, skill folder, or repository URL below.
                   </p>
 
                   {/* URL Input and Install Button */}
@@ -2175,13 +2232,45 @@ ${block}`
                               : 'bx-loader-alt animate-spin'
                         } text-base`}
                       ></i>
-                      {skillInstallMessage}
+                      <span>{skillInstallMessage}</span>
+                    </div>
+                  )}
+
+                  {skillInstallCandidates.length > 0 && (
+                    <div className='space-y-2 rounded-lg border border-red-200 dark:border-red-800/60 bg-red-50 dark:bg-red-950/20 px-3 py-2'>
+                      <div className='flex flex-wrap items-center justify-between gap-2'>
+                        <p className='text-xs font-medium text-red-700 dark:text-red-300'>Choose a specific skill, or install them all as a grouped repo:</p>
+                        <button
+                          type='button'
+                          onClick={handleInstallAllSkills}
+                          disabled={skillInstallStatus === 'loading'}
+                          className='rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed'
+                        >
+                          Install all under repo name
+                        </button>
+                      </div>
+                      <div className='flex flex-wrap gap-2'>
+                        {skillInstallCandidates.map(candidate => (
+                          <button
+                            key={candidate.url}
+                            type='button'
+                            onClick={() => {
+                              setSkillUrl(candidate.url)
+                              setSkillInstallCandidates([])
+                              setSkillInstallMessage(`Ready to install ${candidate.name}`)
+                            }}
+                            className='rounded-md bg-white dark:bg-neutral-800 px-2 py-1 text-xs text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/40'
+                          >
+                            {candidate.name}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
 
                   {/* Help text */}
                   <p className='text-xs text-neutral-500 dark:text-neutral-500'>
-                    Supported URLs: ClawdHub pages (clawdhub.com/owner/skill), GitHub repos
+                    Supported URLs: ClawdHub pages, GitHub skill folders, or GitHub repos. Multi-skill repos can be installed individually or grouped under the repo name.
                   </p>
 
                   {/* Installed Skills List */}

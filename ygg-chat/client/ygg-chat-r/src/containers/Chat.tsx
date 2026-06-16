@@ -1854,6 +1854,7 @@ function Chat() {
   const lastTrustedScrollTopRef = useRef<number | null>(null)
   const streamingRowAnchorOffsetRef = useRef<number | null>(null)
   const streamingAnchorRestoreRafRef = useRef<number | null>(null)
+  const isRestoringStreamingAnchorRef = useRef<boolean>(false)
   // Sentinel at the end of the list for robust bottom scrolling
   const bottomRef = useRef<HTMLDivElement>(null)
   // rAF id to coalesce frequent scroll requests during streaming
@@ -3764,8 +3765,17 @@ function Chat() {
     const rowStart = container.scrollTop + rowRect.top - containerRect.top
     const nextScrollTop = Math.max(0, rowStart + anchorOffset)
 
-    if (Math.abs(container.scrollTop - nextScrollTop) > 1) {
+    if (Math.abs(container.scrollTop - nextScrollTop) > 3) {
+      isRestoringStreamingAnchorRef.current = true
       container.scrollTop = nextScrollTop
+      lastTrustedScrollTopRef.current = nextScrollTop
+      if (typeof window !== 'undefined') {
+        window.requestAnimationFrame(() => {
+          isRestoringStreamingAnchorRef.current = false
+        })
+      } else {
+        isRestoringStreamingAnchorRef.current = false
+      }
     }
   }, [])
 
@@ -3785,6 +3795,7 @@ function Chat() {
     }
 
     const onScroll = (e: Event) => {
+      if (isRestoringStreamingAnchorRef.current) return
       if (!e.isTrusted || !streamActiveRef.current) return
 
       const currentTop = el.scrollTop
@@ -3816,10 +3827,8 @@ function Chat() {
   React.useLayoutEffect(() => {
     if (!streamState.active || !hasFinalTextStreaming || !userScrolledDuringStreamRef.current) return
     if (streamingRowAnchorOffsetRef.current == null) return
-
-    restoreStreamingRowAnchor()
-
     if (typeof window === 'undefined') return
+
     if (streamingAnchorRestoreRafRef.current != null) {
       window.cancelAnimationFrame(streamingAnchorRestoreRafRef.current)
     }
@@ -3852,6 +3861,7 @@ function Chat() {
       finalTextStreamingStartedRef.current = false
       lastTrustedScrollTopRef.current = null
       streamingRowAnchorOffsetRef.current = null
+      isRestoringStreamingAnchorRef.current = false
       if (streamingAnchorRestoreRafRef.current != null) {
         cancelAnimationFrame(streamingAnchorRestoreRafRef.current)
         streamingAnchorRestoreRafRef.current = null
@@ -5724,6 +5734,35 @@ function Chat() {
   }, [displayMessages])
 
   const branchFileMutationData = useMemo(() => extractBranchFileMutations(displayMessages), [displayMessages])
+  const hasLatestTodoList = Boolean(latestTodoList?.items?.length)
+  const hasBranchFileMutations = branchFileMutationData.latestByPath.length > 0
+  const showComposerSummaryPanels = hasLatestTodoList || hasBranchFileMutations
+  const showComposerSummaryPanelsAsRow = hasLatestTodoList && hasBranchFileMutations
+  const composerSummaryPanelClassName = showComposerSummaryPanelsAsRow
+    ? 'min-w-0 flex-1 basis-0'
+    : 'min-w-0 w-full'
+  const composerSummaryPanelsCollapsed = showComposerSummaryPanelsAsRow
+    ? todoListCollapsed && workspaceMutationsCollapsed
+    : false
+  const effectiveTodoListCollapsed = showComposerSummaryPanelsAsRow ? composerSummaryPanelsCollapsed : todoListCollapsed
+  const effectiveWorkspaceMutationsCollapsed = showComposerSummaryPanelsAsRow
+    ? composerSummaryPanelsCollapsed
+    : workspaceMutationsCollapsed
+  const toggleTodoListCollapsed = useCallback(() => {
+    const nextCollapsed = !effectiveTodoListCollapsed
+    setTodoListCollapsed(nextCollapsed)
+    if (showComposerSummaryPanelsAsRow) {
+      setWorkspaceMutationsCollapsed(nextCollapsed)
+    }
+  }, [effectiveTodoListCollapsed, showComposerSummaryPanelsAsRow])
+  const toggleWorkspaceMutationsCollapsed = useCallback(() => {
+    const nextCollapsed = !effectiveWorkspaceMutationsCollapsed
+    setWorkspaceMutationsCollapsed(nextCollapsed)
+    if (showComposerSummaryPanelsAsRow) {
+      setTodoListCollapsed(nextCollapsed)
+    }
+  }, [effectiveWorkspaceMutationsCollapsed, showComposerSummaryPanelsAsRow])
+
   const handleOpenWorkspaceMutationDiffs = useCallback(() => {
     const filePaths = branchFileMutationData.latestByPath.map(summary => summary.path)
     if (filePaths.length === 0) return
@@ -6434,143 +6473,151 @@ function Chat() {
                 onCancel={() => dispatch(cancelPlanClarification())}
               />
             )}
-            {/* Todo List Display - shows latest todo_list tool result */}
-            {latestTodoList && latestTodoList.items && latestTodoList.items.length > 0 && (
+            {/* Todo List / Modified Files Display */}
+            {showComposerSummaryPanels && (
               <div
-                className={`mx-2 ${toolCallPermissionRequest ? 'mt-1' : 'mt-2'} mb-1 px-2 py-0.5 rounded-[16px] bg-neutral-100/80 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700`}
+                className={`mx-2 ${toolCallPermissionRequest ? 'mt-1' : 'mt-2'} mb-1 ${
+                  showComposerSummaryPanelsAsRow ? 'flex gap-2' : 'block'
+                }`}
               >
-                <div className='flex items-center justify-between'>
-                  <span className='text-xs font-medium text-neutral-600 dark:text-neutral-400 flex items-center gap-1.5'>
-                    <i className='bx bx-list-check text-2xl'></i>
-                    <span className='text-[12px]'>{latestTodoList.name || 'Todo List'}</span>
-                    {todoListCollapsed && (
-                      <span className='text-[10px] text-neutral-400 dark:text-neutral-500 ml-1'>
-                        ({latestTodoList.items.filter(i => i.done).length}/{latestTodoList.items.length})
+                {hasLatestTodoList && latestTodoList && (
+                  <div
+                    className={`${composerSummaryPanelClassName} rounded-[16px] border border-neutral-200 bg-neutral-100/80 px-2 py-0.5 dark:border-neutral-700 dark:bg-neutral-800/50`}
+                  >
+                    <div className='flex items-center justify-between gap-2'>
+                      <span className='flex min-w-0 items-center gap-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-400'>
+                        <i className='bx bx-list-check shrink-0 text-2xl'></i>
+                        <span className='truncate text-[12px]'>{latestTodoList.name || 'Todo List'}</span>
+                        {effectiveTodoListCollapsed && (
+                          <span className='ml-1 shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
+                            ({latestTodoList.items.filter(i => i.done).length}/{latestTodoList.items.length})
+                          </span>
+                        )}
                       </span>
-                    )}
-                  </span>
-                  <div className='flex items-center gap-2'>
-                    <span className='text-[10px] text-neutral-400 dark:text-neutral-500'>
-                      {latestTodoList.action === 'create'
-                        ? 'Created'
-                        : latestTodoList.action === 'edit'
-                          ? 'Updated'
-                          : ''}
-                    </span>
-                    <button
-                      onClick={() => setTodoListCollapsed(!todoListCollapsed)}
-                      className='py-0.5 mt-1 px-2 rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors'
-                      title={todoListCollapsed ? 'Expand todo list' : 'Collapse todo list'}
-                    >
-                      <i
-                        className={`bx ${todoListCollapsed ? 'bx-chevron-down' : 'bx-chevron-up'} text-sm text-neutral-500`}
-                      ></i>
-                    </button>
-                  </div>
-                </div>
-                {!todoListCollapsed && (
-                  <ul className='space-y-1 pb-2 mt-1.5 max-h-40 overflow-y-auto thin-scrollbar'>
-                    {latestTodoList.items.map((item, idx) => (
-                      <li
-                        key={`todo-item-${idx}`}
-                        className={`flex items-center gap-2 text-xs ${
-                          item.done
-                            ? 'text-neutral-500 dark:text-neutral-400'
-                            : 'text-neutral-800 dark:text-neutral-200'
-                        }`}
-                      >
-                        <span className={item.done ? 'text-green-600 dark:text-green-400' : 'text-neutral-400'}>
-                          {item.done ? '[✓]' : '[ ]'}
+                      <div className='flex shrink-0 items-center gap-2'>
+                        <span className='text-[10px] text-neutral-400 dark:text-neutral-500'>
+                          {latestTodoList.action === 'create'
+                            ? 'Created'
+                            : latestTodoList.action === 'edit'
+                              ? 'Updated'
+                              : ''}
                         </span>
-                        <span className={item.done ? 'line-through opacity-80' : ''}>{item.text}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
-            {branchFileMutationData.latestByPath.length > 0 && (
-              <div
-                className={`mx-2 ${latestTodoList && latestTodoList.items && latestTodoList.items.length > 0 ? 'mt-1' : toolCallPermissionRequest ? 'mt-1' : 'mt-2'} mb-1 px-1 py-1`}
-              >
-                <div className='flex items-center justify-between gap-3'>
-                  <span className='min-w-0 flex items-center gap-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-400'>
-                    <i className='bx bx-file text-base shrink-0'></i>
-                    <span className='truncate text-[12px]'>Modified Files</span>
-                    <span className='shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
-                      {branchFileMutationData.latestByPath.length} file
-                      {branchFileMutationData.latestByPath.length === 1 ? '' : 's'}
-                    </span>
-                  </span>
-                  <div className='flex shrink-0 items-center gap-2'>
-                    <button
-                      type='button'
-                      onClick={handleOpenWorkspaceMutationDiffs}
-                      className='text-[10px] font-medium text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
-                      title='Open modified files in Git diff'
-                    >
-                      Diffs
-                    </button>
-                    <button
-                      onClick={() => setWorkspaceMutationsCollapsed(!workspaceMutationsCollapsed)}
-                      className='rounded-md px-1 py-0.5 text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
-                      title={workspaceMutationsCollapsed ? 'Expand modified files' : 'Collapse modified files'}
-                    >
-                      <i
-                        className={`bx ${workspaceMutationsCollapsed ? 'bx-chevron-down' : 'bx-chevron-up'} text-sm transition-transform duration-300 ease-in-out`}
-                      ></i>
-                    </button>
-                  </div>
-                </div>
-                <div
-                  className={`overflow-hidden transition-[max-height,opacity,margin] duration-300 ease-in-out ${
-                    workspaceMutationsCollapsed ? 'mt-0 max-h-0 opacity-0' : 'mt-1.5 max-h-44 opacity-100'
-                  }`}
-                  aria-hidden={workspaceMutationsCollapsed}
-                >
-                  <ul className='space-y-1 max-h-40 overflow-y-auto pr-1 thin-scrollbar'>
-                    {branchFileMutationData.latestByPath.map(summary => {
-                      const latestMutation = summary.latestMutation
-                      const fileName = getWorkspaceFileBaseName(summary.path)
-                      return (
-                        <li key={`workspace-summary-${summary.path}`} className='px-1 py-1'>
-                          <div className='flex items-start gap-2'>
-                            <span
-                              className={`mt-0.5 inline-flex h-5 shrink-0 items-center rounded-full px-1.5 text-[9px] font-semibold leading-none ${getWorkspaceMutationBadgeClassName(latestMutation.operation)}`}
-                            >
-                              {getWorkspaceMutationLabel(latestMutation.operation)}
+                        <button
+                          onClick={() => toggleTodoListCollapsed()}
+                          className='mt-1 rounded-lg px-2 py-0.5 transition-colors hover:bg-neutral-200 dark:hover:bg-neutral-700'
+                          title={effectiveTodoListCollapsed ? 'Expand todo list' : 'Collapse todo list'}
+                        >
+                          <i
+                            className={`bx ${effectiveTodoListCollapsed ? 'bx-chevron-down' : 'bx-chevron-up'} text-sm text-neutral-500`}
+                          ></i>
+                        </button>
+                      </div>
+                    </div>
+                    {!effectiveTodoListCollapsed && (
+                      <ul className='mt-1.5 max-h-40 space-y-1 overflow-y-auto pb-2 thin-scrollbar'>
+                        {latestTodoList.items.map((item, idx) => (
+                          <li
+                            key={`todo-item-${idx}`}
+                            className={`flex items-center gap-2 text-xs ${
+                              item.done
+                                ? 'text-neutral-500 dark:text-neutral-400'
+                                : 'text-neutral-800 dark:text-neutral-200'
+                            }`}
+                          >
+                            <span className={item.done ? 'text-green-600 dark:text-green-400' : 'text-neutral-400'}>
+                              {item.done ? '[✓]' : '[ ]'}
                             </span>
-                            <div className='min-w-0 flex-1'>
-                              <div className='flex items-center justify-between gap-2'>
-                                <div className='min-w-0 flex items-center gap-1.5'>
-                                  <span className='truncate text-xs font-medium text-neutral-800 dark:text-neutral-100'>
-                                    {fileName}
-                                  </span>
-                                  {summary.mutationCount > 1 && (
-                                    <span className='shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
-                                      ×{summary.mutationCount}
-                                    </span>
-                                  )}
-                                </div>
-                                <button
-                                  type='button'
-                                  onClick={() => handleOpenWorkspaceMutationDiffForPath(summary.path)}
-                                  className='shrink-0 text-[10px] font-medium text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
-                                  title={`Open diff for ${fileName}`}
+                            <span className={`min-w-0 truncate ${item.done ? 'line-through opacity-80' : ''}`}>{item.text}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+                {hasBranchFileMutations && (
+                  <div
+                    className={`${composerSummaryPanelClassName} rounded-[16px] border border-neutral-200 bg-neutral-100/80 px-2 py-1 dark:border-neutral-700 dark:bg-neutral-800/50`}
+                  >
+                    <div className='flex items-center justify-between gap-3'>
+                      <span className='min-w-0 flex items-center gap-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-400'>
+                        <i className='bx bx-file shrink-0 text-base'></i>
+                        <span className='truncate text-[12px]'>Modified Files</span>
+                        <span className='shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
+                          {branchFileMutationData.latestByPath.length} file
+                          {branchFileMutationData.latestByPath.length === 1 ? '' : 's'}
+                        </span>
+                      </span>
+                      <div className='flex shrink-0 items-center gap-2'>
+                        <button
+                          type='button'
+                          onClick={handleOpenWorkspaceMutationDiffs}
+                          className='text-[10px] font-medium text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
+                          title='Open modified files in Git diff'
+                        >
+                          Diffs
+                        </button>
+                        <button
+                          onClick={() => toggleWorkspaceMutationsCollapsed()}
+                          className='rounded-md px-1 py-0.5 text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
+                          title={effectiveWorkspaceMutationsCollapsed ? 'Expand modified files' : 'Collapse modified files'}
+                        >
+                          <i
+                            className={`bx ${effectiveWorkspaceMutationsCollapsed ? 'bx-chevron-down' : 'bx-chevron-up'} text-sm transition-transform duration-300 ease-in-out`}
+                          ></i>
+                        </button>
+                      </div>
+                    </div>
+                    <div
+                      className={`overflow-hidden transition-[max-height,opacity,margin] duration-300 ease-in-out ${
+                        effectiveWorkspaceMutationsCollapsed ? 'mt-0 max-h-0 opacity-0' : 'mt-1.5 max-h-44 opacity-100'
+                      }`}
+                      aria-hidden={effectiveWorkspaceMutationsCollapsed}
+                    >
+                      <ul className='max-h-40 space-y-1 overflow-y-auto pr-1 thin-scrollbar'>
+                        {branchFileMutationData.latestByPath.map(summary => {
+                          const latestMutation = summary.latestMutation
+                          const fileName = getWorkspaceFileBaseName(summary.path)
+                          return (
+                            <li key={`workspace-summary-${summary.path}`} className='px-1 py-1'>
+                              <div className='flex items-start gap-2'>
+                                <span
+                                  className={`mt-0.5 inline-flex h-5 shrink-0 items-center rounded-full px-1.5 text-[9px] font-semibold leading-none ${getWorkspaceMutationBadgeClassName(latestMutation.operation)}`}
                                 >
-                                  Diff
-                                </button>
+                                  {getWorkspaceMutationLabel(latestMutation.operation)}
+                                </span>
+                                <div className='min-w-0 flex-1'>
+                                  <div className='flex items-center justify-between gap-2'>
+                                    <div className='min-w-0 flex items-center gap-1.5'>
+                                      <span className='truncate text-xs font-medium text-neutral-800 dark:text-neutral-100'>
+                                        {fileName}
+                                      </span>
+                                      {summary.mutationCount > 1 && (
+                                        <span className='shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
+                                          ×{summary.mutationCount}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <button
+                                      type='button'
+                                      onClick={() => handleOpenWorkspaceMutationDiffForPath(summary.path)}
+                                      className='shrink-0 text-[10px] font-medium text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
+                                      title={`Open diff for ${fileName}`}
+                                    >
+                                      Diff
+                                    </button>
+                                  </div>
+                                  <div className='mt-0.5 truncate text-[10px] text-neutral-500 dark:text-neutral-400'>
+                                    {summary.path}
+                                  </div>
+                                </div>
                               </div>
-                              <div className='mt-0.5 truncate text-[10px] text-neutral-500 dark:text-neutral-400'>
-                                {summary.path}
-                              </div>
-                            </div>
-                          </div>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                </div>
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
             {showOpenAIUsagePanel && (

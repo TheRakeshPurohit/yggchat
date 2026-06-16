@@ -3,7 +3,23 @@
 
 import { Express } from 'express'
 import { skillRegistry } from './skillLoader.js'
-import { installFromGitHub, installFromLocal, installFromUrl, fetchSkillsCatalog } from './skillInstaller.js'
+import {
+  installFromGitHub,
+  installFromLocal,
+  installFromUrl,
+  installAllFromGitHub,
+  fetchSkillsCatalog,
+  type InstallResult,
+} from './skillInstaller.js'
+
+function installFailureResponse(result: InstallResult) {
+  return {
+    success: false,
+    error: result.error,
+    code: result.code,
+    candidates: result.candidates,
+  }
+}
 
 export function registerSkillRoutes(app: Express): void {
 
@@ -129,11 +145,34 @@ export function registerSkillRoutes(app: Express): void {
       if (result.success) {
         res.json({ success: true, skillName: result.skillName })
       } else {
-        res.status(400).json({ success: false, error: result.error })
+        res.status(400).json(installFailureResponse(result))
       }
     } catch (error) {
       console.error('[SkillRoutes] Error installing from GitHub:', error)
       res.status(500).json({ success: false, error: 'Failed to install skill' })
+    }
+  })
+
+  // POST /api/skills/install/github/all - Install all skills from a multi-skill GitHub repo/folder
+  app.post('/api/skills/install/github/all', async (req, res) => {
+    try {
+      const { source } = req.body
+
+      if (!source || typeof source !== 'string') {
+        res.status(400).json({ success: false, error: 'Missing "source" in request body' })
+        return
+      }
+
+      const result = await installAllFromGitHub(source)
+
+      if (result.success) {
+        res.json({ success: true, skillName: result.skillName, skillNames: result.skillNames })
+      } else {
+        res.status(400).json(installFailureResponse(result))
+      }
+    } catch (error) {
+      console.error('[SkillRoutes] Error installing all from GitHub:', error)
+      res.status(500).json({ success: false, error: 'Failed to install skills' })
     }
   })
 
@@ -152,7 +191,7 @@ export function registerSkillRoutes(app: Express): void {
       if (result.success) {
         res.json({ success: true, skillName: result.skillName })
       } else {
-        res.status(400).json({ success: false, error: result.error })
+        res.status(400).json(installFailureResponse(result))
       }
     } catch (error) {
       console.error('[SkillRoutes] Error installing from local:', error)
@@ -173,9 +212,9 @@ export function registerSkillRoutes(app: Express): void {
       const result = await installFromUrl(url)
 
       if (result.success) {
-        res.json({ success: true, skillName: result.skillName })
+        res.json({ success: true, skillName: result.skillName, skillNames: result.skillNames })
       } else {
-        res.status(400).json({ success: false, error: result.error })
+        res.status(400).json(installFailureResponse(result))
       }
     } catch (error) {
       console.error('[SkillRoutes] Error installing from URL:', error)
