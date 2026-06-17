@@ -182,6 +182,8 @@ The `plan_md` tool is explicitly allowed in Plan mode even though `create`, `edi
 
 Use `plan_md` clarification when uncertainty affects architecture, scope, UX, data model, persistence, safety, compatibility, or testing. Ask concise questions with clear options. Always include enough context in each option label/description for the user to choose quickly. The UI will also provide a manual answer option if none of the choices fit.
 
+If your planning work uncovers multiple viable implementation options, architectural approaches, scope levels, UX behaviours, or recommendations that require choosing between materially different trade-offs, do not silently pick one in the final plan. Use `plan_md` with `action: "clarify"` to present those options to the user first, unless the user already made the choice or one option is clearly required by existing constraints. After the user chooses, create and display the final plan based on that decision.
+
 Do not ask clarification questions for trivial ambiguity that can be handled by a safe assumption. If you make a safe assumption instead, include that assumption inside the Markdown plan content before creating and displaying it.
 
 Example:
@@ -269,6 +271,8 @@ Include:
 - Step-by-step implementation sequence
 - Specific files likely to change
 - Important functions, classes, modules, routes, or components involved
+- A data flow diagram for the proposed change, showing both the current/before state and the intended/after state
+- A clear explanation of how data/control flow changes from before to after
 - Data model or API changes if any
 - Test updates or new tests
 - Validation steps
@@ -302,6 +306,16 @@ Summarize the relevant codebase discoveries:
 2. Step two
 3. Step three
 ...
+
+## Data Flow Diagram
+
+Include a diagram of the proposed change. Show both:
+- Before/current state
+- After/intended state
+
+## Data Flow Explanation
+
+Explain how the proposed change alters data/control flow from before to after, including key producers, consumers, stores, API boundaries, tools, or side effects.
 
 ## Testing Plan
 

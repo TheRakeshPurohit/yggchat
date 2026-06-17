@@ -26,6 +26,7 @@ import {
   Attachment,
   BranchMessagePayload,
   EditMessagePayload,
+  ImageDraft,
   Message,
   Model,
   OperationMode,
@@ -419,6 +420,31 @@ const updateMessageCache = (queryClient: QueryClient | null, conversationId: Con
  * Keeps React Query cache in sync with Redux state when artifacts are appended
  * Essential for ensuring images/attachments appear immediately in sent messages
  */
+const mergeArtifactUrls = (existing: string[] | undefined, incoming: string[]): string[] => {
+  const merged = Array.isArray(existing) ? [...existing] : []
+  const seen = new Set(merged)
+  for (const artifact of incoming) {
+    if (!seen.has(artifact)) {
+      merged.push(artifact)
+      seen.add(artifact)
+    }
+  }
+  return merged
+}
+
+const getDraftsForTarget = (
+  state: RootState,
+  target: { kind: 'composer' } | { kind: 'branch'; messageId: MessageId }
+): ImageDraft[] => {
+  const draftTarget = state.chat.composition.imageDraftTarget
+  if (!draftTarget) return []
+  if (draftTarget.kind !== target.kind) return []
+  if (target.kind === 'branch') {
+    if (draftTarget.kind !== 'branch' || String(draftTarget.messageId) !== String(target.messageId)) return []
+  }
+  return state.chat.composition.imageDrafts || []
+}
+
 const updateMessageArtifactsInCache = (
   queryClient: QueryClient | null,
   conversationId: ConversationId,
@@ -431,9 +457,9 @@ const updateMessageArtifactsInCache = (
   const existingData = queryClient.getQueryData<{ messages: Message[]; tree: any }>(cacheKey)
 
   if (existingData) {
-    // Update the message artifacts in the messages array
+    // Update the message artifacts in the messages array without dropping existing local previews.
     const updatedMessages = existingData.messages.map(msg =>
-      msg.id === messageId ? { ...msg, artifacts: [...(msg.artifacts || []), ...newArtifacts] } : msg
+      msg.id === messageId ? { ...msg, artifacts: mergeArtifactUrls(msg.artifacts, newArtifacts) } : msg
     )
 
     queryClient.setQueryData(cacheKey, {
@@ -2625,7 +2651,7 @@ export const sendMessage = createAsyncThunk<
     // Generate or use provided stream ID
     const streamId = providedStreamId ?? generateStreamId('primary')
     const preSendState = getState() as RootState
-    const preSendDrafts = preSendState.chat.composition.imageDrafts || []
+    const preSendDrafts = getDraftsForTarget(preSendState, { kind: 'composer' })
     const preSendAttachmentsBase64 = preSendDrafts.length
       ? preSendDrafts.map(d => ({ dataUrl: d.dataUrl, name: d.name, type: d.type, size: d.size }))
       : null
@@ -4674,7 +4700,7 @@ export const editMessageWithBranching = createAsyncThunk<
 
     // Snapshot composition state before send start so UI can clear immediately.
     const preSendState = getState() as RootState
-    const preSendDrafts = preSendState.chat.composition.imageDrafts || []
+    const preSendDrafts = getDraftsForTarget(preSendState, { kind: 'branch', messageId: originalMessageId })
     const preSendSelectedFilesForChat = preSendState.ideContext.selectedFilesForChat || []
 
     // Get state early to find parent message ID for lineage
@@ -6136,7 +6162,7 @@ export const sendMessageToBranch = createAsyncThunk<
     // Generate or use provided stream ID
     const streamId = providedStreamId ?? generateStreamId('branch')
     const preSendState = getState() as RootState
-    const preSendDrafts = preSendState.chat.composition.imageDrafts || []
+    const preSendDrafts = getDraftsForTarget(preSendState, { kind: 'branch', messageId: parentId })
     const preSendAttachmentsBase64 = preSendDrafts.length
       ? preSendDrafts.map(d => ({ dataUrl: d.dataUrl, name: d.name, type: d.type, size: d.size }))
       : null

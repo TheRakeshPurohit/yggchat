@@ -266,6 +266,10 @@ export interface ImageDraft {
   size: number
 }
 
+export type ImageDraftTarget =
+  | { kind: 'composer' }
+  | { kind: 'branch'; messageId: MessageId }
+
 export interface MessageInput {
   content: string
   modelOverride?: string
@@ -280,6 +284,7 @@ export interface CompositionState {
   draftMessage: String | null
   multiReplyCount: number
   imageDrafts: ImageDraft[] // base64-encoded images + metadata from drag/drop
+  imageDraftTarget: ImageDraftTarget | null // explicit owner for imageDrafts; never infer from focused message
   editingBranch: boolean // true when user is editing a branch; controls UI like hiding image drafts
   optimisticMessage: Message | null // temp message for instant UI feedback in web mode only
   optimisticBranchMessage: Message | null // temp branched message for instant UI feedback in web mode only

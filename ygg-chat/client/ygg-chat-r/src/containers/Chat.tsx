@@ -91,7 +91,7 @@ import {
   updateConversationTitle,
   updateMessage,
 } from '../features/chats'
-import type { ContentBlock, ToolCall } from '../features/chats/chatTypes'
+import type { ContentBlock, ImageDraftTarget, ToolCall } from '../features/chats/chatTypes'
 import type { PlanClarificationAnswer } from '../features/chats/planToolTypes'
 import { estimateContentBlocksForContext, safeEstimateTokenCount } from '../features/chats/contextTokenEstimate'
 import {
@@ -282,6 +282,7 @@ type ChatInputControllerProps = {
   onClearIdeContexts?: () => void
   selectedIdeContextItems?: Array<{ id: string; label: string }>
   fallbackFileSearchRoot?: string | null
+  imageDraftTarget?: ImageDraftTarget
 }
 
 type AddedIdeContext = {
@@ -759,6 +760,7 @@ const ChatInputController = React.memo(
         onClearIdeContexts,
         selectedIdeContextItems,
         fallbackFileSearchRoot,
+        imageDraftTarget = { kind: 'composer' },
       },
       ref
     ) => {
@@ -864,6 +866,8 @@ const ChatInputController = React.memo(
             onClearIdeContexts={onClearIdeContexts}
             selectedIdeContextItems={selectedIdeContextItems}
             fallbackFileSearchRoot={fallbackFileSearchRoot}
+            enableImageAttachments={true}
+            imageDraftTarget={imageDraftTarget}
             className='!border-0 !focus:border-0 !outline-none !shadow-none focus:!ring-0'
           />
         </div>
@@ -1142,6 +1146,22 @@ function Chat() {
   const selectedFilesForChat = useAppSelector(selectSelectedFilesForChat)
   // const mentionableFilesForDebug = useAppSelector(selectMentionableFiles)
   const optimisticMessage = useAppSelector(state => state.chat.composition.optimisticMessage)
+  const imageDrafts = useAppSelector(state => state.chat.composition.imageDrafts)
+  const imageDraftTarget = useAppSelector(state => state.chat.composition.imageDraftTarget)
+
+  const composerImageDrafts = useMemo(
+    () => (imageDraftTarget?.kind === 'composer' ? imageDrafts : []),
+    [imageDrafts, imageDraftTarget]
+  )
+  const composerImageDraftDataUrls = useMemo(() => composerImageDrafts.map(draft => draft.dataUrl), [composerImageDrafts])
+
+  const getBranchImageDraftDataUrls = useCallback(
+    (messageId: MessageId | string): string[] => {
+      if (imageDraftTarget?.kind !== 'branch' || String(imageDraftTarget.messageId) !== String(messageId)) return []
+      return imageDrafts.map(draft => draft.dataUrl)
+    },
+    [imageDrafts, imageDraftTarget]
+  )
 
   const addCurrentIdeContextToMessage = useCallback((): boolean => {
     const selectedText = currentIdeSelection?.selectedText?.trim()
@@ -4655,7 +4675,7 @@ function Chat() {
                 model_name: selectedModel?.name || '',
                 partial: false,
                 pastedContext: [],
-                artifacts: [],
+                artifacts: composerImageDraftDataUrls,
               }
               dispatch(chatSliceActions.optimisticMessageSet(optimisticUserMessage))
 
@@ -4851,6 +4871,7 @@ function Chat() {
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
       runComposerCommand,
+      composerImageDraftDataUrls,
     ]
   )
 
@@ -4921,7 +4942,10 @@ function Chat() {
 
       // Regular message branching logic (non-Hermes mode)
       // Keep artifacts so pasted images do not flicker away during branch send.
-      const optimisticArtifacts = Array.isArray(originalMessage.artifacts) ? originalMessage.artifacts : []
+      const branchDraftArtifacts = getBranchImageDraftDataUrls(parsedId)
+      const optimisticArtifacts = Array.from(
+        new Set([...(Array.isArray(originalMessage.artifacts) ? originalMessage.artifacts : []), ...branchDraftArtifacts])
+      )
       const optimisticBranchMessage: Message = {
         id: `branch-temp-${Date.now()}`,
         conversation_id: currentConversationId,
@@ -4986,6 +5010,7 @@ function Chat() {
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
       findNearestHermesSessionFromMessage,
+      getBranchImageDraftDataUrls,
     ]
   )
 
@@ -5601,16 +5626,19 @@ function Chat() {
           })
         )
           .then(drafts => {
-            dispatch(chatSliceActions.imageDraftsAppended(drafts))
+            const branchTargetMessageId =
+              activeBranchEditingMessageId != null ? parseId(activeBranchEditingMessageId) : null
+            const target: ImageDraftTarget =
+              branchTargetMessageId != null ? { kind: 'branch', messageId: branchTargetMessageId } : { kind: 'composer' }
 
-            // During branch editing, always attach previews to the actively edited message.
-            const targetMessageId =
-              activeBranchEditingMessageId != null ? parseId(activeBranchEditingMessageId) : focusedChatMessageId
+            dispatch(chatSliceActions.imageDraftsAppended({ drafts, target }))
 
-            if (targetMessageId != null) {
+            // During branch editing, attach previews only to the explicitly edited message.
+            // Do not fall back to focusedChatMessageId; focus is navigation state, not an attachment target.
+            if (branchTargetMessageId != null) {
               dispatch(
                 chatSliceActions.messageArtifactsAppended({
-                  messageId: targetMessageId,
+                  messageId: branchTargetMessageId,
                   artifacts: drafts.map(d => d.dataUrl),
                 })
               )
@@ -5621,7 +5649,7 @@ function Chat() {
 
       e.target.value = ''
     },
-    [dispatch, focusedChatMessageId, activeBranchEditingMessageId, updateLocalInput, focusLocalInput]
+    [dispatch, activeBranchEditingMessageId, updateLocalInput, focusLocalInput]
   )
 
   // const handleMultiReplyCountChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -6542,16 +6570,22 @@ function Chat() {
                         {latestTodoList.items.map((item, idx) => (
                           <li
                             key={`todo-item-${idx}`}
-                            className={`flex items-center gap-2 text-xs ${
+                            className={`flex min-w-0 items-center gap-2 text-xs ${
                               item.done
                                 ? 'text-neutral-500 dark:text-neutral-400'
                                 : 'text-neutral-800 dark:text-neutral-200'
                             }`}
                           >
-                            <span className={item.done ? 'text-green-600 dark:text-green-400' : 'text-neutral-400'}>
+                            <span
+                              className={`shrink-0 whitespace-nowrap ${
+                                item.done ? 'text-green-600 dark:text-green-400' : 'text-neutral-400'
+                              }`}
+                            >
                               {item.done ? '[✓]' : '[ ]'}
                             </span>
-                            <span className={`min-w-0 truncate ${item.done ? 'line-through opacity-80' : ''}`}>{item.text}</span>
+                            <span className={`min-w-0 flex-1 truncate ${item.done ? 'line-through opacity-80' : ''}`}>
+                              {item.text}
+                            </span>
                           </li>
                         ))}
                       </ul>
@@ -6743,6 +6777,7 @@ function Chat() {
                 onClearIdeContexts={clearIdeContexts}
                 selectedIdeContextItems={addedIdeContextItems}
                 fallbackFileSearchRoot={ccCwd}
+                imageDraftTarget={{ kind: 'composer' }}
               />
             </div>
             {/* Selected file chips moved from InputTextArea */}

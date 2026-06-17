@@ -1,7 +1,8 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
-import { selectCcCwd, selectFocusedChatMessageId } from '../../features/chats/chatSelectors'
+import { selectCcCwd } from '../../features/chats/chatSelectors'
 import { chatSliceActions } from '../../features/chats/chatSlice'
+import type { ImageDraftTarget } from '../../features/chats/chatTypes'
 import { addSelectedFileForChat } from '../../features/ideContext'
 import { selectMentionableFiles, type MentionableFileOption } from '../../features/ideContext/ideContextSelectors'
 import { useIdeContext } from '../../hooks/useIdeContext'
@@ -31,6 +32,8 @@ interface TextAreaProps {
   showCharCount?: boolean
   fillAvailableHeight?: boolean
   fallbackFileSearchRoot?: string | null
+  enableImageAttachments?: boolean
+  imageDraftTarget?: ImageDraftTarget
 }
 
 const allowedMentionChar = /[A-Za-z0-9._\/\-]/
@@ -101,11 +104,13 @@ export const TextArea: React.FC<TextAreaProps> = ({
   showCharCount = false,
   fillAvailableHeight = false,
   fallbackFileSearchRoot = null,
+  enableImageAttachments = false,
+  imageDraftTarget = { kind: 'composer' },
   ...rest
 }) => {
   const dispatch = useDispatch()
-  const focusedMessageId = useSelector(selectFocusedChatMessageId)
   const imageDrafts = useSelector((s: RootState) => s.chat.composition.imageDrafts)
+  const currentImageDraftTarget = useSelector((s: RootState) => s.chat.composition.imageDraftTarget)
   const mentionableFiles = useSelector(selectMentionableFiles)
   const selectedFilesForChat = useSelector((s: RootState) => s.ideContext.selectedFilesForChat)
   const extensionConnected = useSelector((s: RootState) => s.ideContext.extensionConnected)
@@ -117,6 +122,13 @@ export const TextArea: React.FC<TextAreaProps> = ({
     const selectedPaths = new Set(selectedFilesForChat.map(f => f.path))
     setLocalMentionableFiles(mentionableFiles.filter(f => !selectedPaths.has(f.path)))
   }, [mentionableFiles, selectedFilesForChat])
+  const imageDraftTargetMatches =
+    currentImageDraftTarget?.kind === imageDraftTarget.kind &&
+    (imageDraftTarget.kind === 'composer' ||
+      (currentImageDraftTarget?.kind === 'branch' &&
+        String(currentImageDraftTarget.messageId) === String(imageDraftTarget.messageId)))
+  const visibleImageDrafts = enableImageAttachments && imageDraftTargetMatches ? imageDrafts : []
+
   const effectiveFallbackFileSearchRoot =
     (typeof fallbackFileSearchRoot === 'string' && fallbackFileSearchRoot.trim()) ||
     (typeof chatCwd === 'string' && chatCwd.trim()) ||
@@ -269,7 +281,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
     e.preventDefault()
     e.stopPropagation()
     setDragOver(false)
-    if (state === 'disabled') return
+    if (state === 'disabled' || !enableImageAttachments) return
 
     const files = Array.from(e.dataTransfer?.files || [])
     const images = files.filter(f => f.type.startsWith('image/'))
@@ -284,21 +296,13 @@ export const TextArea: React.FC<TextAreaProps> = ({
       }))
     )
       .then(drafts => {
-        dispatch(chatSliceActions.imageDraftsAppended(drafts))
-        if (focusedMessageId != null) {
-          dispatch(
-            chatSliceActions.messageArtifactsAppended({
-              messageId: focusedMessageId,
-              artifacts: drafts.map(d => d.dataUrl),
-            })
-          )
-        }
+        dispatch(chatSliceActions.imageDraftsAppended({ drafts, target: imageDraftTarget }))
       })
       .catch(err => console.error('Failed to read dropped images', err))
   }
 
   const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (state === 'disabled') return
+    if (state === 'disabled' || !enableImageAttachments) return
 
     const items = Array.from(e.clipboardData?.items || [])
     const imageItems = items.filter(item => item.type.startsWith('image/'))
@@ -329,15 +333,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
         }>
 
         if (drafts.length > 0) {
-          dispatch(chatSliceActions.imageDraftsAppended(drafts))
-          if (focusedMessageId != null) {
-            dispatch(
-              chatSliceActions.messageArtifactsAppended({
-                messageId: focusedMessageId,
-                artifacts: drafts.map(d => d.dataUrl),
-              })
-            )
-          }
+          dispatch(chatSliceActions.imageDraftsAppended({ drafts, target: imageDraftTarget }))
         }
       })
       .catch(err => console.error('Failed to read pasted images', err))
@@ -648,9 +644,9 @@ export const TextArea: React.FC<TextAreaProps> = ({
       </div>
 
       {/* Image draft previews */}
-      {imageDrafts && imageDrafts.length > 0 && (
+      {visibleImageDrafts.length > 0 && (
         <div className='mt-2 px-2 flex flex-wrap gap-2'>
-          {imageDrafts.map((img, idx) => (
+          {visibleImageDrafts.map((img, idx) => (
             <div
               key={idx}
               className='w-16 h-16 rounded-md overflow-hidden border border-gray-600 bg-neutral-800'

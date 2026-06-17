@@ -1,6 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query'
 import 'boxicons/css/boxicons.min.css'
-import { RotateCcw, ZoomIn, ZoomOut } from 'lucide-react'
+import { Flame, ListFilter, Maximize2, Minimize2, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react'
 import type { JSX } from 'react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
@@ -3722,6 +3722,11 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
   // Note: empty-state overlay is handled within main render to avoid unmounting the tree
 
+  const heimdallControlButtonClass =
+    'group/control relative flex h-11 w-11 items-center justify-center rounded-full border border-stone-200/80 bg-white/85 text-stone-700 shadow-[0_18px_42px_-24px_rgba(15,23,42,0.65),0_4px_14px_-10px_rgba(15,23,42,0.45)] backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-105 hover:border-stone-300 hover:bg-white hover:text-stone-950 hover:shadow-[0_22px_46px_-22px_rgba(15,23,42,0.7)] active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-50 dark:border-white/10 dark:bg-yBlack-900/85 dark:text-stone-200 dark:shadow-[0_20px_52px_-24px_rgba(0,0,0,0.9)] dark:hover:border-white/20 dark:hover:bg-neutral-900 dark:hover:text-white dark:focus-visible:ring-orange-400/70 dark:focus-visible:ring-offset-yBlack-900'
+  const heimdallControlButtonActiveClass =
+    'border-blue-300 bg-blue-50 text-blue-700 shadow-[0_18px_42px_-22px_rgba(37,99,235,0.55)] hover:border-blue-300 hover:bg-blue-100 hover:text-blue-800 dark:border-orange-400/40 dark:bg-orange-500/15 dark:text-orange-100 dark:shadow-[0_20px_52px_-24px_rgba(249,115,22,0.65)] dark:hover:border-orange-300/60 dark:hover:bg-orange-500/25 dark:hover:text-orange-50'
+
   return (
     <div
       ref={containerRef}
@@ -3799,59 +3804,69 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         </div>
       )}
       <div
-        className={`absolute bottom-12 left-4 z-10 flex gap-2 transition-opacity duration-200 ${isHovering ? 'opacity-100' : 'opacity-0'}`}
+        className={`absolute bottom-12 left-4 z-10 flex items-center gap-2 rounded-full border border-stone-200/70 bg-white/30 p-1.5 shadow-[0_24px_56px_-30px_rgba(15,23,42,0.65)] backdrop-blur-xl transition-all duration-200 dark:border-white/10 dark:bg-black/20 ${isHovering ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0'}`}
       >
         <button
+          type='button'
           onClick={zoomIn}
-          className='p-2 bg-neutral-50 text-stone-800 dark:text-stone-200 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 dark:bg-neutral-700 transition-colors active:scale-90 border-2 hover:scale-101 border-stone-300 dark:border-stone-700 shadow-[0_0px_8px_-4px_rgba(0,0,0,0.1)] dark:shadow-[0_-12px_28px_-6px_rgba(0,0,0,0.65)] dark:bg-yBlack-900 '
+          className={heimdallControlButtonClass}
           title='Zoom In'
+          aria-label='Zoom in'
         >
-          <ZoomIn size={20} />
+          <ZoomIn size={18} strokeWidth={2.25} />
         </button>
         <button
+          type='button'
           onClick={zoomOut}
-          className='p-2 bg-neutral-50 text-stone-800 dark:text-stone-200 rounded-lg   hover:bg-neutral-100 dark:hover:bg-neutral-800 dark:bg-neutral-700 transition-colors active:scale-90 border-2 hover:scale-101 border-stone-300 dark:border-stone-700 shadow-[0_0px_8px_-4px_rgba(0,0,0,0.1)] dark:shadow-[0_-12px_28px_-6px_rgba(0,0,0,0.65)] dark:bg-yBlack-900'
+          className={heimdallControlButtonClass}
           title='Zoom Out'
+          aria-label='Zoom out'
         >
-          <ZoomOut size={20} />
+          <ZoomOut size={18} strokeWidth={2.25} />
         </button>
         <button
+          type='button'
           onClick={resetView}
-          className='p-2 bg-neutral-50 text-stone-800 dark:text-stone-200 rounded-lg   hover:bg-neutral-100 dark:hover:bg-neutral-800 dark:bg-neutral-700 transition-colors active:scale-90 border-2 hover:scale-101 border-stone-300 dark:border-stone-700 shadow-[0_0px_8px_-4px_rgba(0,0,0,0.1)] dark:shadow-[0_-12px_28px_-6px_rgba(0,0,0,0.65)] dark:bg-yBlack-900'
+          className={heimdallControlButtonClass}
           title='Reset View'
+          aria-label='Reset view'
         >
-          <RotateCcw size={20} />
+          <RotateCcw size={18} strokeWidth={2.25} />
         </button>
         <button
+          type='button'
           onClick={toggleFilterEmptyMessages}
-          className={`p-2 rounded-lg transition-colors active:scale-90 border-2 hover:scale-101 border-stone-300 dark:border-stone-700 shadow-[0_0px_8px_-4px_rgba(0,0,0,0.1)] dark:shadow-[0_-12px_28px_-6px_rgba(0,0,0,0.65)] ${
-            filterEmptyMessages
-              ? 'bg-blue-100 text-blue-700 dark:bg-neutral-500/60 dark:text-blue-100'
-              : 'bg-neutral-50 text-stone-800 dark:text-stone-200 dark:bg-yBlack-900 hover:bg-neutral-100 dark:hover:bg-neutral-800'
-          }`}
+          className={`${heimdallControlButtonClass} ${filterEmptyMessages ? heimdallControlButtonActiveClass : ''}`}
           title={filterEmptyMessages ? 'Show Empty Messages' : 'Hide Empty Messages'}
+          aria-label={filterEmptyMessages ? 'Show empty messages' : 'Hide empty messages'}
+          aria-pressed={filterEmptyMessages}
         >
-          <i className='bx bx-filter text-xl' />
+          <ListFilter size={18} strokeWidth={2.25} />
         </button>
         <button
+          type='button'
           onClick={toggleHeatmapMode}
-          className={`p-2 rounded-lg transition-colors active:scale-90 border-2 hover:scale-101 border-stone-300 dark:border-stone-700 shadow-[0_0px_8px_-4px_rgba(0,0,0,0.1)] dark:shadow-[0_-12px_28px_-6px_rgba(0,0,0,0.65)] ${
+          className={`${heimdallControlButtonClass} ${
             heatmapMode
-              ? 'bg-gradient-to-r from-blue-500 via-green-500 to-red-500 text-white'
-              : 'bg-neutral-50 text-stone-800 dark:text-stone-200 dark:bg-yBlack-900 hover:bg-neutral-100 dark:hover:bg-neutral-800'
+              ? 'border-transparent bg-gradient-to-br from-sky-500 via-emerald-500 to-orange-500 text-white shadow-[0_18px_44px_-20px_rgba(249,115,22,0.75)] hover:border-transparent hover:text-white dark:border-transparent dark:bg-gradient-to-br dark:from-sky-500 dark:via-emerald-500 dark:to-orange-500 dark:text-white'
+              : ''
           }`}
           title={heatmapMode ? 'Disable Heatmap Mode' : 'Enable Heatmap Mode'}
+          aria-label={heatmapMode ? 'Disable heatmap mode' : 'Enable heatmap mode'}
+          aria-pressed={heatmapMode}
         >
-          <i className='bx bxs-hot text-xl' />
+          <Flame size={18} strokeWidth={2.25} fill={heatmapMode ? 'currentColor' : 'none'} />
         </button>
         <button
+          type='button'
           onClick={() => {
             dispatch(chatSliceActions.heimdallCompactModeToggled())
           }}
-          className='p-2 bg-neutral-50  text-stone-800 dark:text-stone-200 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 dark:bg-neutral-700 transition-colors active:scale-90 border-2 hover:scale-101 border-stone-300 dark:border-stone-700 shadow-[0_0px_8px_-4px_rgba(0,0,0,0.1)] dark:shadow-[0_-12px_28px_-6px_rgba(0,0,0,0.65)] dark:bg-yBlack-900'
-          title='Toggle Compact Mode'
+          className={heimdallControlButtonClass}
+          title={compactMode ? 'Switch to Full Mode' : 'Switch to Compact Mode'}
+          aria-label={compactMode ? 'Switch to full mode' : 'Switch to compact mode'}
         >
-          {compactMode ? 'Compact' : 'Full'}
+          {compactMode ? <Maximize2 size={18} strokeWidth={2.25} /> : <Minimize2 size={18} strokeWidth={2.25} />}
         </button>
       </div>
       <div className='absolute top-4 right-8 ml-100 z-10 flex flex-col gap-2 items-end'>

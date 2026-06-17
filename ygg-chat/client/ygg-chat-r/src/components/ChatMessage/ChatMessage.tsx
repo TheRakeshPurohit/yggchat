@@ -632,8 +632,8 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         onBranch(id, editContent.trim(), newContentBlocks)
       }
       dispatch(chatSliceActions.editingBranchSet(false))
-      // Clear any image drafts after branching is initiated
-      dispatch(chatSliceActions.imageDraftsCleared())
+      // Clear only drafts owned by this branch edit after branching is initiated.
+      dispatch(chatSliceActions.imageDraftsCleared({ target: { kind: 'branch', messageId: id } }))
       setEditingState(false)
       onEditingStateChange?.(id, false, 'branch')
     }
@@ -642,7 +642,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       setEditContent(content)
       dispatch(chatSliceActions.editingBranchSet(false))
       if (editMode === 'branch') {
-        dispatch(chatSliceActions.imageDraftsCleared())
+        dispatch(chatSliceActions.imageDraftsCleared({ target: { kind: 'branch', messageId: id } }))
         // Restore any artifacts deleted during branch editing
         dispatch(chatSliceActions.messageArtifactsRestoreFromBackup({ messageId: id }))
       }
@@ -2713,6 +2713,8 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
               autoFocus
               label='Create New Branch'
               width='w-full'
+              enableImageAttachments={editMode === 'branch'}
+              imageDraftTarget={{ kind: 'branch', messageId: id }}
               onContextMenu={(e: React.MouseEvent<HTMLTextAreaElement>) => {
                 // Always show default browser menu in TextArea, never the custom menu
                 e.stopPropagation()

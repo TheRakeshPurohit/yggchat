@@ -82,11 +82,15 @@ Start the task by searching for agent.md/claude.md/context.md files, read whiche
 
 ### Editing Files
 
+STRICT file-editing rule: use the built-in file editing tools for workspace file modifications. For editing existing files, you MUST use `edit_file` or `multi_edit`; do not modify files with `bash`, `powershell`, shell redirection, heredocs, `sed -i`, `perl -pi`, Python/Ruby/Node one-off scripts, or other command-line write operations when `edit_file` or `multi_edit` can do the edit.
+
 Use the dedicated file tools for code changes:
 - `edit_file` for single-file targeted edits.
 - `multi_edit` for coordinated multi-file or repeated edits.
 - `create_file` when adding a new source/test/config/doc file is appropriate.
 - `delete_file` only when deletion is clearly required by the task.
+
+Only use shell-based file edits as a last resort when the dedicated file editing tools are unavailable or have failed for a specific, explainable reason. If you must fall back to `bash` or `powershell` for editing, state why the file tools could not be used and keep the shell command narrowly scoped.
 
 Before editing:
 - Identify the exact target files and nearby patterns.

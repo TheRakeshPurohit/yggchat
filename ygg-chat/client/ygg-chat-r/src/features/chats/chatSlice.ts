@@ -8,6 +8,7 @@ import {
   Attachment,
   ChatState,
   ImageDraft,
+  ImageDraftTarget,
   Message,
   MessageInput,
   OperationMode,
@@ -35,6 +36,43 @@ const cloneTools = (tools: ToolDefinition[]): ToolDefinition[] =>
 
 const isElectronEnvironment =
   (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__) || import.meta.env.VITE_ENVIRONMENT === 'electron'
+
+type ImageDraftsAppendedPayload = ImageDraft[] | { drafts: ImageDraft[]; target?: ImageDraftTarget | null }
+type ImageDraftRemovedPayload = number | { index: number; target?: ImageDraftTarget | null }
+
+const DEFAULT_IMAGE_DRAFT_TARGET: ImageDraftTarget = { kind: 'composer' }
+
+const imageDraftTargetsEqual = (
+  a: ImageDraftTarget | null | undefined,
+  b: ImageDraftTarget | null | undefined
+): boolean => {
+  if (!a || !b) return !a && !b
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'composer') return true
+  return String(a.messageId) === String((b as { kind: 'branch'; messageId: MessageId }).messageId)
+}
+
+const normalizeImageDraftAppendPayload = (
+  payload: ImageDraftsAppendedPayload,
+  fallbackTarget: ImageDraftTarget | null
+): { drafts: ImageDraft[]; target: ImageDraftTarget | null } => {
+  if (Array.isArray(payload)) {
+    return { drafts: payload, target: fallbackTarget ?? DEFAULT_IMAGE_DRAFT_TARGET }
+  }
+  return { drafts: payload.drafts, target: payload.target ?? DEFAULT_IMAGE_DRAFT_TARGET }
+}
+
+const mergeArtifacts = (existing: string[] | undefined, incoming: string[]): string[] => {
+  const merged = Array.isArray(existing) ? [...existing] : []
+  const seen = new Set(merged)
+  for (const artifact of incoming) {
+    if (!seen.has(artifact)) {
+      merged.push(artifact)
+      seen.add(artifact)
+    }
+  }
+  return merged
+}
 
 const webHiddenProviders = new Set(['OpenAI (ChatGPT)', 'LM Studio', 'Z.AI / GLM', 'Amazon Bedrock'])
 const communityAllowedProviders = new Set(['LM Studio', 'OpenAI (ChatGPT)', 'OpenRouter', 'Z.AI / GLM'])
@@ -135,6 +173,7 @@ const makeInitialState = (): ChatState => {
       draftMessage: null,
       multiReplyCount: 1,
       imageDrafts: [],
+      imageDraftTarget: null,
       editingBranch: false,
       optimisticMessage: null,
       optimisticBranchMessage: null,
@@ -229,25 +268,50 @@ export const chatSlice = createSlice({
     inputCleared: state => {
       state.composition.input = initialState.composition.input
       state.composition.validationError = null
-      state.composition.imageDrafts = []
+      if (!state.composition.imageDraftTarget || state.composition.imageDraftTarget.kind === 'composer') {
+        state.composition.imageDrafts = []
+        state.composition.imageDraftTarget = null
+      }
     },
 
-    imageDraftsAppended: (state, action: PayloadAction<ImageDraft[]>) => {
+    imageDraftTargetSet: (state, action: PayloadAction<ImageDraftTarget | null>) => {
+      if (!imageDraftTargetsEqual(state.composition.imageDraftTarget, action.payload)) {
+        state.composition.imageDrafts = []
+      }
+      state.composition.imageDraftTarget = action.payload
+    },
+
+    imageDraftsAppended: (state, action: PayloadAction<ImageDraftsAppendedPayload>) => {
+      const { drafts, target } = normalizeImageDraftAppendPayload(action.payload, state.composition.imageDraftTarget)
+      if (!imageDraftTargetsEqual(state.composition.imageDraftTarget, target)) {
+        state.composition.imageDrafts = []
+        state.composition.imageDraftTarget = target
+      }
+
       const existing = new Set(state.composition.imageDrafts.map(d => d.dataUrl))
-      for (const draft of action.payload) {
+      for (const draft of drafts) {
         if (!existing.has(draft.dataUrl)) {
           state.composition.imageDrafts.push(draft)
           existing.add(draft.dataUrl)
         }
       }
     },
-    imageDraftsCleared: state => {
+    imageDraftsCleared: (state, action: PayloadAction<{ target?: ImageDraftTarget | null } | undefined>) => {
+      const target = action.payload?.target
+      if (target && !imageDraftTargetsEqual(state.composition.imageDraftTarget, target)) return
       state.composition.imageDrafts = []
+      state.composition.imageDraftTarget = null
     },
-    imageDraftRemoved: (state, action: PayloadAction<number>) => {
-      const index = action.payload
+    imageDraftRemoved: (state, action: PayloadAction<ImageDraftRemovedPayload>) => {
+      const payload = action.payload
+      const index = typeof payload === 'number' ? payload : payload.index
+      const target = typeof payload === 'number' ? undefined : payload.target
+      if (target && !imageDraftTargetsEqual(state.composition.imageDraftTarget, target)) return
       if (index >= 0 && index < state.composition.imageDrafts.length) {
         state.composition.imageDrafts.splice(index, 1)
+      }
+      if (state.composition.imageDrafts.length === 0) {
+        state.composition.imageDraftTarget = null
       }
     },
 
@@ -297,8 +361,16 @@ export const chatSlice = createSlice({
         state.composition.input.content = ''
       }
 
-      if (streamType === 'primary' || streamType === 'branch') {
-        state.composition.imageDrafts = []
+      if (streamType === 'primary') {
+        if (!state.composition.imageDraftTarget || state.composition.imageDraftTarget.kind === 'composer') {
+          state.composition.imageDrafts = []
+          state.composition.imageDraftTarget = null
+        }
+      } else if (streamType === 'branch') {
+        if (!state.composition.imageDraftTarget || state.composition.imageDraftTarget.kind === 'branch') {
+          state.composition.imageDrafts = []
+          state.composition.imageDraftTarget = null
+        }
       }
     },
 
@@ -321,6 +393,7 @@ export const chatSlice = createSlice({
         if (stream.streamType === 'primary') {
           state.composition.sending = false
           state.composition.imageDrafts = []
+          state.composition.imageDraftTarget = null
         }
 
         // Clear primary if this was the primary stream
@@ -331,6 +404,7 @@ export const chatSlice = createSlice({
         // Fallback for backward compatibility when no stream exists
         state.composition.sending = false
         state.composition.imageDrafts = []
+        state.composition.imageDraftTarget = null
       }
     },
 
@@ -941,7 +1015,7 @@ export const chatSlice = createSlice({
       const { messageId, artifacts } = action.payload
       const msg = state.conversation.messages.find(m => m.id === messageId)
       if (msg) {
-        msg.artifacts = artifacts
+        msg.artifacts = mergeArtifacts(msg.artifacts, artifacts)
       }
     },
     // Append artifacts to a message (e.g., when user adds image drafts)
@@ -949,12 +1023,7 @@ export const chatSlice = createSlice({
       const { messageId, artifacts } = action.payload
       const msg = state.conversation.messages.find(m => m.id === messageId)
       if (msg) {
-        const existing = Array.isArray(msg.artifacts) ? [...msg.artifacts] : []
-        const existingSet = new Set(existing)
-        const newArtifacts = artifacts.filter(artifact => !existingSet.has(artifact))
-        if (newArtifacts.length > 0) {
-          msg.artifacts = [...existing, ...newArtifacts]
-        }
+        msg.artifacts = mergeArtifacts(msg.artifacts, artifacts)
       }
     },
 

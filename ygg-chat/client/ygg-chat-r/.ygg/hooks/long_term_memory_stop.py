@@ -74,24 +74,29 @@ The caller will provide:
 - existing memory for this project
 - latest user and assistant messages
 
-Be conservative. Most turns should produce no project memory update.
+Be extremely conservative. Most turns should produce no project memory update.
 
-Add project memory only for stable or recurring project-specific facts such as:
-- Project architecture, modules, important files, local paths, conventions, and tooling.
-- Project-specific goals, roadmap items, bugs, blockers, design decisions, or constraints.
-- Implementation details that are likely to matter in future work on this same project.
-- User preferences that apply specifically to this project.
-- Decisions made during the conversation that should guide future work in this project.
+Project memory is only for high-value lessons that are hard to rediscover and likely to prevent future mistakes in this same project.
+
+Add project memory only for durable project-specific facts such as:
+- Very important architectural decisions, invariants, subsystem boundaries, or data-flow constraints that future work must preserve.
+- Non-obvious local tooling or shell idiosyncrasies, especially bash/WSL/Windows/path quirks or command forms that repeatedly matter in this repository.
+- Build, test, packaging, or runtime fixes that the user or assistant struggled to discover and that are likely to recur.
+- Explicit user instructions that define long-term project policy or workflow for this repository.
 
 Do NOT add:
 - General personal facts or global preferences that belong in long-term memory.
 - Upcoming events or time-bounded reminders that belong in recent memory.
+- Feature additions, routine implementation details, code changes, refactors, or completed tasks.
+- File/module changes unless they encode a lasting architectural invariant or hard-won operational lesson.
+- Project-specific goals, roadmap items, ordinary bugs, blockers, or constraints unless they are long-lived architectural constraints.
+- Decisions that only affect the current feature or short-lived implementation plan.
 - One-off commands, transient logs, or temporary scratch work.
 - Generic facts that can be inferred from the repository every time.
 - Secrets, API keys, tokens, passwords, private keys, or sensitive credential values.
 - Speculative facts.
 - Duplicate facts already present in project memory.
-- Assistant claims unless the user confirmed them or they are direct outcomes of the conversation.
+- Assistant claims unless the user confirmed them or they are direct outcomes of a validated fix or decision in the conversation.
 
 If there is no clear project memory to write, output exactly this single line and nothing else:
 no relevant context
@@ -625,7 +630,10 @@ def _run_project_memory_update(local_api_base, project_memory_path, project_id, 
         f'{latest_user_text or "<empty>"}\n\n'
         'Latest assistant message, if this is a Stop event:\n'
         f'{latest_assistant_text or "<empty>"}\n\n'
-        'Judge only. If there is no useful project-specific memory to write, return exactly: no relevant context'
+        'Project-memory boundary reminder: write only very important architectural decisions, hard-won build/test/runtime fixes, '\
+        'non-obvious bash/WSL/path/command idiosyncrasies, or explicit long-term project policy. Do not store feature additions, '\
+        'routine implementation details, ordinary code changes, or short-lived plans. Judge only. If there is no useful project-specific memory to write, '\
+        'return exactly: no relevant context'
     )
 
     generation, model_json = _generate_memory_json(local_api_base, PROJECT_MEMORY_SYSTEM_PROMPT, model_input)
