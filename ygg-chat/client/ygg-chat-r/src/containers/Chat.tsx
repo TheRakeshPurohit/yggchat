@@ -6295,12 +6295,17 @@ function Chat() {
                                 <button
                                   onClick={() => toggleProcessMessageRun(runId)}
                                   className='flex items-center gap-2 group/run hover:opacity-80 transition-opacity cursor-pointer outline-none'
+                                  style={
+                                    fontSizeOffset !== 0
+                                      ? { fontSize: `calc(1em + ${fontSizeOffset}px)` }
+                                      : undefined
+                                  }
                                 >
-                                  <span className='text-[10px] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
+                                  <span className='text-[0.625em] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
                                     Agent Steps ({row.messages.length})
                                   </span>
                                   {!isExpanded && summaryParts.length > 0 && (
-                                    <span className='text-xs text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[320px]'>
+                                    <span className='text-[0.75em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[320px]'>
                                       {summaryParts.join(' • ')}
                                     </span>
                                   )}

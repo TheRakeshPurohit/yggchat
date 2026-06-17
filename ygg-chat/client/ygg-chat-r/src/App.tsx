@@ -6,6 +6,7 @@ import './App.css'
 import { HtmlIframeRegistryProvider, useHtmlIframeRegistry } from './components/HtmlIframeRegistry/HtmlIframeRegistry'
 import { GlobalNotifications } from './components/GlobalNotifications/GlobalNotifications'
 import { HtmlToolsModal } from './components/HtmlToolsModal/HtmlToolsModal'
+import { RunningAgentsFloatingButton } from './components/RunningAgentsFloatingButton'
 import { LiquidGlassSVG } from './components/LiquidGlassSVG'
 import ProtectedRoute from './components/ProtectedRoute'
 import { TitleBar } from './components/TitleBar/TitleBar'
@@ -89,6 +90,7 @@ const HtmlToolsShell = ({ enabled }: { enabled: boolean }) => {
   const registry = useHtmlIframeRegistry()
   const currentUser = useAppSelector(selectCurrentUser)
   const isMobile = useIsMobile()
+  const { data: notes = [] } = useResearchNotes()
   const isHiddenRoute = TOOL_VIEWER_HIDDEN_ROUTES.has(location.pathname)
   const canShow = Boolean(enabled && registry && currentUser && !isHiddenRoute)
   const bootstrappedUserIdRef = useRef<string | null>(null)
@@ -116,27 +118,24 @@ const HtmlToolsShell = ({ enabled }: { enabled: boolean }) => {
 
   const isHomepageFullscreen = registry.isHomepageFullscreen
 
+  const toggleAppsModal = () => {
+    if (registry.isModalOpen) {
+      registry.closeModal()
+      return
+    }
+    registry.openModal()
+  }
+
   return (
     <>
       <HtmlToolsModal />
       {!isHomepageFullscreen && (
-        <button
-          type='button'
-          onClick={() => {
-            if (registry.isModalOpen) {
-              registry.closeModal()
-              return
-            }
-            registry.openModal()
-          }}
-          className={`fixed ${isMobile ? 'bottom-32 right-5' : 'bottom-6 right-6'} z-[1500] rounded-full border border-neutral-200/80 dark:border-neutral-700/70 bg-white/90 dark:bg-yBlack-900/90 px-4 py-3 text-sm font-semibold text-neutral-800 dark:text-neutral-100 shadow-lg transition hover:scale-[1.02] hover:shadow-xl`}
-          aria-label={registry.isModalOpen ? 'Close HTML tools' : 'Open HTML tools'}
-        >
-          <span className='flex items-center gap-2'>
-            {/* <i className='bx bx-window-open text-lg' aria-hidden='true'></i> */}
-            {registry.isModalOpen ? 'Close' : 'Apps'}
-          </span>
-        </button>
+        <RunningAgentsFloatingButton
+          notes={notes}
+          onOpenApps={toggleAppsModal}
+          appsOpen={registry.isModalOpen}
+          className={isMobile ? 'bottom-32 right-5' : 'bottom-6 right-6'}
+        />
       )}
     </>
   )

@@ -71,7 +71,7 @@ export const PlanMdToolView: React.FC<PlanMdToolViewProps> = ({ args, result, cl
 
       <div className='max-h-[52vh] overflow-auto border-t border-neutral-200/60 px-3 py-2 dark:border-neutral-800/80 thin-scrollbar'>
         <div
-          className={`${SHARED_TEXT_MARKDOWN_CLASS} !pb-0 text-[13px] sm:text-[13px] xl:text-[13px] 2xl:text-[13px] 3xl:text-[13px]`}
+          className={`${SHARED_TEXT_MARKDOWN_CLASS} !pb-0 !text-[0.8125em] sm:!text-[0.8125em] xl:!text-[0.8125em] 2xl:!text-[0.8125em] 3xl:!text-[0.8125em]`}
         >
           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
             {content}

@@ -8,7 +8,7 @@ export const PROCESS_CARD_WRAPPER_CLASS = 'relative pb-2 ml-1 message-remount-fa
 export const PROCESS_CARD_REASONING_WRAPPER_CLASS = 'relative pb-2 ml-2 mb-2 message-remount-fade '
 export const TOOL_HEADER_BUTTON_CLASS =
   'flex items-center gap-1.5 group/tool hover:opacity-80 transition-opacity cursor-pointer outline-none'
-export const TOOL_NAME_BASE_CLASS = 'text-xs py-0.5 rounded-md text-neutral-500 dark:text-neutral-400 transition-colors'
+export const TOOL_NAME_BASE_CLASS = 'text-[0.75em] py-0.5 rounded-md text-neutral-500 dark:text-neutral-400 transition-colors'
 export const TOOL_NAME_RUNNING_CLASS = `${TOOL_NAME_BASE_CLASS} tool-name-shimmer`
 export const TOOL_NAME_SUCCESS_CLASS = TOOL_NAME_BASE_CLASS
 export const TOOL_NAME_ERROR_CLASS = `${TOOL_NAME_BASE_CLASS} text-red-500/80 dark:text-red-400/80`
@@ -23,7 +23,7 @@ const CHAT_MARKDOWN_PROSE_TIGHT_CLASS =
 
 export const SHARED_TEXT_MARKDOWN_CLASS = `prose max-w-none dark:prose-invert w-full text-[16px] sm:text-[14px] xl:text-[14px] 2xl:text-[14px] 3xl:text-[14px] pb-3 ${CHAT_MARKDOWN_PROSE_TIGHT_CLASS}`
 export const LEGACY_TEXT_MARKDOWN_CLASS = `prose px-4 pt-2 sm:px-1 max-w-none dark:prose-invert w-full text-[16px] md:text-[14px] lg:text-[14px] xl:text-[16px] 2xl:text-[20px] 3xl:text-[20px] 4xl:text-[20px] ${CHAT_MARKDOWN_PROSE_TIGHT_CLASS}`
-export const REASONING_TEXT_MARKDOWN_CLASS = `text-sm text-neutral-600 dark:text-neutral-400 prose max-w-none dark:prose-invert ${CHAT_MARKDOWN_PROSE_TIGHT_CLASS}`
+export const REASONING_TEXT_MARKDOWN_CLASS = `text-[0.875em] text-neutral-600 dark:text-neutral-400 prose max-w-none dark:prose-invert ${CHAT_MARKDOWN_PROSE_TIGHT_CLASS}`
 export const MESSAGE_IMAGE_WRAPPER_CLASS = 'my-3 mx-1'
 export const MESSAGE_IMAGE_CLASS = 'max-w-full max-h-96 object-contain rounded-lg shadow-md'
 

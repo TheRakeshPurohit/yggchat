@@ -146,7 +146,7 @@ const EditToolDiffViewComponent: React.FC<EditToolDiffViewProps> = ({ toolName, 
   return (
     <div className={`space-y-2 ${className}`}>
       <div
-        className={`flex flex-wrap items-center gap-1.5 rounded-[4px] px-2 py-1 text-[10px] cursor-pointer select-none ${summaryTone}`}
+        className={`flex flex-wrap items-center gap-1.5 rounded-[4px] px-2 py-1 text-[0.625em] cursor-pointer select-none ${summaryTone}`}
         onClick={() => setExpanded(prev => !prev)}
       >
         <span>
@@ -164,7 +164,7 @@ const EditToolDiffViewComponent: React.FC<EditToolDiffViewProps> = ({ toolName, 
         <div className='origin-top edit-diff-slide-down'>
           {viewModel.items.map(item => (
             <div key={item.key} className='p-1'>
-              <div className='px-1.5 pb-1 text-[10px] font-mono text-neutral-500 dark:text-neutral-400'>
+              <div className='px-1.5 pb-1 text-[0.625em] font-mono text-neutral-500 dark:text-neutral-400'>
                 edit {item.index + 1}
               </div>
               <EditFileDiffView args={item.args} result={item.result} />
@@ -172,7 +172,7 @@ const EditToolDiffViewComponent: React.FC<EditToolDiffViewProps> = ({ toolName, 
           ))}
 
           {showSummaryMessage ? (
-            <div className={`rounded-[10px] border px-2 py-1 text-[10px] font-mono ${summaryTone}`}>
+            <div className={`rounded-[10px] border px-2 py-1 text-[0.625em] font-mono ${summaryTone}`}>
               {viewModel.message}
             </div>
           ) : null}

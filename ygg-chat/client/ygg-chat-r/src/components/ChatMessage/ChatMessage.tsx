@@ -54,6 +54,7 @@ import {
   PROCESS_CARD_REASONING_WRAPPER_CLASS,
   PROCESS_CARD_WRAPPER_CLASS,
   PROCESS_RUN_GROUP_MIN_ITEMS,
+
   REASONING_CHEVRON_BASE_CLASS,
   REASONING_TEXT_MARKDOWN_CLASS,
   SHARED_TEXT_MARKDOWN_CLASS,
@@ -187,7 +188,7 @@ const MessageActions: React.FC<MessageActionsProps> = ({
       {/* Model ID Badge */}
       {modelName && !isEditing && !isSelectionVariant && (
         <div
-          className={`font-mono text-[10px] text-neutral-500 dark:text-neutral-400 tracking-wider uppercase ${
+          className={`font-mono text-[0.625em] text-neutral-500 dark:text-neutral-400 tracking-wider uppercase ${
             isMenuLayout ? 'px-3 py-2' : 'px-3'
           } ${
             isMenuLayout
@@ -1645,7 +1646,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       if (isHtmlRenderer && typeof extractedHtml === 'string') {
         const htmlPreviewKey = `${id}-html-renderer-${group.id}`
         return (
-          <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
+          <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS} style={messageContentStyle}>
             {/* Tool header */}
             <div className='flex items-center gap-2 mb-2'>
               <span className={group.results.length > 0 ? TOOL_NAME_SUCCESS_CLASS : TOOL_NAME_RUNNING_CLASS}>
@@ -1715,7 +1716,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         const linkFailed = parsedPayload?.success === false || !route
 
         return (
-          <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
+          <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS} style={messageContentStyle}>
             <div className='flex items-center gap-2 mb-2 flex-wrap'>
               <span className={linkFailed ? TOOL_NAME_ERROR_CLASS : TOOL_NAME_SUCCESS_CLASS}>
                 {group.name || 'internalLink'}
@@ -1731,7 +1732,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 <span className='ml-1'>{buttonLabel}</span>
               </Button>
             </div>
-            <div className='border-l-2 border-neutral-300/50 dark:border-neutral-700/50 pl-4 py-1 font-mono text-[11px] text-neutral-500 dark:text-neutral-500 leading-relaxed'>
+            <div className='border-l-2 border-neutral-300/50 dark:border-neutral-700/50 pl-4 py-1 font-mono text-[0.6875em] text-neutral-500 dark:text-neutral-500 leading-relaxed'>
               {projectIdLabel && (
                 <div>
                   <span className='text-neutral-400 dark:text-neutral-600'>projectId:</span>{' '}
@@ -1762,7 +1763,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 </div>
               )}
               {warnings.length > 0 && (
-                <div className='mt-1 text-[10px] text-amber-600 dark:text-amber-400'>{warnings.join(' • ')}</div>
+                <div className='mt-1 text-[0.625em] text-amber-600 dark:text-amber-400'>{warnings.join(' • ')}</div>
               )}
             </div>
           </div>
@@ -1793,7 +1794,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
             reloadToken: mcpReloadTokens[reloadKey] || 0,
           }
           return (
-            <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
+            <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS} style={messageContentStyle}>
               <div className='flex items-center gap-2 mb-2 flex-wrap'>
                 <span
                   className={
@@ -1806,7 +1807,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 >
                   {group.name || 'mcp_app'}
                 </span>
-                <span className='text-[10px] uppercase tracking-[0.15em] text-emerald-600 dark:text-emerald-400'>
+                <span className='text-[0.625em] uppercase tracking-[0.15em] text-emerald-600 dark:text-emerald-400'>
                   MCP App
                 </span>
                 <div className='ml-auto flex items-center gap-2'>
@@ -1815,7 +1816,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                     type='button'
                     onClick={() => handleLoadMcpApp(serverName, reloadKey)}
                     disabled={mcpLoadState[reloadKey]}
-                    className='flex items-center gap-1 rounded border border-neutral-200 dark:border-neutral-700 px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60'
+                    className='flex items-center gap-1 rounded border border-neutral-200 dark:border-neutral-700 px-2 py-1 text-[0.625em] uppercase tracking-[0.12em] text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60'
                   >
                     <i
                       className={`bx ${mcpLoadState[reloadKey] ? 'bx-loader-circle animate-spin' : 'bx-play-circle'}`}
@@ -1868,7 +1869,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       if (isPlanMdDisplayTool && group.args) {
         const planResult = group.results.length > 0 ? group.results[0].content : {}
         return (
-          <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
+          <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS} style={messageContentStyle}>
             <PlanMdToolView args={group.args} result={planResult} />
           </div>
         )
@@ -1878,7 +1879,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         const editResult = group.results.length > 0 ? group.results[0].content : {}
         const isEditToolSuccess = formatToolResultSummary(editResult) === 'success'
         return (
-          <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
+          <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS} style={messageContentStyle}>
             {/* Tool header + edit summary */}
             <div className='flex min-w-0 items-start gap-2'>
               <span
@@ -1904,14 +1905,14 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       }
 
       return (
-        <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS}>
+        <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS} style={messageContentStyle}>
           {/* Tool header row */}
           <div className='flex items-center gap-2 flex-wrap'>
             <button onClick={() => handleExpandToggle(toggleKey, group)} className={TOOL_HEADER_BUTTON_CLASS}>
               <span className={toolNameClass}>{group.name || 'tool'}</span>
               {!isExpanded && pathContent && (
                 <span
-                  className='text-xs text-neutral-500 dark:text-neutral-500 max-w-[200px] overflow-hidden whitespace-nowrap'
+                  className='text-[0.75em] text-neutral-500 dark:text-neutral-500 max-w-[200px] overflow-hidden whitespace-nowrap'
                   style={{ direction: 'rtl', textOverflow: 'ellipsis' }}
                 >
                   {pathContent}
@@ -1931,7 +1932,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 type='button'
                 onClick={() => handleLoadMcpApp(mcpServerName, `${id}-${group.id}-mcp`)}
                 disabled={mcpLoadState[`${id}-${group.id}-mcp`]}
-                className='ml-auto flex items-center gap-1 rounded border border-neutral-200 dark:border-neutral-700 px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60'
+                className='ml-auto flex items-center gap-1 rounded border border-neutral-200 dark:border-neutral-700 px-2 py-1 text-[0.625em] uppercase tracking-[0.12em] text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60'
               >
                 <i
                   className={`bx ${
@@ -1953,7 +1954,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
             <div className='tool-expand-content'>
               {/* Tool inputs */}
               {!hasHtmlOutput && group.args && Object.keys(group.args).length > 0 && (
-                <div className='border-l-2 border-neutral-300/50 dark:border-neutral-700/50 pl-4 py-1 mb-2 font-mono text-[11px] text-neutral-500 dark:text-neutral-500 leading-relaxed'>
+                <div className='border-l-2 border-neutral-300/50 dark:border-neutral-700/50 pl-4 py-1 mb-2 font-mono text-[0.6875em] text-neutral-500 dark:text-neutral-500 leading-relaxed'>
                   {Object.entries(group.args).map(([argKey, value]) => (
                     <div key={argKey} className='break-all'>
                       <span className='text-neutral-400 dark:text-neutral-600'>{argKey}:</span>{' '}
@@ -1986,7 +1987,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                     return (
                       <div
                         key={resultKey}
-                        className={`border-l-2 pl-4 py-1 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words ${
+                        className={`border-l-2 pl-4 py-1 font-mono text-[0.6875em] leading-relaxed whitespace-pre-wrap break-words ${
                           result.is_error
                             ? 'border-red-400/50 dark:border-red-600/50 text-red-600 dark:text-red-400'
                             : 'border-neutral-300/50 dark:border-neutral-700/50 text-neutral-500 dark:text-neutral-500'
@@ -1994,7 +1995,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                       >
                         {renderedContent}
                         {!result.is_error && (
-                          <span className='text-neutral-400 dark:text-neutral-600 italic mt-1 block text-[10px] tracking-tight'>
+                          <span className='text-neutral-400 dark:text-neutral-600 italic mt-1 block text-[0.625em] tracking-tight'>
                             completed
                           </span>
                         )}
@@ -2009,8 +2010,9 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       )
     }
 
-    // Style object for text content areas that should scale with fontSizeOffset
-    const textContentStyle: React.CSSProperties | undefined =
+    // Style object for message content areas that should scale with fontSizeOffset.
+    // Tool/reasoning labels use em-based text sizes so they inherit this offset too.
+    const messageContentStyle: React.CSSProperties | undefined =
       fontSizeOffset !== 0 ? { fontSize: `calc(1em + ${fontSizeOffset}px)` } : undefined
     const hasSelection = selectedText.length > 0
 
@@ -2050,14 +2052,14 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         kind: 'process',
         processType: 'reasoning',
         node: (
-          <div key={key} className={PROCESS_CARD_WRAPPER_CLASS}>
+          <div key={key} className={PROCESS_CARD_WRAPPER_CLASS} style={messageContentStyle}>
             <button
               onClick={() => toggleBlock('reasoning', reasoningId)}
               className='flex items-center gap-2 group/reason hover:opacity-80 transition-opacity cursor-pointer outline-none'
             >
-              <span className='text-xs leading-none text-neutral-800 dark:text-neutral-500'>Reasoning</span>
+              <span className='text-[0.75em] leading-none text-neutral-800 dark:text-neutral-500'>Reasoning</span>
               {!isExpanded && reasoningSummary && (
-                <span className='text-xs text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
+                <span className='text-[0.75em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
                   {reasoningSummary}
                 </span>
               )}
@@ -2081,7 +2083,6 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                   key: `${key}-reasoning-content`,
                   markdown: reasoningText,
                   className: REASONING_TEXT_MARKDOWN_CLASS,
-                  style: textContentStyle,
                 })}
               </div>
             </div>
@@ -2147,16 +2148,16 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
           if (reasoningCount > 0) summaryParts.push(`${reasoningCount} reasoning`)
 
           rendered.push(
-            <div key={groupKey} className={PROCESS_CARD_WRAPPER_CLASS}>
+            <div key={groupKey} className={PROCESS_CARD_WRAPPER_CLASS} style={messageContentStyle}>
               <button
                 onClick={() => toggleBlock('groupRuns', groupKey)}
                 className='flex items-center gap-2 group/run hover:opacity-80 transition-opacity cursor-pointer outline-none'
               >
-                <span className='text-[10px] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
+                <span className='text-[0.625em] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
                   Agent Steps ({processItems.length})
                 </span>
                 {!isExpanded && summaryParts.length > 0 && (
-                  <span className='text-xs text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
+                  <span className='text-[0.75em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
                     {summaryParts.join(' â€¢ ')}
                   </span>
                 )}
@@ -2251,7 +2252,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 key: textKey,
                 markdown: accumulatedText,
                 className: SHARED_TEXT_MARKDOWN_CLASS,
-                style: textContentStyle,
+                style: messageContentStyle,
               }),
             })
           }
@@ -2371,7 +2372,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 key: textKey,
                 markdown: text,
                 className: SHARED_TEXT_MARKDOWN_CLASS,
-                style: textContentStyle,
+                style: messageContentStyle,
               }),
             })
             localIndex += 1
@@ -2481,7 +2482,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
               key: textKey,
               markdown: rawText,
               className: SHARED_TEXT_MARKDOWN_CLASS,
-              style: textContentStyle,
+              style: messageContentStyle,
             }),
           })
           idx += 1
@@ -2597,7 +2598,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         {role === 'user' && userTurnElapsedLabel && (
           <div className='mb-4 flex w-full items-center gap-3 pt-1' aria-label={userTurnElapsedLabel}>
             <div className='h-px flex-1 bg-gradient-to-r from-transparent via-neutral-500/30 to-neutral-500/20' />
-            <span className='shrink-0 rounded-full border border-neutral-500/20 bg-white/70 px-3 py-1 text-[10px] font-medium uppercase tracking-[0.12em] text-neutral-500 shadow-sm backdrop-blur dark:bg-neutral-950/60 dark:text-neutral-400'>
+            <span className='shrink-0 rounded-full border border-neutral-500/20 bg-white/70 px-3 py-1 text-[0.625em] font-medium uppercase tracking-[0.12em] text-neutral-500 shadow-sm backdrop-blur dark:bg-neutral-950/60 dark:text-neutral-400'>
               {userTurnElapsedLabel}
             </span>
             <div className='h-px flex-1 bg-gradient-to-l from-transparent via-neutral-500/30 to-neutral-500/20' />
@@ -2607,7 +2608,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         {isCompactionSummary && (
           <div className='inline-flex mt-4 items-center gap-2 py-[3px] px-2.5 bg-emerald-100/70 dark:bg-emerald-900/40 border border-emerald-300/70 dark:border-emerald-700 rounded-md'>
             <div className='w-1.5 h-1.5 rounded-full bg-emerald-500' />
-            <span className='font-mono text-[11px] uppercase tracking-[0.08em] text-emerald-700 dark:text-emerald-300'>
+            <span className='font-mono text-[0.6875em] uppercase tracking-[0.08em] text-emerald-700 dark:text-emerald-300'>
               Compaction Summary
             </span>
           </div>
@@ -2626,11 +2627,15 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         {/* Prioritize rendering: streamEvents > contentBlocks > legacy fields */}
         {/* Sequential streaming events - render in order as received */}
         {!editingState && Array.isArray(streamEvents) && streamEvents.length > 0 ? (
-          <div className='space-y-0 mb-0'>{streamRenderedNodes}</div>
+          <div className='space-y-0 mb-0'>
+            {streamRenderedNodes}
+          </div>
         ) : !editingState && Array.isArray(contentBlocks) && contentBlocks.length > 0 ? (
-          <div className='space-y-0 mb-0'>{contentBlockRenderedNodes}</div>
+          <div className='space-y-0 mb-0'>
+            {contentBlockRenderedNodes}
+          </div>
         ) : (
-          <>
+          <div>
             {/* Fallback: render tool calls and reasoning separately if no streamEvents or contentBlocks */}
             {Array.isArray(toolCalls) && toolCalls.length > 0 && (
               <div className='space-y-0 mb-3'>
@@ -2661,11 +2666,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                   aria-expanded={showThinking}
                   aria-controls={`reasoning-content-${id}`}
                 >
-                  <span className='text-[10px] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
+                  <span className='text-[0.625em] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
                     Reasoning
                   </span>
                   {!showThinking && (
-                    <span className='text-xs text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
+                    <span className='text-[0.75em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
                       {getCollapsedReasoningSummary(thinking)}
                     </span>
                   )}
@@ -2691,13 +2696,12 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                       id: `reasoning-content-${id}`,
                       markdown: thinking,
                       className: REASONING_TEXT_MARKDOWN_CLASS,
-                      style: textContentStyle,
                     })}
                   </div>
                 </div>
               </div>
             )}
-          </>
+          </div>
         )}
 
         {/* Message content - show edit mode or normal display */}
@@ -2735,7 +2739,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
             />
           </div>
         ) : (
-          <>
+          <div>
             {/* Display mode - only show if no contentBlocks or streamEvents present (to avoid duplication) */}
             {(!contentBlocks || contentBlocks.length === 0) &&
               (!streamEvents || streamEvents.length === 0) &&
@@ -2743,17 +2747,17 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 key: `legacy-content-${id}`,
                 markdown: content,
                 className: LEGACY_TEXT_MARKDOWN_CLASS,
-                style: textContentStyle,
+                style: messageContentStyle,
               })}
-          </>
+          </div>
         )}
         {/* {hasContent && modelName && role !== 'user' && (
-          <div className='mt-1 text-xs sm:text-sm 3xl:text-base text-stone-400 flex justify-end'>{modelName}</div>
+          <div className='mt-1 text-[0.75em] sm:text-[0.875em] 3xl:text-[1em] text-stone-400 flex justify-end'>{modelName}</div>
         )} */}
         {/* Artifacts (images) */}
         {Array.isArray(artifacts) && artifacts.length > 0 && role !== 'assistant' && (
           <div className='mt-3 mb-3 space-y-2 flex flex-col items-end'>
-            <h3 className='text-xs font-semibold uppercase tracking-wide text-neutral-600 dark:text-neutral-400'>
+            <h3 className='text-[0.75em] font-semibold uppercase tracking-wide text-neutral-600 dark:text-neutral-400'>
               Attachments
             </h3>
             <div className='flex flex-wrap gap-2 sm:gap-3 justify-end self-end'>
@@ -2821,11 +2825,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                   >
                     <div className='p-2 sm:p-3'>
                       <div className='flex items-center justify-between mb-1'>
-                        <h3 className='text-xs sm:text-sm 3xl:text-base font-semibold text-gray-700 dark:text-gray-300'>
+                        <h3 className='text-[0.75em] sm:text-[0.875em] 3xl:text-[1em] font-semibold text-gray-700 dark:text-gray-300'>
                           Message Info
                         </h3>
                       </div>
-                      <div className='max-h-64 sm:max-h-80 md:max-h-96 overflow-y-auto text-xs sm:text-sm space-y-1.5 pt-2'>
+                      <div className='max-h-64 sm:max-h-80 md:max-h-96 overflow-y-auto text-[0.75em] sm:text-[0.875em] space-y-1.5 pt-2'>
                         {messageData ? (
                           <>
                             {Object.entries(messageData)
@@ -2865,7 +2869,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         )}
 
         {/* {timestamp && formatTimestamp(timestamp) && (
-          <div className='text-[9px] sm:text-xs 3xl:text-sm text-stone-400 pt-0.5 flex justify-end'>
+          <div className='text-[0.5625em] sm:text-[0.75em] 3xl:text-[0.875em] text-stone-400 pt-0.5 flex justify-end'>
             {formatTimestamp(timestamp)}
           </div>
         )} */}
@@ -2998,7 +3002,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
             >
               {/* Display selected text */}
               <div className='mb-2 p-2 rounded-[12px] bg-neutral-50 dark:bg-yBlack-800 border border-neutral-200 dark:border-neutral-700 max-h-[100px] overflow-y-auto'>
-                <div className='text-xs text-gray-600 dark:text-gray-400 italic line-clamp-4'>"{selectedText}"</div>
+                <div className='text-[0.75em] text-gray-600 dark:text-gray-400 italic line-clamp-4'>"{selectedText}"</div>
               </div>
               <TextArea
                 value={explainInputValue}
