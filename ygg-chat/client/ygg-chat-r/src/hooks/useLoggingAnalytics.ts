@@ -96,6 +96,25 @@ export interface LoggingDashboardResponse {
       total: number
       byName: Record<string, number>
     }
+    batching?: {
+      batchedCalls: number
+      unbatchedEquivalentCalls: number
+      savedCalls: number
+      savedCallsPct: number
+      cachePrefixSavingsFactorPct: number
+      byBatchTool: Array<{
+        toolName: string
+        batches: number
+        expandedCalls: number
+        savedCalls: number
+      }>
+      daily: Array<{
+        date: string
+        batchedCalls: number
+        unbatchedEquivalentCalls: number
+        savedCalls: number
+      }>
+    }
     jobs: {
       available: boolean
       statusCounts: Record<string, number>

@@ -113,8 +113,27 @@ function extractViewImagePayload(content: any): { imageUrl: string; detail?: 'hi
   return { imageUrl, detail }
 }
 
+function extractPlanModelContent(content: any, toolName?: string | null): string | null {
+  const normalizedToolName = typeof toolName === 'string' ? toolName.trim() : ''
+  if (normalizedToolName !== 'plan_md') return null
+
+  let resolved = content
+  if (typeof resolved === 'string') {
+    const parsed = parseJson(resolved.trim())
+    if (parsed == null) return null
+    resolved = parsed
+  }
+
+  if (!resolved || typeof resolved !== 'object') return null
+  const modelContent = (resolved as any).modelContent
+  return typeof modelContent === 'string' && modelContent.trim() ? modelContent : null
+}
+
 export function sanitizeToolResultContentForModel(content: any, toolName?: string | null): any {
   const normalizedToolName = typeof toolName === 'string' ? toolName.trim() : ''
+  const planModelContent = extractPlanModelContent(content, normalizedToolName)
+  if (planModelContent) return planModelContent
+
   if (normalizedToolName === 'view_image') {
     const viewImage = extractViewImagePayload(content)
     if (viewImage) {

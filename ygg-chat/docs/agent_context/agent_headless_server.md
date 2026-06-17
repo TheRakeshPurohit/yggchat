@@ -25,7 +25,7 @@ Use this when changing:
 - `client/ygg-chat-r/electron/headlessServer/services/branchOrchestrator.ts`: continuation/branch semantics.
 - `client/ygg-chat-r/electron/headlessServer/services/toolLoopService.ts`: assistant tool-call continuation.
 - `client/ygg-chat-r/electron/headlessServer/providers/*`: provider adapters/token handling.
-- `client/ygg-chat-r/electron/headlessServer/persistence/*`: project/conversation/message repos.
+- `client/ygg-chat-r/electron/headlessServer/persistence/*`: project/conversation/message repos, including `streamingRunRepo.ts` for durable stream lifecycle rows.
 - `client/ygg-chat-r/electron/headlessServer/stream/*`: SSE writer/event types.
 - `client/ygg-chat-r/electron/headlessServer/ui/mobile/src/*`: mobile UI.
 
@@ -37,6 +37,7 @@ Use this when changing:
 4. Provider router dispatches to provider implementation.
 5. `ToolLoopService` handles assistant tool-call continuation and server-side tool execution bridge.
 6. SSE events stream lifecycle, text/reasoning/tool information back to caller.
+7. Headless orchestration mirrors run start/completion/error into SQLite `streaming_runs` when a local DB is available; the `started` SSE event may include the resolved `streamId`.
 
 ## Current Provider Notes
 

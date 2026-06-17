@@ -12,6 +12,7 @@ import {
   loadSubagentToolSettings,
 } from '../../helpers/subagentToolSettings'
 import { getAllTools } from './toolDefinitions'
+import { createStreamingRun, finishStreamingRun } from './streamRunTracking'
 
 const DEFAULT_SUBAGENT_MODEL = 'openai/gpt-5.3-codex'
 const MAX_PARALLEL_SUBAGENTS = 3
@@ -30,6 +31,7 @@ export interface SubagentRuntimeContext {
   callerProvider?: string | null
   queryClient?: QueryClient | null
   subagentDepth?: number
+  operationMode: OperationMode
   executeLocalTool: (
     toolCall: any,
     rootPath: string | null,
@@ -513,6 +515,20 @@ export const executeSubagentCall = async (
     modelName: resolvedModel,
     systemPrompt: effectiveSystemPrompt,
   })
+  if (streamId) {
+    void createStreamingRun({
+      streamId,
+      conversationId,
+      parentMessageId,
+      streamType: 'subagent',
+      provider: resolvedProvider || null,
+      modelName: resolvedModel,
+      operation: 'subagent',
+      source: 'subagent',
+      toolCallId: typeof toolCall?.id === 'string' ? toolCall.id : null,
+      metadata: { subagent_run_id: subagentSessionId },
+    })
+  }
   await appendSubagentMessage(subagentSessionId, {
     role: 'user',
     content: prompt,
@@ -767,6 +783,11 @@ export const executeSubagentCall = async (
           turns_used: turnsUsed,
           tool_calls_used: toolCallsUsed,
         })
+        void finishStreamingRun(streamId, {
+          status: 'completed',
+          endReason: 'completed',
+          metadata: { subagent_run_id: subagentSessionId },
+        })
         break
       }
 
@@ -836,16 +857,18 @@ export const executeSubagentCall = async (
             throw new Error('Subagent aborted')
           }
 
-          // Read live settings per tool call so toggles apply mid-stream.
+          // Read live permission settings per tool call so auto-approve toggles apply mid-stream.
+          // Operation mode is captured from the parent stream so branch-local Chat/Agent safety
+          // does not change when the global UI mode changes while this subagent is running.
           const liveState = getState()
           const parentAutoApprove = liveState.chat.toolAutoApprove
-          const liveOperationMode = liveState.chat.operationMode
+          const capturedOperationMode = context.operationMode
           const shouldAutoApprove = inheritAutoApprove && parentAutoApprove
 
           let result: string
           if (shouldAutoApprove) {
             // Execute directly without permission check
-            result = await context.executeLocalTool(tc, rootPath, liveOperationMode, {
+            result = await context.executeLocalTool(tc, rootPath, capturedOperationMode, {
               conversationId,
               messageId: assistantMessageId,
               streamId,
@@ -857,7 +880,7 @@ export const executeSubagentCall = async (
             })
           } else {
             // Show permission dialog. This path is intentionally not parallelized.
-            result = await context.executeToolWithPermissionCheck(dispatch, getState, tc, rootPath, liveOperationMode, {
+            result = await context.executeToolWithPermissionCheck(dispatch, getState, tc, rootPath, capturedOperationMode, {
               conversationId,
               messageId: assistantMessageId,
               streamId,
@@ -970,6 +993,7 @@ export const executeSubagentCall = async (
   } catch (error) {
     if (subagentAbortController.signal.aborted) {
       await updateSubagentRun(subagentSessionId, { status: 'aborted', error: 'Subagent aborted', turns_used: turnsUsed, tool_calls_used: toolCallsUsed })
+      void finishStreamingRun(streamId, { status: 'aborted', endReason: 'aborted', error: 'Subagent aborted', metadata: { subagent_run_id: subagentSessionId } })
       throw new Error('Subagent aborted')
     }
     console.error('[subagent] Error in subagent execution:', error)
@@ -978,6 +1002,12 @@ export const executeSubagentCall = async (
       error: error instanceof Error ? error.message : String(error),
       turns_used: turnsUsed,
       tool_calls_used: toolCallsUsed,
+    })
+    void finishStreamingRun(streamId, {
+      status: 'error',
+      endReason: 'error',
+      error: error instanceof Error ? error.message : String(error),
+      metadata: { subagent_run_id: subagentSessionId },
     })
     throw error
   } finally {
@@ -1137,6 +1167,11 @@ export const executeSubagentCall = async (
     final_response: finalResponse || 'No response generated',
     turns_used: turnsUsed,
     tool_calls_used: toolCallsUsed,
+  })
+  void finishStreamingRun(streamId, {
+    status: 'completed',
+    endReason: 'completed',
+    metadata: { subagent_run_id: subagentSessionId },
   })
 
   return finalToolResult || 'No response generated'

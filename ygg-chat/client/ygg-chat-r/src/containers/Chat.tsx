@@ -20,6 +20,7 @@ import {
   PlanClarificationPanel,
   Select,
   SettingsPane,
+  StreamingThinkingIndicator,
   TextField,
   ToolJobsModal,
   ToolPermissionDialog,
@@ -34,14 +35,8 @@ import {
 import {
   getStoredSendButtonAnimation,
   getStoredSendButtonColor,
-  getStoredStreamingAnimation,
-  getStoredStreamingDarkColor,
-  getStoredStreamingLightColor,
-  getStoredStreamingSpeed,
   SendButtonAnimationType,
   SendButtonLoadingAnimation,
-  StreamingAnimationType,
-  StreamingLoadingAnimation,
 } from '../components/SettingsPane/SendButtonAnimationSettings'
 import {
   getThemeModeColor,
@@ -62,12 +57,14 @@ import {
   compactBranch,
   deleteMessage,
   editMessageWithBranching,
+  fetchConversationStreamUndo,
   initializeUserAndConversation,
   Message,
   resolveAttachmentUrl,
   respondToPlanClarification,
   respondToToolPermission,
   respondToToolPermissionAndEnableAll,
+  restoreStreamFileEdits,
   selectCcCwd,
   selectConversationMessages,
   selectCurrentConversationId,
@@ -85,13 +82,14 @@ import {
   selectOperationMode,
   selectProviderState,
   selectSendingState,
+  selectStreamUndoRoot,
   sendHermesMessage,
   sendMessage,
   syncConversationToLocal,
   updateConversationTitle,
   updateMessage,
 } from '../features/chats'
-import type { ContentBlock, ImageDraftTarget, ToolCall } from '../features/chats/chatTypes'
+import type { ContentBlock, ImageDraftTarget, StreamUndoSummary, ToolCall } from '../features/chats/chatTypes'
 import type { PlanClarificationAnswer } from '../features/chats/planToolTypes'
 import { estimateContentBlocksForContext, safeEstimateTokenCount } from '../features/chats/contextTokenEstimate'
 import {
@@ -133,12 +131,15 @@ import {
   REASONING_EFFORT_OPTIONS,
 } from '../helpers/chatReasoningSettingsStorage'
 import {
+  CHAT_UI_ADDED_FILES_PILLS_VISIBILITY_CHANGE_EVENT,
+  CHAT_UI_ADDED_FILES_PILLS_VISIBILITY_KEY,
   CHAT_UI_AUTO_COMPACTION_ENABLED_CHANGE_EVENT,
   CHAT_UI_AUTO_COMPACTION_ENABLED_KEY,
   CHAT_UI_TOKEN_USAGE_HOVER_DETAILS_VISIBILITY_CHANGE_EVENT,
   CHAT_UI_TOKEN_USAGE_HOVER_DETAILS_VISIBILITY_KEY,
   CHAT_UI_TOKEN_USAGE_VISIBILITY_CHANGE_EVENT,
   loadAutoCompactionEnabled,
+  loadShowAddedFilesPills,
   loadShowTokenUsageBar,
   loadShowTokenUsageHoverDetails,
 } from '../helpers/chatUiSettingsStorage'
@@ -282,6 +283,7 @@ type ChatInputControllerProps = {
   onClearIdeContexts?: () => void
   selectedIdeContextItems?: Array<{ id: string; label: string }>
   fallbackFileSearchRoot?: string | null
+  filterSelectedMentionFiles?: boolean
   imageDraftTarget?: ImageDraftTarget
 }
 
@@ -293,6 +295,8 @@ type AddedIdeContext = {
   endLine: number
   selectedText: string
 }
+
+type StreamingThinkingIndicatorPlacement = 'message' | 'input-tab'
 
 const EMPTY_PARSED_MESSAGE_DATA: ParsedMessageData = {}
 const COMPOSER_SLASH_COMMANDS = [
@@ -314,6 +318,16 @@ const BENCH_MAX_SAMPLES = 3000
 const BENCH_MAX_EVENTS = 1200
 const BENCH_SCROLL_ACTIVE_WINDOW_MS = 140
 const THEME_DEMO_INTERVAL_MS = 500
+const STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY = 'chat:streamingThinkingIndicatorPlacement'
+
+const getStoredStreamingThinkingIndicatorPlacement = (): StreamingThinkingIndicatorPlacement => {
+  try {
+    const stored = window.localStorage.getItem(STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY)
+    return stored === 'input-tab' ? 'input-tab' : 'message'
+  } catch {
+    return 'message'
+  }
+}
 
 const parseCreatedAtMs = (createdAt: string | Date | null | undefined): number | null => {
   if (!createdAt) return null
@@ -760,6 +774,7 @@ const ChatInputController = React.memo(
         onClearIdeContexts,
         selectedIdeContextItems,
         fallbackFileSearchRoot,
+        filterSelectedMentionFiles = true,
         imageDraftTarget = { kind: 'composer' },
       },
       ref
@@ -866,6 +881,7 @@ const ChatInputController = React.memo(
             onClearIdeContexts={onClearIdeContexts}
             selectedIdeContextItems={selectedIdeContextItems}
             fallbackFileSearchRoot={fallbackFileSearchRoot}
+            filterSelectedMentionFiles={filterSelectedMentionFiles}
             enableImageAttachments={true}
             imageDraftTarget={imageDraftTarget}
             className='!border-0 !focus:border-0 !outline-none !shadow-none focus:!ring-0'
@@ -1003,6 +1019,7 @@ function Chat() {
   // const canSendFromRedux = useAppSelector(selectCanSend)
   const sendingState = useAppSelector(selectSendingState)
   const currentConversationId = useAppSelector(selectCurrentConversationId)
+  const streamUndoRoot = useAppSelector(selectStreamUndoRoot)
   const compactingConversationId = useAppSelector(state => state.chat.composition.compactingConversationId)
   // Current view stream - automatically selects the relevant stream based on currentPath
   const currentViewStream = useAppSelector(selectCurrentViewStream)
@@ -1059,6 +1076,16 @@ function Chat() {
   useEffect(() => {
     setPendingViewStreamId(null)
   }, [currentConversationId])
+
+  useEffect(() => {
+    if (currentConversationId == null) return
+    dispatch(fetchConversationStreamUndo(currentConversationId))
+  }, [currentConversationId, dispatch])
+
+  useEffect(() => {
+    if (currentConversationId == null || !streamState.finished) return
+    dispatch(fetchConversationStreamUndo(currentConversationId))
+  }, [currentConversationId, dispatch, streamState.finished, streamState.id, streamState.finalMessageId])
 
   const conversationMessages = useAppSelector(selectConversationMessages)
   const displayMessages = useAppSelector(selectDisplayMessages)
@@ -1243,6 +1270,8 @@ function Chat() {
   // Todo list collapsed state
   const [todoListCollapsed, setTodoListCollapsed] = useState(false)
   const [workspaceMutationsCollapsed, setWorkspaceMutationsCollapsed] = useState(false)
+  const [streamingThinkingIndicatorPlacement, setStreamingThinkingIndicatorPlacement] =
+    useState<StreamingThinkingIndicatorPlacement>(getStoredStreamingThinkingIndicatorPlacement)
   // Tool jobs modal state
   const [jobsModalOpen, setJobsModalOpen] = useState(false)
   const [orchestratorEnabled, setOrchestratorEnabledState] = useState(() => isOrchestratorEnabled())
@@ -2037,7 +2066,7 @@ function Chat() {
           const toolCallsHash = hashUnknownForRenderCache(msg.tool_calls)
           const thinkingHash = hashStringForRenderCache(msg.thinking_block ?? '')
           const noteHash = hashStringForRenderCache(`${msg.note ?? ''}:${msg.note_color ?? ''}`)
-          return `${msg.id}:${updatedAt}:a${artifactCount}:c${contentHash}:b${contentBlocksHash}:t${toolCallsHash}:r${thinkingHash}:n${noteHash}`
+          return `${msg.id}:${msg.role}:${updatedAt}:a${artifactCount}:c${contentHash}:b${contentBlocksHash}:t${toolCallsHash}:r${thinkingHash}:n${noteHash}`
         })
         .join('|'),
     [renderableMessages]
@@ -2439,7 +2468,9 @@ function Chat() {
     ((shouldPreserveProcessStreamRow || liveDuplicateSuppressionMessageId == null) &&
       isCompletedStreamMessageAlreadyRendered)
   const showStreamingMessage = !isStreamingMessageAlreadyRendered && hasStreamingMessageContent
-  const showGenerationLoaderRow = showGenerationLoadingAnimation
+  const showStreamingThinkingMessageRow = streamingThinkingIndicatorPlacement === 'message'
+  const showStreamingThinkingInputTab = streamingThinkingIndicatorPlacement === 'input-tab'
+  const showGenerationLoaderRow = showGenerationLoadingAnimation && showStreamingThinkingMessageRow
 
   const virtualRows = useMemo<VirtualRenderRow[]>(() => {
     const rows: VirtualRenderRow[] = messageRenderRows.map((row, index) => ({
@@ -2493,6 +2524,69 @@ function Chat() {
     showGenerationLoaderRow,
     virtualRowsV2Enabled,
   ])
+
+  const getUndoSummariesForMessage = useCallback(
+    (messageId: string): StreamUndoSummary[] => {
+      const directStreamIds = streamUndoRoot.streamIdsByParentMessageId[String(messageId)] || []
+      const streamIds = new Set<string>(directStreamIds)
+      const messageIndex = renderableMessages.findIndex(message => String(message.id) === String(messageId))
+
+      if (messageIndex >= 0) {
+        for (let index = messageIndex + 1; index < renderableMessages.length; index += 1) {
+          const message = renderableMessages[index]
+          if (!message) continue
+          if (message.role === 'user') break
+          const assistantStreamIds = streamUndoRoot.streamIdsByAssistantMessageId[String(message.id)] || []
+          for (const streamId of assistantStreamIds) streamIds.add(streamId)
+        }
+      }
+
+      return Array.from(streamIds)
+        .map(id => streamUndoRoot.byStreamId[id])
+        .filter((summary): summary is StreamUndoSummary => Boolean(summary))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    },
+    [renderableMessages, streamUndoRoot]
+  )
+
+  const getUndoStateForMessage = useCallback(
+    (messageId: string) => {
+      const summaries = getUndoSummariesForMessage(messageId)
+      if (summaries.length === 0) return undefined
+      const latest = summaries[0]
+      const restoring = streamUndoRoot.restoringByStreamId[latest.streamId] ?? false
+      return {
+        available: latest.status === 'available',
+        restored: latest.status === 'restored',
+        restoring,
+        fileCount: latest.fileCount,
+        error: streamUndoRoot.errorByStreamId[latest.streamId] ?? null,
+      }
+    },
+    [getUndoSummariesForMessage, streamUndoRoot]
+  )
+
+  const handleUndoStreamEdits = useCallback(
+    (messageId: string) => {
+      if (currentConversationId != null) {
+        void dispatch(fetchConversationStreamUndo(currentConversationId))
+      }
+      const latest = getUndoSummariesForMessage(messageId).find(summary => summary.status === 'available')
+      if (!latest) return
+      const ok = window.confirm(
+        `Undo file edits from this agent run? This will restore ${latest.fileCount} file${latest.fileCount === 1 ? '' : 's'} to their pre-agent contents.`
+      )
+      if (!ok) return
+      dispatch(
+        restoreStreamFileEdits({
+          streamId: latest.streamId,
+          conversationId: currentConversationId,
+          parentMessageId: latest.parentMessageId && String(latest.parentMessageId) === String(messageId) ? messageId : latest.parentMessageId,
+        })
+      )
+    },
+    [currentConversationId, dispatch, getUndoSummariesForMessage]
+  )
 
   const userTurnElapsedLabelByMessageId = useMemo(() => {
     const labels = new Map<string, string>()
@@ -3238,9 +3332,6 @@ function Chat() {
   const sendButtonAnimationThemeColor = customThemeEnabled
     ? getThemeModeColor(customTheme.colors.sendButtonAnimationColor, isDarkMode)
     : undefined
-  const streamingAnimationThemeColor = customThemeEnabled
-    ? getThemeModeColor(customTheme.colors.streamingAnimationColor, isDarkMode)
-    : undefined
   const composerToggleActiveStyle = customThemeEnabled
     ? {
         backgroundColor: getThemeModeColor(customTheme.colors.composerToggleActiveBg, isDarkMode),
@@ -3314,6 +3405,7 @@ function Chat() {
     loadShowTokenUsageHoverDetails()
   )
   const [autoCompactionEnabled, setAutoCompactionEnabled] = useState<boolean>(() => loadAutoCompactionEnabled())
+  const [showAddedFilesPills, setShowAddedFilesPills] = useState<boolean>(() => loadShowAddedFilesPills())
   const [expandedProcessMessageRuns, setExpandedProcessMessageRuns] = useState<Set<string>>(() => new Set())
   useEffect(() => {
     // Listen for custom event from SettingsPane (same window)
@@ -3344,17 +3436,29 @@ function Chat() {
       }
     }
 
+    const handleStreamingIndicatorPlacementEvent = (e: Event) => {
+      const detail = (e as CustomEvent<StreamingThinkingIndicatorPlacement>).detail
+      if (detail === 'message' || detail === 'input-tab') {
+        setStreamingThinkingIndicatorPlacement(detail)
+      }
+    }
+
     const handleStorageEvent = (e: StorageEvent) => {
       if (e.key === 'chat:groupToolReasoningRuns' && e.newValue !== null) {
         setGroupToolReasoningRuns(e.newValue === 'true')
       }
+      if (e.key === STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY && e.newValue !== null) {
+        setStreamingThinkingIndicatorPlacement(e.newValue === 'input-tab' ? 'input-tab' : 'message')
+      }
     }
 
     window.addEventListener('groupToolReasoningRunsChange', handleGroupRunsEvent)
+    window.addEventListener('streamingThinkingIndicatorPlacementChange', handleStreamingIndicatorPlacementEvent)
     window.addEventListener('storage', handleStorageEvent)
 
     return () => {
       window.removeEventListener('groupToolReasoningRunsChange', handleGroupRunsEvent)
+      window.removeEventListener('streamingThinkingIndicatorPlacementChange', handleStreamingIndicatorPlacementEvent)
       window.removeEventListener('storage', handleStorageEvent)
     }
   }, [])
@@ -3393,6 +3497,13 @@ function Chat() {
       }
     }
 
+    const handleAddedFilesPillsVisibilityEvent = (e: Event) => {
+      const detail = (e as CustomEvent<boolean>).detail
+      if (typeof detail === 'boolean') {
+        setShowAddedFilesPills(detail)
+      }
+    }
+
     const handleStorageEvent = (e: StorageEvent) => {
       if (e.key === 'chat:showTokenUsageBar' && e.newValue !== null) {
         setShowTokenUsageBar(e.newValue === 'true')
@@ -3404,6 +3515,10 @@ function Chat() {
 
       if (e.key === CHAT_UI_AUTO_COMPACTION_ENABLED_KEY && e.newValue !== null) {
         setAutoCompactionEnabled(e.newValue === 'true')
+      }
+
+      if (e.key === CHAT_UI_ADDED_FILES_PILLS_VISIBILITY_KEY && e.newValue !== null) {
+        setShowAddedFilesPills(e.newValue === 'true')
       }
     }
 
@@ -3418,6 +3533,10 @@ function Chat() {
     window.addEventListener(
       CHAT_UI_AUTO_COMPACTION_ENABLED_CHANGE_EVENT,
       handleAutoCompactionEnabledEvent as EventListener
+    )
+    window.addEventListener(
+      CHAT_UI_ADDED_FILES_PILLS_VISIBILITY_CHANGE_EVENT,
+      handleAddedFilesPillsVisibilityEvent as EventListener
     )
     window.addEventListener('storage', handleStorageEvent)
 
@@ -3434,6 +3553,10 @@ function Chat() {
         CHAT_UI_AUTO_COMPACTION_ENABLED_CHANGE_EVENT,
         handleAutoCompactionEnabledEvent as EventListener
       )
+      window.removeEventListener(
+        CHAT_UI_ADDED_FILES_PILLS_VISIBILITY_CHANGE_EVENT,
+        handleAddedFilesPillsVisibilityEvent as EventListener
+      )
       window.removeEventListener('storage', handleStorageEvent)
     }
   }, [])
@@ -3441,12 +3564,6 @@ function Chat() {
   // Send button animation settings (synced from SettingsPane via custom event + localStorage)
   const [sendButtonAnimation, setSendButtonAnimation] = useState<SendButtonAnimationType>(getStoredSendButtonAnimation)
   const [sendButtonColor, setSendButtonColor] = useState<string>(getStoredSendButtonColor)
-
-  // Streaming animation settings (shown below the live assistant message while content is streaming)
-  const [streamingAnimation, setStreamingAnimation] = useState<StreamingAnimationType>(getStoredStreamingAnimation)
-  const [streamingAnimationLightColor, setStreamingAnimationLightColor] = useState<string>(getStoredStreamingLightColor)
-  const [streamingAnimationDarkColor, setStreamingAnimationDarkColor] = useState<string>(getStoredStreamingDarkColor)
-  const [streamingAnimationSpeed, setStreamingAnimationSpeed] = useState<number>(getStoredStreamingSpeed)
 
   useEffect(() => {
     const handleSendButtonAnimationEvent = (e: Event) => {
@@ -3456,22 +3573,6 @@ function Chat() {
     const handleSendButtonColorEvent = (e: Event) => {
       const detail = (e as CustomEvent<string>).detail
       if (detail) setSendButtonColor(detail)
-    }
-    const handleStreamingAnimationEvent = (e: Event) => {
-      const detail = (e as CustomEvent<StreamingAnimationType>).detail
-      if (detail) setStreamingAnimation(detail)
-    }
-    const handleStreamingLightColorEvent = (e: Event) => {
-      const detail = (e as CustomEvent<string>).detail
-      if (detail) setStreamingAnimationLightColor(detail)
-    }
-    const handleStreamingDarkColorEvent = (e: Event) => {
-      const detail = (e as CustomEvent<string>).detail
-      if (detail) setStreamingAnimationDarkColor(detail)
-    }
-    const handleStreamingSpeedEvent = (e: Event) => {
-      const detail = (e as CustomEvent<number>).detail
-      if (Number.isFinite(detail)) setStreamingAnimationSpeed(detail)
     }
     const handleInputBorderAnimationEvent = (e: Event) => {
       const detail = (e as CustomEvent<ChatInputBorderAnimationType>).detail
@@ -3492,25 +3593,6 @@ function Chat() {
       if (e.key === 'chat:sendButtonColor' && e.newValue) {
         setSendButtonColor(e.newValue)
       }
-      if (e.key === 'chat:streamingAnimation' && e.newValue) {
-        setStreamingAnimation(e.newValue as StreamingAnimationType)
-      }
-      if (e.key === 'chat:streamingAnimationColor' && e.newValue) {
-        setStreamingAnimationLightColor(e.newValue)
-        setStreamingAnimationDarkColor(e.newValue)
-      }
-      if (e.key === 'chat:streamingAnimationLightColor' && e.newValue) {
-        setStreamingAnimationLightColor(e.newValue)
-      }
-      if (e.key === 'chat:streamingAnimationDarkColor' && e.newValue) {
-        setStreamingAnimationDarkColor(e.newValue)
-      }
-      if (e.key === 'chat:streamingAnimationSpeed' && e.newValue) {
-        const nextSpeed = Number.parseFloat(e.newValue)
-        if (Number.isFinite(nextSpeed)) {
-          setStreamingAnimationSpeed(nextSpeed)
-        }
-      }
       if (e.key === 'chat:inputBorderAnimation' && e.newValue) {
         setChatInputBorderAnimation(e.newValue as ChatInputBorderAnimationType)
       }
@@ -3524,11 +3606,6 @@ function Chat() {
 
     window.addEventListener('sendButtonAnimationChange', handleSendButtonAnimationEvent)
     window.addEventListener('sendButtonColorChange', handleSendButtonColorEvent)
-    window.addEventListener('streamingAnimationChange', handleStreamingAnimationEvent)
-    window.addEventListener('streamingAnimationColorChange', handleStreamingLightColorEvent)
-    window.addEventListener('streamingAnimationLightColorChange', handleStreamingLightColorEvent)
-    window.addEventListener('streamingAnimationDarkColorChange', handleStreamingDarkColorEvent)
-    window.addEventListener('streamingAnimationSpeedChange', handleStreamingSpeedEvent)
     window.addEventListener('inputBorderAnimationChange', handleInputBorderAnimationEvent)
     window.addEventListener('inputBorderLightColorChange', handleInputBorderLightColorEvent)
     window.addEventListener('inputBorderDarkColorChange', handleInputBorderDarkColorEvent)
@@ -3537,11 +3614,6 @@ function Chat() {
     return () => {
       window.removeEventListener('sendButtonAnimationChange', handleSendButtonAnimationEvent)
       window.removeEventListener('sendButtonColorChange', handleSendButtonColorEvent)
-      window.removeEventListener('streamingAnimationChange', handleStreamingAnimationEvent)
-      window.removeEventListener('streamingAnimationColorChange', handleStreamingLightColorEvent)
-      window.removeEventListener('streamingAnimationLightColorChange', handleStreamingLightColorEvent)
-      window.removeEventListener('streamingAnimationDarkColorChange', handleStreamingDarkColorEvent)
-      window.removeEventListener('streamingAnimationSpeedChange', handleStreamingSpeedEvent)
       window.removeEventListener('inputBorderAnimationChange', handleInputBorderAnimationEvent)
       window.removeEventListener('inputBorderLightColorChange', handleInputBorderLightColorEvent)
       window.removeEventListener('inputBorderDarkColorChange', handleInputBorderDarkColorEvent)
@@ -4607,6 +4679,7 @@ function Chat() {
                 reasoningConfig: think ? reasoningConfig : undefined,
                 serviceTier: openAIServiceTier,
                 cwd: ccCwd || undefined,
+                operationMode,
                 streamId,
               })
             )
@@ -4699,6 +4772,7 @@ function Chat() {
                   reasoningConfig: think ? reasoningConfig : undefined,
                   serviceTier: openAIServiceTier,
                   cwd: ccCwd || undefined,
+                  operationMode,
                   streamId,
                 })
               )
@@ -4867,6 +4941,7 @@ function Chat() {
       imageConfig,
       reasoningConfig,
       openAIServiceTier,
+      operationMode,
       findLastHermesSession,
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
@@ -4974,6 +5049,7 @@ function Chat() {
           think: think,
           serviceTier: openAIServiceTier,
           cwd: ccCwd || undefined,
+          operationMode,
           streamId,
         })
       )
@@ -4999,6 +5075,7 @@ function Chat() {
       selectedModel?.name,
       think,
       openAIServiceTier,
+      operationMode,
       hermesMode,
       ccCwd,
       hermesModeAvailable,
@@ -5095,6 +5172,7 @@ function Chat() {
           reasoningConfig: think ? reasoningConfig : undefined,
           serviceTier: openAIServiceTier,
           cwd: ccCwd || undefined,
+          operationMode,
           streamId,
         })
       )
@@ -5124,6 +5202,7 @@ function Chat() {
       imageConfig,
       reasoningConfig,
       openAIServiceTier,
+      operationMode,
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
     ]
@@ -6255,13 +6334,12 @@ function Chat() {
                               measureElement={virtualizer.measureElement}
                             >
                               <div className={`${showStreamingMessage ? 'pt-2' : 'pt-1'} pl-2`}>
-                                <StreamingLoadingAnimation
-                                  animationType={streamingAnimation}
-                                  color={
-                                    streamingAnimationThemeColor ||
-                                    (isDarkMode ? streamingAnimationDarkColor : streamingAnimationLightColor)
+                                <StreamingThinkingIndicator
+                                  style={
+                                    fontSizeOffset !== 0
+                                      ? { fontSize: `calc(0.75em + ${fontSizeOffset}px)` }
+                                      : undefined
                                   }
-                                  speed={streamingAnimationSpeed}
                                 />
                               </div>
                             </VirtualizedRowContainer>
@@ -6454,6 +6532,8 @@ function Chat() {
                               isDarkMode={isDarkMode}
                               className={assistantContainerClassName}
                               userTurnElapsedLabel={userTurnElapsedLabelByMessageId.get(String(msg.id))}
+                              undoState={msg.role === 'user' ? getUndoStateForMessage(String(msg.id)) : undefined}
+                              onUndoStreamEdits={msg.role === 'user' ? () => handleUndoStreamEdits(String(msg.id)) : undefined}
                               onEdit={handleMessageEdit}
                               onBranch={handleMessageBranch}
                               onDelete={handleRequestDelete}
@@ -6499,6 +6579,12 @@ function Chat() {
             >
               <i className='bx bx-down-arrow-alt text-lg' aria-hidden='true'></i>
             </Button>
+          )}
+
+          {showGenerationLoadingAnimation && showStreamingThinkingInputTab && (
+            <div className='relative z-10 ml-6 -mb-px flex'>
+              <StreamingThinkingIndicator variant='tab' />
+            </div>
           )}
 
           {/* Textarea (bottom, grows upward because wrapper is bottom-pinned) */}
@@ -6782,11 +6868,12 @@ function Chat() {
                 onClearIdeContexts={clearIdeContexts}
                 selectedIdeContextItems={addedIdeContextItems}
                 fallbackFileSearchRoot={ccCwd}
+                filterSelectedMentionFiles={showAddedFilesPills}
                 imageDraftTarget={{ kind: 'composer' }}
               />
             </div>
             {/* Selected file chips moved from InputTextArea */}
-            {selectedFilesForChat && selectedFilesForChat.length > 0 && (
+            {showAddedFilesPills && selectedFilesForChat && selectedFilesForChat.length > 0 && (
               <div className='m-2 flex flex-wrap gap-2'>
                 {selectedFilesForChat.map(file => {
                   const displayName =

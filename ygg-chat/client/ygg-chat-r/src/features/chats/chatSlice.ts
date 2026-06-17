@@ -17,6 +17,7 @@ import {
   StreamCompletedPayload,
   StreamingAbortedPayload,
   StreamState,
+  StreamUndoSummary,
   ToolCallPermissionRequest,
   UserSystemPrompt,
 } from './chatTypes'
@@ -184,6 +185,14 @@ const makeInitialState = (): ChatState => {
       byId: {},
       primaryStreamId: null,
       lastCompletedId: null,
+    },
+    streamUndo: {
+      byStreamId: {},
+      streamIdsByParentMessageId: {},
+      streamIdsByAssistantMessageId: {},
+      loadingByConversationId: {},
+      restoringByStreamId: {},
+      errorByStreamId: {},
     },
     ui: {
       modelSelectorOpen: false,
@@ -719,6 +728,55 @@ export const chatSlice = createSlice({
         stream.lineage.rootMessageId = targetParentId
         stream.branchAnchorMessageId = targetParentId
       }
+    },
+
+    streamUndoConversationLoadingSet: (
+      state,
+      action: PayloadAction<{ conversationId: string; loading: boolean }>
+    ) => {
+      state.streamUndo.loadingByConversationId[action.payload.conversationId] = action.payload.loading
+    },
+
+    streamUndoSummariesReceived: (
+      state,
+      action: PayloadAction<{ conversationId?: string | null; summaries: StreamUndoSummary[] }>
+    ) => {
+      const { conversationId, summaries } = action.payload
+      if (conversationId) {
+        for (const [streamId, summary] of Object.entries(state.streamUndo.byStreamId)) {
+          if (String(summary.conversationId) === String(conversationId)) {
+            delete state.streamUndo.byStreamId[streamId]
+          }
+        }
+      }
+      for (const summary of summaries) {
+        state.streamUndo.byStreamId[summary.streamId] = summary
+      }
+      const index: Record<string, string[]> = {}
+      const assistantIndex: Record<string, string[]> = {}
+      for (const summary of Object.values(state.streamUndo.byStreamId)) {
+        if (summary.status !== 'available' && summary.status !== 'restoring') continue
+        if (summary.parentMessageId) {
+          const key = String(summary.parentMessageId)
+          index[key] = index[key] ?? []
+          if (!index[key].includes(summary.streamId)) index[key].push(summary.streamId)
+        }
+        if (summary.assistantMessageId) {
+          const key = String(summary.assistantMessageId)
+          assistantIndex[key] = assistantIndex[key] ?? []
+          if (!assistantIndex[key].includes(summary.streamId)) assistantIndex[key].push(summary.streamId)
+        }
+      }
+      state.streamUndo.streamIdsByParentMessageId = index
+      state.streamUndo.streamIdsByAssistantMessageId = assistantIndex
+    },
+
+    streamUndoRestoringSet: (state, action: PayloadAction<{ streamId: string; restoring: boolean }>) => {
+      state.streamUndo.restoringByStreamId[action.payload.streamId] = action.payload.restoring
+    },
+
+    streamUndoErrorSet: (state, action: PayloadAction<{ streamId: string; error: string | null }>) => {
+      state.streamUndo.errorByStreamId[action.payload.streamId] = action.payload.error
     },
 
     // UI - minimal

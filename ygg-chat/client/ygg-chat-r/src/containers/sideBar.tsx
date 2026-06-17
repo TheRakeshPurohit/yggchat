@@ -7,6 +7,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { ConversationId, Project } from '../../../../shared/types'
 import { Button } from '../components'
 import SearchList, { type SearchResultItem } from '../components/SearchList/SearchList'
+import { getThemeModeColor, useCustomChatTheme, useHtmlDarkMode } from '../components/ThemeManager/themeConfig'
 import { chatSliceActions } from '../features/chats'
 import {
   activeConversationIdSet,
@@ -20,8 +21,9 @@ import EditProject from './EditProject'
 // import { searchActions, selectSearchLoading, selectSearchQuery, selectSearchResults } from '../features/search'
 import { useAppDispatch } from '../hooks/redux'
 import { useAuth } from '../hooks/useAuth'
+import { useIntersectionObserver } from '../hooks/useIntersectionObserver'
 import {
-  useConversationsByProject,
+  useConversationsByProjectInfinite,
   useFavoritedConversations,
   useLocalTopLevelUserMessages,
   useMoveConversationToProject,
@@ -53,12 +55,54 @@ const SIDEBAR_PREVIEW_PORTAL_MIN_WIDTH_PX = 260
 const SIDEBAR_PREVIEW_CLOSE_DELAY_MS = 120
 
 const DATE_FORMATTER = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' })
+const CONVERSATION_SECTION_DATE_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  day: 'numeric',
+  month: 'long',
+})
 
 const formatDate = (value?: string | null) => {
   if (!value) return null
   const parsedDate = new Date(value)
   if (Number.isNaN(parsedDate.getTime())) return null
   return DATE_FORMATTER.format(parsedDate)
+}
+
+const formatConversationSectionDate = (date: Date) => {
+  return CONVERSATION_SECTION_DATE_FORMATTER.format(date)
+}
+
+interface ConversationDateGroup {
+  key: string
+  label: string
+  conversations: Conversation[]
+}
+
+const getConversationDateGroupKey = (date: Date) => {
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
+}
+
+const groupConversationsByUpdatedDate = (conversations: Conversation[]): ConversationDateGroup[] => {
+  const groups: ConversationDateGroup[] = []
+  const groupByKey = new Map<string, ConversationDateGroup>()
+
+  conversations.forEach(conversation => {
+    const parsedDate = new Date(conversation.updated_at)
+    const hasValidDate = !Number.isNaN(parsedDate.getTime())
+    const key = hasValidDate ? getConversationDateGroupKey(parsedDate) : 'unknown-date'
+    const label = hasValidDate ? formatConversationSectionDate(parsedDate) : 'Unknown date'
+    const existingGroup = groupByKey.get(key)
+
+    if (existingGroup) {
+      existingGroup.conversations.push(conversation)
+      return
+    }
+
+    const nextGroup = { key, label, conversations: [conversation] }
+    groupByKey.set(key, nextGroup)
+    groups.push(nextGroup)
+  })
+
+  return groups
 }
 
 const PROJECT_ROW_VISIBILITY_STYLE: React.CSSProperties = {
@@ -69,6 +113,17 @@ const PROJECT_ROW_VISIBILITY_STYLE: React.CSSProperties = {
 const CONVERSATION_ROW_VISIBILITY_STYLE: React.CSSProperties = {
   contentVisibility: 'auto',
   containIntrinsicSize: '44px',
+}
+
+interface SidebarConversationPage {
+  conversations: Conversation[]
+  nextCursor: string | null
+  hasMore: boolean
+}
+
+interface SidebarInfiniteConversationData {
+  pages: SidebarConversationPage[]
+  pageParams: unknown[]
 }
 
 interface ProjectAccordionItemProps {
@@ -122,17 +177,51 @@ const ProjectConversationsPanel: React.FC<ProjectConversationsPanelProps> = memo
     onConversationHoverStart,
     onConversationHoverEnd,
   }) => {
+    const isDarkMode = useHtmlDarkMode()
+    const { theme: customTheme, enabled: customThemeEnabled } = useCustomChatTheme()
     const {
-      data: projectConversations = [],
+      data: projectConversationsData,
       isLoading: projectConversationsLoading,
       error: projectConversationsError,
-    } = useConversationsByProject(projectId)
+      fetchNextPage,
+      hasNextPage,
+      isFetchingNextPage,
+    } = useConversationsByProjectInfinite(projectId)
+
+    const projectConversations = useMemo(
+      () => projectConversationsData?.pages.flatMap(page => page.conversations) ?? [],
+      [projectConversationsData]
+    )
 
     const sortedConversations = useMemo(() => {
       return [...projectConversations].sort(
         (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
       )
     }, [projectConversations])
+
+    const { ref: loadMoreRef, isIntersecting } = useIntersectionObserver<HTMLDivElement>({
+      rootMargin: '120px',
+      enabled: Boolean(hasNextPage) && !isFetchingNextPage,
+    })
+
+    useEffect(() => {
+      if (isIntersecting && hasNextPage && !isFetchingNextPage) {
+        fetchNextPage()
+      }
+    }, [fetchNextPage, hasNextPage, isFetchingNextPage, isIntersecting])
+
+    const conversationDateGroups = useMemo(
+      () => groupConversationsByUpdatedDate(sortedConversations),
+      [sortedConversations]
+    )
+
+    const conversationDateHeaderStyle = useMemo<React.CSSProperties | undefined>(() => {
+      if (!customThemeEnabled) return undefined
+
+      return {
+        color: getThemeModeColor(customTheme.colors.streamingAnimationColor, isDarkMode),
+      }
+    }, [customTheme.colors.streamingAnimationColor, customThemeEnabled, isDarkMode])
 
     return (
       <div className='pb-2 pr-2 pl-8'>
@@ -147,90 +236,102 @@ const ProjectConversationsPanel: React.FC<ProjectConversationsPanelProps> = memo
         )}
         {!projectConversationsLoading &&
           !projectConversationsError &&
-          sortedConversations.map(conversation => {
-            const isActive = String(activeConversationId) === String(conversation.id)
-            const isFavorite = favoriteConversationIds.has(conversation.id)
-            const isPreviewHighlighted =
-              enableConversationHoverPreview &&
-              hoveredPreviewConversationId != null &&
-              String(hoveredPreviewConversationId) === String(conversation.id)
-            const conversationUpdatedDate = formatDate(conversation.updated_at)
-
-            return (
+          conversationDateGroups.map(group => (
+            <div key={group.key}>
               <div
-                key={conversation.id}
-                className='group/conv flex items-start gap-1 mb-1 min-w-0 overflow-hidden'
-                style={CONVERSATION_ROW_VISIBILITY_STYLE}
-                onMouseEnter={() => {
-                  if (!enableConversationHoverPreview) return
-                  onConversationHoverStart?.(conversation)
-                }}
-                onMouseLeave={() => {
-                  if (!enableConversationHoverPreview) return
-                  onConversationHoverEnd?.()
-                }}
+                className='px-2 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-blue-600 dark:text-orange-400'
+                style={conversationDateHeaderStyle}
               >
-                <button
-                  type='button'
-                  onClick={() => onSelectConversation(conversation)}
-                  className={`w-full min-w-0 overflow-hidden text-left rounded-md px-2 py-1.5 text-xs md:text-[11px] lg:text-[12px] transition-colors ${
-                    isActive
-                      ? 'bg-blue-100 dark:bg-neutral-500/40 text-blue-700 dark:text-orange-300'
-                      : isPreviewHighlighted
-                        ? 'text-neutral-700 dark:text-neutral-300 bg-neutral-200/60 dark:bg-neutral-800/70'
-                        : 'text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/70'
-                  }`}
-                >
-                  <div className='min-w-0'>
-                    <div className='truncate'>{conversation.title || 'Untitled conversation'}</div>
-                    {conversationUpdatedDate && (
-                      <div className='text-[10px] text-neutral-500 dark:text-neutral-400 mt-0.5 truncate'>
-                        {conversationUpdatedDate}
-                      </div>
-                    )}
-                  </div>
-                </button>
-                {isElectronMode && (
-                  <Button
-                    variant='outline2'
-                    size='smaller'
-                    rounded='full'
-                    className='mt-0.5 px-1 py-1 shrink-0'
-                    onClick={() => onToggleFavorite(conversation)}
-                    title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                    aria-label={`${isFavorite ? 'Remove' : 'Add'} ${conversation.title || conversation.id} ${isFavorite ? 'from' : 'to'} favorites`}
-                  >
-                    <i
-                      className={`bx ${isFavorite ? 'bxs-star' : 'bx-star'} text-[16px] pointer-events-none group-hover/conv:opacity-100 opacity-0 group-hover/conv:pointer-events-auto group-focus-within/conv:opacity-100 group-focus-within/conv:pointer-events-auto  ${isFavorite ? 'text-yellow-500' : ''}`}
-                      aria-hidden='true'
-                    ></i>
-                  </Button>
-                )}
-                <Button
-                  variant='outline2'
-                  size='smaller'
-                  rounded='full'
-                  className='mt-0.5 px-2 py-1 shrink-0 opacity-0 pointer-events-none group-hover/conv:opacity-100 group-hover/conv:pointer-events-auto group-focus-within/conv:opacity-100 group-focus-within/conv:pointer-events-auto transition-opacity duration-150'
-                  onClick={() => onMoveConversation(conversation)}
-                  title='Conversation actions'
-                  aria-label={`Conversation actions for ${conversation.title || conversation.id}`}
-                >
-                  <i className='bx bx-dots-horizontal-rounded text-lg' aria-hidden='true'></i>
-                </Button>
-                <Button
-                  variant='outline2'
-                  size='smaller'
-                  rounded='full'
-                  className='mt-0.5 px-2 py-1 shrink-0 text-red-500 dark:text-red-400 opacity-0 pointer-events-none group-hover/conv:opacity-100 group-hover/conv:pointer-events-auto group-focus-within/conv:opacity-100 group-focus-within/conv:pointer-events-auto transition-opacity duration-150'
-                  onClick={() => onDeleteConversation(conversation)}
-                  title='Delete conversation'
-                  aria-label={`Delete conversation ${conversation.title || conversation.id}`}
-                >
-                  <i className='bx bx-trash text-lg' aria-hidden='true'></i>
-                </Button>
+                {group.label}
               </div>
-            )
-          })}
+              {group.conversations.map(conversation => {
+                const isActive = String(activeConversationId) === String(conversation.id)
+                const isFavorite = favoriteConversationIds.has(conversation.id)
+                const isPreviewHighlighted =
+                  enableConversationHoverPreview &&
+                  hoveredPreviewConversationId != null &&
+                  String(hoveredPreviewConversationId) === String(conversation.id)
+
+                return (
+                  <div
+                    key={conversation.id}
+                    className='group/conv flex items-start gap-1 mb-1 min-w-0 overflow-hidden'
+                    style={CONVERSATION_ROW_VISIBILITY_STYLE}
+                    onMouseEnter={() => {
+                      if (!enableConversationHoverPreview) return
+                      onConversationHoverStart?.(conversation)
+                    }}
+                    onMouseLeave={() => {
+                      if (!enableConversationHoverPreview) return
+                      onConversationHoverEnd?.()
+                    }}
+                  >
+                    <button
+                      type='button'
+                      onClick={() => onSelectConversation(conversation)}
+                      className={`w-full min-w-0 overflow-hidden text-left rounded-md px-2 py-1.5 text-xs md:text-[11px] lg:text-[12px] transition-colors ${
+                        isActive
+                          ? 'bg-blue-100 dark:bg-neutral-500/40 text-blue-700 dark:text-orange-300'
+                          : isPreviewHighlighted
+                            ? 'text-neutral-700 dark:text-neutral-300 bg-neutral-200/60 dark:bg-neutral-800/70'
+                            : 'text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/70'
+                      }`}
+                    >
+                      <div className='min-w-0'>
+                        <div className='truncate'>{conversation.title || 'Untitled conversation'}</div>
+                      </div>
+                    </button>
+                    {isElectronMode && (
+                      <Button
+                        variant='outline2'
+                        size='smaller'
+                        rounded='full'
+                        className='mt-0.5 px-1 py-1 shrink-0'
+                        onClick={() => onToggleFavorite(conversation)}
+                        title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                        aria-label={`${isFavorite ? 'Remove' : 'Add'} ${conversation.title || conversation.id} ${isFavorite ? 'from' : 'to'} favorites`}
+                      >
+                        <i
+                          className={`bx ${isFavorite ? 'bxs-star' : 'bx-star'} text-[16px] pointer-events-none group-hover/conv:opacity-100 opacity-0 group-hover/conv:pointer-events-auto group-focus-within/conv:opacity-100 group-focus-within/conv:pointer-events-auto  ${isFavorite ? 'text-yellow-500' : ''}`}
+                          aria-hidden='true'
+                        ></i>
+                      </Button>
+                    )}
+                    <Button
+                      variant='outline2'
+                      size='smaller'
+                      rounded='full'
+                      className='mt-0.5 px-2 py-1 shrink-0 opacity-0 pointer-events-none group-hover/conv:opacity-100 group-hover/conv:pointer-events-auto group-focus-within/conv:opacity-100 group-focus-within/conv:pointer-events-auto transition-opacity duration-150'
+                      onClick={() => onMoveConversation(conversation)}
+                      title='Conversation actions'
+                      aria-label={`Conversation actions for ${conversation.title || conversation.id}`}
+                    >
+                      <i className='bx bx-dots-horizontal-rounded text-lg' aria-hidden='true'></i>
+                    </Button>
+                    <Button
+                      variant='outline2'
+                      size='smaller'
+                      rounded='full'
+                      className='mt-0.5 px-2 py-1 shrink-0 text-red-500 dark:text-red-400 opacity-0 pointer-events-none group-hover/conv:opacity-100 group-hover/conv:pointer-events-auto group-focus-within/conv:opacity-100 group-focus-within/conv:pointer-events-auto transition-opacity duration-150'
+                      onClick={() => onDeleteConversation(conversation)}
+                      title='Delete conversation'
+                      aria-label={`Delete conversation ${conversation.title || conversation.id}`}
+                    >
+                      <i className='bx bx-trash text-lg' aria-hidden='true'></i>
+                    </Button>
+                  </div>
+                )
+              })}
+            </div>
+          ))}
+        {!projectConversationsLoading && !projectConversationsError && hasNextPage && (
+          <div ref={loadMoreRef} className='py-2 text-center text-[10px] text-neutral-500 dark:text-neutral-400'>
+            {isFetchingNextPage ? 'Loading more chats...' : 'Load more chats'}
+          </div>
+        )}
+        {!projectConversationsLoading && !projectConversationsError && isFetchingNextPage && !hasNextPage && (
+          <div className='py-2 text-center text-[10px] text-neutral-500 dark:text-neutral-400'>Loading more chats...</div>
+        )}
       </div>
     )
   }
@@ -764,9 +865,11 @@ const SideBar: React.FC<SideBarProps> = ({
     (projectId: string) => {
       const normalizedProjectId = String(projectId)
       const projectConversationsQueryKey = ['conversations', 'project', normalizedProjectId]
+      const projectConversationsInfiniteQueryKey = ['conversations', 'project', normalizedProjectId, 'infinite']
 
       if (!isExpandPortalOpen) {
         queryClient.invalidateQueries({ queryKey: projectConversationsQueryKey, refetchType: 'none' })
+        queryClient.invalidateQueries({ queryKey: projectConversationsInfiniteQueryKey, refetchType: 'none' })
         setExpandedProjectIds(prev => (prev.includes(normalizedProjectId) ? prev : [normalizedProjectId, ...prev]))
         openExpandPortal()
         return
@@ -777,6 +880,7 @@ const SideBar: React.FC<SideBarProps> = ({
 
         if (!isCurrentlyExpanded) {
           queryClient.invalidateQueries({ queryKey: projectConversationsQueryKey, refetchType: 'none' })
+          queryClient.invalidateQueries({ queryKey: projectConversationsInfiniteQueryKey, refetchType: 'none' })
         }
 
         return isCurrentlyExpanded ? prev.filter(id => id !== normalizedProjectId) : [...prev, normalizedProjectId]
@@ -808,6 +912,7 @@ const SideBar: React.FC<SideBarProps> = ({
           previous ? previous.filter(item => String(item.project_id) !== String(project.id)) : previous
         )
         queryClient.removeQueries({ queryKey: ['conversations', 'project', project.id] })
+        queryClient.removeQueries({ queryKey: ['conversations', 'project', project.id, 'infinite'] })
 
         queryClient.invalidateQueries({ queryKey: ['projects'] })
         queryClient.invalidateQueries({ queryKey: ['conversations'] })
@@ -834,6 +939,19 @@ const SideBar: React.FC<SideBarProps> = ({
 
         queryClient.setQueryData<Conversation[]>(['conversations', 'project', conversation.project_id], previous =>
           previous ? previous.filter(item => String(item.id) !== String(conversation.id)) : previous
+        )
+        queryClient.setQueryData<SidebarInfiniteConversationData>(
+          ['conversations', 'project', conversation.project_id, 'infinite'],
+          previous =>
+            previous
+              ? {
+                  ...previous,
+                  pages: previous.pages.map(page => ({
+                    ...page,
+                    conversations: page.conversations.filter(item => String(item.id) !== String(conversation.id)),
+                  })),
+                }
+              : previous
         )
         queryClient.setQueryData<Conversation[]>(['conversations'], previous =>
           previous ? previous.filter(item => String(item.id) !== String(conversation.id)) : previous
@@ -963,6 +1081,31 @@ const SideBar: React.FC<SideBarProps> = ({
           const previousItems = previous || []
           return [createdConversation, ...previousItems.filter(item => item.id !== createdConversation.id)]
         })
+        queryClient.setQueryData<SidebarInfiniteConversationData>(
+          ['conversations', 'project', project.id, 'infinite'],
+          previous => {
+            if (!previous || previous.pages.length === 0) {
+              return {
+                pages: [{ conversations: [createdConversation], nextCursor: null, hasMore: false }],
+                pageParams: [undefined],
+              }
+            }
+
+            return {
+              ...previous,
+              pages: [
+                {
+                  ...previous.pages[0],
+                  conversations: [
+                    createdConversation,
+                    ...previous.pages[0].conversations.filter(item => item.id !== createdConversation.id),
+                  ],
+                },
+                ...previous.pages.slice(1),
+              ],
+            }
+          }
+        )
 
         queryClient.setQueryData<Conversation[]>(['conversations'], previous => {
           const previousItems = previous || []

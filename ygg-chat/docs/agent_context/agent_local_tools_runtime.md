@@ -47,6 +47,7 @@ Use this when changing:
 
 - On Windows/Electron, Bash may route through WSL/path conversion; PowerShell may be required for native paths.
 - `edit_file` uses layered matching and line hints; preserve validation semantics.
+- `edit_file` and `multi_edit` in execute mode create managed per-stream undo backups through `streamUndoManager`; keep local-server and utility-runtime registration behavior aligned.
 - Tests may depend on temporary filesystem harnesses in `electron/tools/__tests__/helpers`.
 
 ## Testing and Validation

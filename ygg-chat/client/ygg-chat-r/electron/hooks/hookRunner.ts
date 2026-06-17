@@ -313,8 +313,9 @@ async function loadHookEntriesForEvent(event: HookEventName, cwd: string | null 
   logHookRunner('loading hook entries for event', { event, cwd, searchCwd, settingsFiles })
 
   for (const settingsFile of settingsFiles) {
+    let raw: string | null = null
     try {
-      const raw = await fs.promises.readFile(settingsFile, 'utf8')
+      raw = await fs.promises.readFile(settingsFile, 'utf8')
       const parsed = JSON.parse(raw)
       if (!isRecord(parsed) || !isRecord(parsed.hooks)) {
         logHookRunner('settings file has no hooks object', { settingsFile })
@@ -329,7 +330,10 @@ async function loadHookEntriesForEvent(event: HookEventName, cwd: string | null 
       })
       entries.push(...eventEntries)
     } catch (error) {
-      console.warn(`[HookRunner] Failed to load ${settingsFile}:`, error)
+      const details = raw === null
+        ? { settingsFile, error }
+        : { settingsFile, byteLength: Buffer.byteLength(raw, 'utf8'), error }
+      console.warn(`[HookRunner] Failed to load ${settingsFile}:`, details)
     }
   }
 

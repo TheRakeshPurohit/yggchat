@@ -34,6 +34,20 @@ type SettingsPaneProps = {
   onClose: () => void
 }
 
+type StreamingThinkingIndicatorPlacement = 'message' | 'input-tab'
+
+const STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY = 'chat:streamingThinkingIndicatorPlacement'
+const STREAMING_THINKING_INDICATOR_PLACEMENT_CHANGE_EVENT = 'streamingThinkingIndicatorPlacementChange'
+
+const getStoredStreamingThinkingIndicatorPlacement = (): StreamingThinkingIndicatorPlacement => {
+  try {
+    const stored = localStorage.getItem(STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY)
+    return stored === 'input-tab' ? 'input-tab' : 'message'
+  } catch {
+    return 'message'
+  }
+}
+
 type ThemeListItem = {
   id: string
   fileName: string
@@ -291,6 +305,9 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
     }
   })
 
+  const [streamingThinkingIndicatorPlacement, setStreamingThinkingIndicatorPlacement] =
+    useState<StreamingThinkingIndicatorPlacement>(getStoredStreamingThinkingIndicatorPlacement)
+
   const [longTermMemoryContextEnabled, setLongTermMemoryContextEnabled] = useState<boolean>(() =>
     loadLongTermMemoryContextEnabled()
   )
@@ -325,6 +342,21 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
     }
     document.documentElement.classList.toggle('edit-diff-animations-disabled', !enabled)
   }, [])
+
+  const handleStreamingThinkingIndicatorPlacementChange = useCallback(
+    (placement: StreamingThinkingIndicatorPlacement) => {
+      setStreamingThinkingIndicatorPlacement(placement)
+      try {
+        localStorage.setItem(STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY, placement)
+        window.dispatchEvent(
+          new CustomEvent(STREAMING_THINKING_INDICATOR_PLACEMENT_CHANGE_EVENT, { detail: placement })
+        )
+      } catch {
+        // localStorage unavailable; keep in-memory state only
+      }
+    },
+    []
+  )
 
   const handleLongTermMemoryContextEnabledChange = useCallback((enabled: boolean) => {
     setLongTermMemoryContextEnabled(enabled)
@@ -1717,6 +1749,91 @@ ${block}`
                       }
                     ></i>
                   </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Streaming Thinking Indicator Section */}
+            <div className='space-y-2'>
+              <div
+                className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
+                style={
+                  savedCustomThemesColors
+                    ? {
+                        backgroundColor: savedCustomThemesColors.cardBg,
+                        borderColor: savedCustomThemesColors.cardBorder,
+                      }
+                    : undefined
+                }
+              >
+                <div className='flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-start sm:justify-between'>
+                  <div className='flex min-w-0 items-start gap-3'>
+                    <div
+                      className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300'
+                      style={
+                        savedCustomThemesColors
+                          ? {
+                              backgroundColor: savedCustomThemesColors.accentBg,
+                              color: savedCustomThemesColors.accentText,
+                            }
+                          : undefined
+                      }
+                    >
+                      <i className='bx bx-loader-circle text-lg' />
+                    </div>
+                    <div className='min-w-0 pr-3'>
+                      <p
+                        className='text-sm font-medium text-stone-700 dark:text-neutral-100'
+                        style={savedCustomThemesColors ? { color: savedCustomThemesColors.titleText } : undefined}
+                      >
+                        Streaming thinking indicator
+                      </p>
+                      <p
+                        className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-100'
+                        style={savedCustomThemesColors ? { color: savedCustomThemesColors.bodyText } : undefined}
+                      >
+                        Choose where the animated thinking text appears while a response is running.
+                      </p>
+                    </div>
+                  </div>
+                  <div className='flex shrink-0 flex-wrap items-center gap-2'>
+                    {(
+                      [
+                        { value: 'message' as const, label: 'Message row' },
+                        { value: 'input-tab' as const, label: 'Input tab' },
+                      ]
+                    ).map(option => {
+                      const selected = streamingThinkingIndicatorPlacement === option.value
+                      return (
+                        <button
+                          key={option.value}
+                          type='button'
+                          onClick={() => handleStreamingThinkingIndicatorPlacementChange(option.value)}
+                          className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-all duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:focus-visible:ring-violet-500/40 ${
+                            selected
+                              ? 'bg-blue-500 text-white shadow-sm'
+                              : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200 dark:bg-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-700'
+                          }`}
+                          style={
+                            savedCustomThemesColors
+                              ? selected
+                                ? {
+                                    backgroundColor: savedCustomThemesColors.primaryButtonBg,
+                                    color: savedCustomThemesColors.primaryButtonText,
+                                  }
+                                : {
+                                    backgroundColor: savedCustomThemesColors.buttonBg,
+                                    color: savedCustomThemesColors.buttonText,
+                                  }
+                              : undefined
+                          }
+                          aria-pressed={selected}
+                        >
+                          {option.label}
+                        </button>
+                      )
+                    })}
+                  </div>
                 </div>
               </div>
             </div>

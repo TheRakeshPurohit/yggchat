@@ -237,3 +237,78 @@ describeIfSqlite('ToolLoopService', () => {
     )
   })
 })
+
+
+describeIfSqlite('ToolLoopService model-facing tool result sanitization', () => {
+  let db: Database.Database
+  let statements: any
+  let messageRepo: MessageRepo
+
+  beforeEach(() => {
+    if (!BetterSqlite3Ctor) {
+      throw new Error('better-sqlite3 is unavailable in this runtime')
+    }
+
+    db = new BetterSqlite3Ctor(':memory:')
+    createSchema(db)
+    statements = createStatements(db)
+
+    const now = new Date().toISOString()
+    statements.upsertConversation.run('c1', null, 'u1', 'Conversation', 'gpt-5.1-codex-mini', null, null, null, null, 'local', now, now)
+
+    messageRepo = new MessageRepo({ db, statements })
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  it('keeps raw plan_md display content persisted while sending only modelContent to continuation history', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({
+      content: '',
+      toolCalls: [{ id: 'call-plan', name: 'plan_md', arguments: { action: 'display', name: 'sample-plan' } }],
+      contentBlocks: [{ type: 'tool_use', id: 'call-plan', name: 'plan_md', input: { action: 'display', name: 'sample-plan' } }],
+    })
+    providerRouter.enqueue({ content: 'Plan displayed above' })
+
+    const rawToolResult = {
+      displayed: true,
+      exists: true,
+      name: 'sample-plan',
+      content: '# Long plan\n\nThis should be rendered but not sent back to the model.',
+      modelContent: 'Plan "sample-plan" was displayed to the user in the chat view. Do not repeat the plan unless the user asks.',
+    }
+
+    const service = new ToolLoopService({
+      messageRepo,
+      providerRouter: providerRouter as unknown as ProviderRouter,
+      executeTool: async () => rawToolResult,
+      maxTurns: 4,
+    })
+
+    await service.run({
+      provider: 'openaichatgpt',
+      modelName: 'gpt-5.1-codex-mini',
+      conversationId: 'c1',
+      assistantParentId: null,
+      history: [],
+      userContent: 'display the plan',
+    })
+
+    const messages = statements.getMessagesByConversationId.all('c1') as any[]
+    const firstAssistant = messages.find((msg: any) => msg.role === 'assistant' && msg.content === '')
+    const firstBlocks = JSON.parse(firstAssistant.content_blocks || '[]') as any[]
+    const persistedToolResult = firstBlocks.find((block: any) => block.type === 'tool_result' && block.tool_use_id === 'call-plan')
+    expect(JSON.parse(persistedToolResult.content).content).toContain('# Long plan')
+
+    expect(providerRouter.calls).toHaveLength(2)
+    const continuationToolMessage = providerRouter.calls[1].input.history.find(
+      (entry: any) => entry.role === 'tool' && entry.tool_call_id === 'call-plan'
+    )
+    expect(continuationToolMessage.content).toBe(
+      'Plan "sample-plan" was displayed to the user in the chat view. Do not repeat the plan unless the user asks.'
+    )
+    expect(continuationToolMessage.content).not.toContain('# Long plan')
+  })
+})

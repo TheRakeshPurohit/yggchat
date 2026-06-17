@@ -31,6 +31,7 @@ export interface HeadlessMessageRequest {
   rootPath?: string | null
   operationMode?: 'plan' | 'execute'
   includeOperationModePrompt?: boolean
+  planModeVerbosity?: 'concise' | 'normal' | 'detailed'
   streamId?: string | null
   toolTimeoutMs?: number
 }
@@ -43,6 +44,7 @@ export type HeadlessStreamEvent =
       parentId: string | null
       provider: string
       modelName: string
+      streamId?: string | null
     }
   | { type: 'user_message_persisted'; message: any }
   | { type: 'provider_routed'; provider: string; modelName: string }

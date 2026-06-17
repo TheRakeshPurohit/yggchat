@@ -401,6 +401,7 @@ export function useConversationsByProject(projectId: ProjectId | null, enabled: 
  */
 export function useConversationsByProjectInfinite(projectId: ProjectId | null) {
   const { accessToken, userId } = useAuth()
+  const queryClient = useQueryClient()
 
   return useInfiniteQuery({
     queryKey: ['conversations', 'project', projectId, 'infinite'],
@@ -412,33 +413,37 @@ export function useConversationsByProjectInfinite(projectId: ProjectId | null) {
         params.set('cursor', pageParam)
       }
 
-      // Electron community mode with local project conversations
-      if (isElectronCommunityMode()) {
-        const localConversations = await localApi.get<Conversation[]>(
-          `/app/conversations?userId=${userId}&projectId=${projectId}`
-        )
-
-        if (!pageParam) {
-          const merged = [...localConversations].sort(
-            (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-          )
-          return {
-            conversations: merged.slice(0, PAGE_SIZE),
-            nextCursor: null,
-            hasMore: merged.length > PAGE_SIZE,
-          }
-        }
-
-        return {
-          conversations: [],
-          nextCursor: null,
-          hasMore: false,
-        }
+      const localParams = new URLSearchParams({
+        userId: userId || '',
+        projectId: String(projectId),
+        limit: String(PAGE_SIZE),
+      })
+      if (pageParam) {
+        localParams.set('cursor', pageParam)
       }
 
-      // Electron mode with local + cloud project conversations
+      if (isElectronCommunityMode()) {
+        return localApi.get<PaginatedConversationsResponse>(`/app/conversations?${localParams.toString()}`)
+      }
+
       if (environment === 'electron') {
-        const [cloudResult, localConversations] = await Promise.all([
+        const cachedProjects = userId
+          ? queryClient.getQueryData<ProjectWithLatestConversation[]>(['projects', userId])
+          : undefined
+        const cachedProject = cachedProjects?.find(project => String(project.id) === String(projectId))
+
+        if (cachedProject?.storage_mode === 'local') {
+          return localApi.get<PaginatedConversationsResponse>(`/app/conversations?${localParams.toString()}`)
+        }
+
+        if (cachedProject?.storage_mode === 'cloud') {
+          return api.get<PaginatedConversationsResponse>(
+            `/conversations/project/${projectId}/paginated?${params.toString()}`,
+            accessToken
+          )
+        }
+
+        const [cloudResult, localResult] = await Promise.all([
           api
             .get<PaginatedConversationsResponse>(
               `/conversations/project/${projectId}/paginated?${params.toString()}`,
@@ -448,24 +453,20 @@ export function useConversationsByProjectInfinite(projectId: ProjectId | null) {
               console.error('Failed to fetch cloud project conversations:', err)
               return { conversations: [], nextCursor: null, hasMore: false }
             }),
-          localApi.get<Conversation[]>(`/app/conversations?userId=${userId}&projectId=${projectId}`).catch(err => {
+          localApi.get<PaginatedConversationsResponse>(`/app/conversations?${localParams.toString()}`).catch(err => {
             console.error('Failed to fetch local project conversations:', err)
-            return []
+            return { conversations: [], nextCursor: null, hasMore: false }
           }),
         ])
+        const conversations = [...localResult.conversations, ...cloudResult.conversations].sort(
+          (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+        )
 
-        if (!pageParam) {
-          const merged = [...localConversations, ...cloudResult.conversations].sort(
-            (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-          )
-          return {
-            conversations: merged.slice(0, PAGE_SIZE),
-            nextCursor: cloudResult.nextCursor,
-            hasMore: cloudResult.hasMore || merged.length > PAGE_SIZE,
-          }
+        return {
+          conversations,
+          nextCursor: localResult.hasMore ? localResult.nextCursor : cloudResult.nextCursor,
+          hasMore: localResult.hasMore || cloudResult.hasMore,
         }
-
-        return cloudResult
       }
 
       return api.get<PaginatedConversationsResponse>(

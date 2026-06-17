@@ -4,7 +4,7 @@ Last reviewed: 2026-06-16
 
 This directory contains subsystem-specific context files for agents working in `ygg-chat`.
 
-Start here, then open the smallest relevant `agent_{section}.md` file before editing code. These docs are intentionally operational: they point to entry files, runtime constraints, data flow, invariants, and validation commands.
+Start here, then open the smallest relevant subsystem context file before editing code. These docs are intentionally operational: they point to entry files, runtime constraints, data flow, invariants, and validation commands.
 
 ## Core
 
@@ -35,24 +35,19 @@ Start here, then open the smallest relevant `agent_{section}.md` file before edi
 - `agent_electron_main_local_server.md` - Electron main/preload/local Express server responsibilities.
 - `agent_html_iframe_apps.md` - custom app iframe rendering, bridge permissions, HTML cache.
 - `agent_hooks_system.md` - Ygg hook lifecycle, hook runner, sync/async execution, model feedback.
+- `agent_floating_agent_button_design.md` - floating agent/app button animation, shell layout, inline stream-completion notifications, and reusable compact-to-expanded design pattern.
+
+## Design
+
+- `agent_design.md` - shared UI design patterns, including the circular Lucide glass control-button style used by Heimdall.
 
 ## Coverage Notes
 
-This MVP set deliberately covers the highest-risk agent-editing surfaces first. Additional good follow-up files include:
+This MVP set deliberately covers the highest-risk agent-editing surfaces first. The compaction and memory surface is covered by:
 
-- `agent_branching_conversations.md`
-- `agent_projects_conversations_messages.md`
-- `agent_providers_models.md`
-- `agent_auth_provider_tokens.md`
-- `agent_mcp.md`
-- `agent_subagents_orchestration.md`
-- `agent_local_storage_sync.md`
-- `agent_frontend_app_shell.md`
-- `agent_settings_preferences.md`
-- `agent_theme_ui_system.md`
-- `agent_ide_lsp_context.md`
-- `agent_workspace_mutations.md`
 - `agent_context_compaction_memory.md`
+
+Potential future context topics that do not yet have dedicated files in this checkout include branching conversations, projects/conversations/messages, providers/models, auth/provider tokens, MCP, subagents orchestration, local storage sync, frontend app shell, settings/preferences, theme UI, IDE/LSP context, and workspace mutations.
 
 ## Maintenance Rules
 

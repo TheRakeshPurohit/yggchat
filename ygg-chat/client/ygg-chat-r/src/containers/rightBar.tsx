@@ -353,6 +353,7 @@ const DOCKED_EDITOR_DEFAULT_WIDTH_PX = 720
 const DOCKED_TOTAL_WIDTH_RATIO = 0.9
 const DOCKED_LAYOUT_GAP_PX = 8
 const DOCKED_CHAT_MIN_WIDTH_PX = 580
+const RIGHT_BAR_EXPANDED_CONTENT_DEFER_MS = 320
 
 const PRESET_CONFIGS: Array<{
   key: GlobalAgentSchedulePreset
@@ -391,9 +392,17 @@ const RightBar: React.FC<RightBarProps> = ({
   const [fileSearchQuery, setFileSearchQuery] = useState('')
   const [debouncedFileSearchQuery, setDebouncedFileSearchQuery] = useState('')
   const [followGitignore, setFollowGitignore] = useState(true)
-  const { data: directoryData, isLoading: isLoadingFiles, error: filesError } = useDirectoryFiles(currentPath || null)
-  const fileSearchBasePath = ccCwd || currentPath || null
-  const activeFileSearchQuery = debouncedFileSearchQuery.trim()
+  const initialTerminalDockState = useMemo(() => loadTerminalDockState(), [])
+  const isCollapsed = useSelector((state: RootState) => state.ui.rightBarCollapsed)
+  const rightBarWidth = useSelector((state: RootState) => state.ui.rightBarWidth)
+  const [isExpandedContentReady, setIsExpandedContentReady] = useState(() => !isCollapsed)
+  const shouldRenderExpandedContent = !isCollapsed && isExpandedContentReady
+  const shouldLoadFileBrowser = shouldRenderExpandedContent && !!ccCwd
+  const { data: directoryData, isLoading: isLoadingFiles, error: filesError } = useDirectoryFiles(
+    shouldLoadFileBrowser ? currentPath || null : null
+  )
+  const fileSearchBasePath = shouldLoadFileBrowser ? ccCwd || currentPath || null : null
+  const activeFileSearchQuery = shouldLoadFileBrowser ? debouncedFileSearchQuery.trim() : ''
   const isFileSearchMode = activeFileSearchQuery.length > 0
   const {
     data: fileSearchData,
@@ -403,9 +412,6 @@ const RightBar: React.FC<RightBarProps> = ({
   } = useDirectoryFileSearch(fileSearchBasePath, activeFileSearchQuery, followGitignore, 200)
   const displayedDirectoryFiles = isFileSearchMode ? fileSearchData?.files || [] : directoryData?.files || []
   const isSearchingFiles = isLoadingFileSearch || isFetchingFileSearch
-  const initialTerminalDockState = useMemo(() => loadTerminalDockState(), [])
-  const isCollapsed = useSelector((state: RootState) => state.ui.rightBarCollapsed)
-  const rightBarWidth = useSelector((state: RootState) => state.ui.rightBarWidth)
   const extensionConnected = useSelector((state: RootState) => state.ideContext.extensionConnected)
   const hasConnectedIdeExtensions = useSelector((state: RootState) =>
     state.ideContext.extensions.some(extension => extension.isConnected)
@@ -490,8 +496,23 @@ const RightBar: React.FC<RightBarProps> = ({
     openGitDiffTabs.length > 0 ||
     openTerminalTabs.length > 0 ||
     openBrowserTabs.length > 0
-  const isEditorDockOpen = !isCollapsed && hasDockTabs && !!activeDockTabId
+  const isEditorDockOpen = shouldRenderExpandedContent && hasDockTabs && !!activeDockTabId
   const monacoTheme = isDarkMode ? 'vs-dark' : 'vs'
+
+  useEffect(() => {
+    if (isCollapsed) {
+      setIsExpandedContentReady(false)
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setIsExpandedContentReady(true)
+    }, RIGHT_BAR_EXPANDED_CONTENT_DEFER_MS)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [isCollapsed])
 
   useEffect(() => {
     openFileEditorsRef.current = openFileEditors
@@ -612,7 +633,7 @@ const RightBar: React.FC<RightBarProps> = ({
     if (maxDockOverlayWidth <= 0) return 0
     return Math.max(minDockOverlayWidth, Math.min(DOCKED_EDITOR_DEFAULT_WIDTH_PX, maxDockOverlayWidth))
   }, [maxDockOverlayWidth, minDockOverlayWidth])
-  const shouldMountDockOverlay = hasDockTabs && maxDockOverlayWidth > 0
+  const shouldMountDockOverlay = shouldRenderExpandedContent && hasDockTabs && maxDockOverlayWidth > 0
   const dockOverlayWidthPx = useMemo(() => {
     if (!shouldMountDockOverlay) return 0
     const baseWidth = dockedLayoutWidth == null ? defaultDockOverlayWidth : dockedLayoutWidth
@@ -804,13 +825,17 @@ const RightBar: React.FC<RightBarProps> = ({
     isLoading: isLoadingGitOverview,
     isFetching: isFetchingGitOverview,
     refetch: refetchGitOverview,
-  } = useGitOverview(gitBasePath, isGitTabAvailable && activeTab === 'git' && !isCollapsed)
+  } = useGitOverview(gitBasePath, isGitTabAvailable && activeTab === 'git' && shouldRenderExpandedContent)
   const selectedGitStatusFile = useMemo(
     () => gitOverviewData?.status.all.find(file => file.relativePath === selectedGitDiff?.relativePath) ?? null,
     [gitOverviewData?.status.all, selectedGitDiff?.relativePath]
   )
   const shouldLoadGitDiff =
-    isGitTabAvailable && !isCollapsed && !!gitBasePath && !!activeGitDiffTab?.relativePath && !!activeDockTabId
+    isGitTabAvailable &&
+    shouldRenderExpandedContent &&
+    !!gitBasePath &&
+    !!activeGitDiffTab?.relativePath &&
+    !!activeDockTabId
   const {
     data: gitDiffData,
     isLoading: isLoadingGitDiff,
@@ -843,18 +868,20 @@ const RightBar: React.FC<RightBarProps> = ({
     endDate: '',
     allowedWeekdays: [...ALL_WEEKDAYS],
   })
+  const shouldLoadGlobalAgentPanel = shouldRenderExpandedContent && activeTab === 'global'
+
   // Use React Query hooks for agent messages
-  const { data: agentData } = useGlobalAgentMessages()
+  const { data: agentData } = useGlobalAgentMessages(shouldLoadGlobalAgentPanel)
   const agentMessages = agentData?.messages || []
   const agentConversationDate = agentData?.conversationDate
     ? new Date(agentData.conversationDate).toLocaleDateString()
     : null
 
   // Subscribe to live streaming updates (triggers re-render on stream buffer changes)
-  const agentStreamBuffer = useGlobalAgentStreamBuffer()
-  const optimisticMessage = useGlobalAgentOptimisticMessage()
+  const agentStreamBuffer = useGlobalAgentStreamBuffer(shouldLoadGlobalAgentPanel)
+  const optimisticMessage = useGlobalAgentOptimisticMessage(shouldLoadGlobalAgentPanel)
   const isAgentStreaming = Boolean(agentStreamBuffer) || Boolean(agentState.streamId)
-  const scheduleModalVisible = scheduleModalOpen && !isCollapsed && activeTab === 'global'
+  const scheduleModalVisible = scheduleModalOpen && shouldLoadGlobalAgentPanel
   const {
     data: queuedTasksData,
     isLoading: isLoadingQueuedTasks,
@@ -2648,7 +2675,7 @@ const RightBar: React.FC<RightBarProps> = ({
   return (
     <aside
       ref={asideRef}
-      className={`relative z-10 ${isWeb ? 'h-[100vh]' : 'h-full'} flex flex-col ${isEditorDockOpen ? 'overflow-visible' : 'overflow-hidden'} bg-transparent dark:bg-transparent flex-shrink-0 ${isResizingSidebar ? 'transition-none' : 'transition-all duration-300 ease-in-out'} ${className}`}
+      className={`relative z-10 ${isWeb ? 'h-[100vh]' : 'h-full'} flex flex-col ${isEditorDockOpen ? 'overflow-visible' : 'overflow-hidden'} bg-transparent dark:bg-transparent flex-shrink-0 ${isResizingSidebar ? 'transition-none' : 'transition-[width,flex-basis] duration-300 ease-in-out'} ${className}`}
       style={{
         width: `${asideWidthPx}px`,
         maxWidth: '100%',
@@ -2714,7 +2741,7 @@ const RightBar: React.FC<RightBarProps> = ({
                 ></i>
               </Button>
 
-              {!isCollapsed && !isEditorDockOpen && (
+              {shouldRenderExpandedContent && !isEditorDockOpen && (
                 <div className='flex flex-wrap items-center gap-2'>
                   {hasDockTabs ? (
                     <span className='leading-none rounded-[18px] py-2 px-3.5 bg-neutral-50 font-semibold text-[22px] text-neutral-600 dark:text-neutral-200 acrylic-ultra-light-nb-3'>
@@ -2728,7 +2755,7 @@ const RightBar: React.FC<RightBarProps> = ({
               )}
             </div>
 
-            {/* {!isCollapsed && (
+            {/* {shouldRenderExpandedContent && (
           <h2 className='leading-none text-[14px] md:text-[16px] lg:text-[16px] xl:text-[16px] 2xl:text-[18px] 3xl:text-[20px] 4xl:text-[22px] rounded-[18px] py-2 px-2.5 font-semibold text-neutral-700 dark:text-neutral-200 truncate bg-neutral-50 acrylic-ultra-light-nb-3'>
             Explorer
           </h2>
@@ -2888,7 +2915,7 @@ const RightBar: React.FC<RightBarProps> = ({
           }
         >
           {/* File browser - show when ccCwd is set and expanded */}
-          {!isCollapsed && ccCwd && (
+          {shouldRenderExpandedContent && ccCwd && (
             <div className='min-w-0 flex-1 min-h-0 flex flex-col overflow-hidden px-2 pb-2 border-b border-neutral-200 dark:border-neutral-800'>
               {/* Path header with navigation */}
               <div className='flex min-w-0 items-center gap-2 mb-2 flex-shrink-0 overflow-hidden'>
@@ -3064,7 +3091,7 @@ const RightBar: React.FC<RightBarProps> = ({
           )}
 
           {/* Tab buttons - only show when expanded */}
-          {!isCollapsed && (
+          {shouldRenderExpandedContent && (
             <div className='flex min-w-0 gap-2 overflow-hidden px-3 py-2 flex-shrink-0'>
               {!isWeb && (
                 <button
@@ -3118,7 +3145,7 @@ const RightBar: React.FC<RightBarProps> = ({
 
           {/* Content Area */}
           <div
-            className={`${!isCollapsed && ccCwd ? 'flex-1' : 'flex-1'} min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-2 pt-2 2xl:pt-2 no-scrollbar scroll-fade dark:border-neutral-800 rounded-xl border-t-0`}
+            className={`${shouldRenderExpandedContent && ccCwd ? 'flex-1' : 'flex-1'} min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-2 pt-2 2xl:pt-2 no-scrollbar scroll-fade dark:border-neutral-800 rounded-xl border-t-0`}
             data-heimdall-wheel-exempt='true'
             data-heimdall-contextmenu-exempt='true'
           >
@@ -3164,6 +3191,8 @@ const RightBar: React.FC<RightBarProps> = ({
                   </Button>
                 )}
               </div>
+            ) : !shouldRenderExpandedContent ? (
+              <div className='h-full min-h-0' aria-hidden='true' />
             ) : activeTab === 'git' ? (
               !gitBasePath ? (
                 <div className='text-xs text-neutral-500 dark:text-neutral-400 px-2 py-1'>

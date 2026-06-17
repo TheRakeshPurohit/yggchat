@@ -50,6 +50,7 @@ import { DEFAULT_COMPACTION_SYSTEM_PROMPT, loadProviderSettings } from '../../he
 import { getDefaultBashTimeoutMs, getDefaultToolCallTimeoutMs } from '../../helpers/toolExecutionSettings'
 import { updateToolEnabledState } from '../../helpers/toolSettingsStorage'
 import { generateStreamId, inferStreamTypeFromId, STREAM_PRUNE_DELAY } from './streamHelpers'
+import { createStreamingRun, finishStreamingRun } from './streamRunTracking'
 import {
   assertToolAllowedForOperationMode,
   buildOperationModeSystemPrompt,
@@ -74,6 +75,11 @@ import {
   executeSimpleSubagentCall,
   executeSubagentCall,
 } from './subagentRuntime'
+import {
+  fetchConversationUndoSummaries,
+  markStreamUndoFinalMessage,
+  restoreStreamUndo as restoreStreamUndoApi,
+} from './streamUndoApi'
 
 // TODO: Import when conversations feature is available
 // import { conversationActions } from '../conversations'
@@ -94,6 +100,31 @@ const CUSTOM_TOOL_MANAGER_BYPASS_ACTIONS = new Set([
   'reload',
   'settings',
 ])
+
+const resolveToolUndoParentMessageId = (params: {
+  userMessage?: Pick<Message, 'id' | 'role'> | null
+  currentTurnHistory?: Array<Pick<Message, 'id' | 'role' | 'parent_id'> | null | undefined>
+  assistantMessage?: Pick<Message, 'id' | 'role' | 'parent_id'> | null
+  fallbackParentId?: MessageId | string | null
+}): string | undefined => {
+  const directUserId = params.userMessage?.role === 'user' && params.userMessage.id != null ? String(params.userMessage.id) : null
+  if (directUserId) return directUserId
+
+  if (Array.isArray(params.currentTurnHistory)) {
+    for (let index = params.currentTurnHistory.length - 1; index >= 0; index -= 1) {
+      const message = params.currentTurnHistory[index]
+      if (message?.role === 'user' && message.id != null) return String(message.id)
+    }
+  }
+
+  const assistantParentId = params.assistantMessage?.parent_id != null ? String(params.assistantMessage.parent_id) : null
+  if (assistantParentId) {
+    const parentInTurn = params.currentTurnHistory?.find(message => message?.id != null && String(message.id) === assistantParentId)
+    if (!parentInTurn || parentInTurn.role === 'user') return assistantParentId
+  }
+
+  return params.fallbackParentId != null ? String(params.fallbackParentId) : undefined
+}
 
 const getToolCallArgsObject = (toolCall: any): Record<string, any> | null => {
   const rawArgs = toolCall?.arguments
@@ -443,6 +474,65 @@ const getDraftsForTarget = (
     if (draftTarget.kind !== 'branch' || String(draftTarget.messageId) !== String(target.messageId)) return []
   }
   return state.chat.composition.imageDrafts || []
+}
+
+type LocalAttachmentDraft = { dataUrl: string; name?: string; type?: string; size?: number }
+
+const persistMessageToLocalForAttachments = async ({
+  message,
+  conversationId,
+  storageMode,
+  userId,
+  projectId,
+  contextLabel,
+}: {
+  message: any
+  conversationId: ConversationId
+  storageMode?: string | null
+  userId?: string | null
+  projectId?: string | null
+  contextLabel: string
+}): Promise<boolean> => {
+  try {
+    await localApi.post('/sync/message', {
+      ...message,
+      conversation_id: conversationId,
+      children_ids: message.children_ids || [],
+      content_blocks: message.content_blocks || [],
+      tool_calls: message.tool_calls || [],
+      user_id: userId,
+      owner_id: userId,
+      project_id: projectId || null,
+      storage_mode: storageMode,
+    })
+    return true
+  } catch (err) {
+    console.error(`[${contextLabel}] Failed to sync user message locally:`, err)
+    return false
+  }
+}
+
+const saveLocalBase64AttachmentsForMessage = async ({
+  messageId,
+  attachments,
+  storageMode,
+  contextLabel,
+}: {
+  messageId: MessageId
+  attachments: LocalAttachmentDraft[] | null
+  storageMode?: string | null
+  contextLabel: string
+}): Promise<void> => {
+  if (storageMode !== 'local' || !attachments || attachments.length === 0) return
+
+  try {
+    await localApi.post('/local/attachments/save-base64', {
+      messageId,
+      attachments,
+    })
+  } catch (err) {
+    console.error(`[${contextLabel}] Failed to save local attachments:`, err)
+  }
 }
 
 const updateMessageArtifactsInCache = (
@@ -817,8 +907,29 @@ const extractViewImagePayload = (content: any): { imageUrl: string; detail?: 'hi
   return { imageUrl, detail: rawDetail === 'original' ? 'original' : 'high' }
 }
 
+const extractPlanModelContent = (content: any, toolName?: string | null): string | null => {
+  const normalizedToolName = typeof toolName === 'string' ? toolName.trim() : ''
+  if (normalizedToolName !== 'plan_md') return null
+
+  let resolved = content
+  if (typeof resolved === 'string') {
+    try {
+      resolved = JSON.parse(resolved.trim())
+    } catch {
+      return null
+    }
+  }
+
+  if (!resolved || typeof resolved !== 'object') return null
+  const modelContent = (resolved as any).modelContent
+  return typeof modelContent === 'string' && modelContent.trim() ? modelContent : null
+}
+
 const sanitizeToolResultContentForModel = (content: any, toolName?: string | null): any => {
   const normalizedToolName = typeof toolName === 'string' ? toolName.trim() : ''
+  const planModelContent = extractPlanModelContent(content, normalizedToolName)
+  if (planModelContent) return planModelContent
+
   if (normalizedToolName === 'view_image') {
     const viewImage = extractViewImagePayload(content)
     if (viewImage) {
@@ -832,6 +943,16 @@ const sanitizeToolResultContentForModel = (content: any, toolName?: string | nul
     return `displaying ${resolvedName || 'custom tool'} ui now`
   }
   return content
+}
+
+const stringifyToolResultContentForModel = (content: any, toolName?: string | null): string => {
+  const sanitizedContent = sanitizeToolResultContentForModel(content, toolName ?? null)
+  if (typeof sanitizedContent === 'string') return sanitizedContent
+  try {
+    return JSON.stringify(sanitizedContent ?? null)
+  } catch {
+    return String(sanitizedContent)
+  }
 }
 
 const sanitizeContentBlocksForModel = (
@@ -1865,6 +1986,7 @@ export const executeLocalTool = async (
   context?: {
     conversationId?: string
     messageId?: string
+    parentMessageId?: string
     streamId?: string
     priority?: 'low' | 'normal' | 'high' | 'critical'
     timeoutMs?: number
@@ -1905,6 +2027,7 @@ export const executeLocalTool = async (
       callerProvider: context.callerProvider,
       queryClient: context.queryClient ?? null,
       subagentDepth: (context.subagentDepth ?? 0) + 1,
+      operationMode,
       executeLocalTool,
       executeToolWithPermissionCheck,
     })
@@ -1923,6 +2046,7 @@ export const executeLocalTool = async (
     return await requestPlanClarification(context.dispatch, preparedToolCall, {
       conversationId: context.conversationId,
       messageId: context.messageId,
+      parentMessageId: context.parentMessageId,
       streamId: context.streamId,
     })
   }
@@ -1939,6 +2063,7 @@ export const executeLocalTool = async (
     const result = await executeToolAsJobAndWait(preparedToolCall, rootPath, operationMode, {
       conversationId: context?.conversationId,
       messageId: context?.messageId,
+      parentMessageId: context?.parentMessageId,
       streamId: context?.streamId,
       priority: context?.priority ?? 'normal',
       timeoutMs,
@@ -1975,6 +2100,7 @@ export const submitToolAsJob = async (
   options?: {
     conversationId?: string
     messageId?: string
+    parentMessageId?: string
     streamId?: string
     priority?: 'low' | 'normal' | 'high' | 'critical'
     timeoutMs?: number
@@ -1992,7 +2118,9 @@ export const submitToolAsJob = async (
           operationMode,
           conversationId: options?.conversationId,
           messageId: options?.messageId,
+          parentMessageId: options?.parentMessageId,
           streamId: options?.streamId,
+          toolCallId: typeof toolCall?.id === 'string' ? toolCall.id : undefined,
           priority: options?.priority ?? 'normal',
           timeoutMs: options?.timeoutMs ?? getDefaultToolCallTimeoutMs(),
         },
@@ -2026,6 +2154,7 @@ export const executeToolAsJobAndWait = async (
   options?: {
     conversationId?: string
     messageId?: string
+    parentMessageId?: string
     streamId?: string
     priority?: 'low' | 'normal' | 'high' | 'critical'
     timeoutMs?: number
@@ -2044,7 +2173,9 @@ export const executeToolAsJobAndWait = async (
           operationMode,
           conversationId: options?.conversationId,
           messageId: options?.messageId,
+          parentMessageId: options?.parentMessageId,
           streamId: options?.streamId,
+          toolCallId: typeof toolCall?.id === 'string' ? toolCall.id : undefined,
           priority: options?.priority ?? 'normal',
         },
       }),
@@ -2078,6 +2209,7 @@ const requestPlanClarification = async (
   context?: {
     conversationId?: string
     messageId?: string
+    parentMessageId?: string
     streamId?: string
   }
 ): Promise<PlanClarificationResult> => {
@@ -2138,6 +2270,7 @@ const executeToolWithPermissionCheck = async (
   context?: {
     conversationId?: string
     messageId?: string
+    parentMessageId?: string
     streamId?: string
     priority?: 'low' | 'normal' | 'high' | 'critical'
     timeoutMs?: number
@@ -2148,6 +2281,7 @@ const executeToolWithPermissionCheck = async (
     model?: string | null
     operation?: 'send' | 'branch' | 'edit-branch'
     onHookAdditionalContext?: (value: string) => void
+    toolCallId?: string
   }
 ) => {
   const readLiveState = () => getState() as RootState
@@ -2161,7 +2295,7 @@ const executeToolWithPermissionCheck = async (
   }
 
   // Extend context with dispatch/getState for subagent execution
-  const extendedContext = {
+  let extendedContext = {
     ...context,
     dispatch,
     getState,
@@ -2170,6 +2304,10 @@ const executeToolWithPermissionCheck = async (
 
   // Use the operation mode captured for this send/tool loop for predictable safety behavior.
   const runToolWithCapturedOperationMode = async () => {
+    extendedContext = {
+      ...extendedContext,
+      toolCallId: typeof effectiveToolCall?.id === 'string' ? effectiveToolCall.id : extendedContext.toolCallId,
+    }
     assertToolAllowedForOperationMode(effectiveToolCall, operationMode)
     return await executeLocalTool(effectiveToolCall, rootPath, operationMode, extendedContext)
   }
@@ -2182,6 +2320,11 @@ const executeToolWithPermissionCheck = async (
         state: readLiveState(),
         queryClient: context.queryClient ?? null,
       })
+
+      extendedContext = {
+        ...extendedContext,
+        parentMessageId: extendedContext.parentMessageId ?? hookMetadata.parentId ?? undefined,
+      }
 
       const preToolHook = await runChatHook({
         event: 'PreToolUse',
@@ -2205,6 +2348,11 @@ const executeToolWithPermissionCheck = async (
           ...toolCall,
           arguments: preToolHook.updatedInput,
         }
+      }
+
+      extendedContext = {
+        ...extendedContext,
+        toolCallId: typeof effectiveToolCall?.id === 'string' ? effectiveToolCall.id : extendedContext.toolCallId,
       }
 
       if (preToolHook.permissionDecision === 'deny') {
@@ -2642,6 +2790,7 @@ export const sendMessage = createAsyncThunk<
       reasoningConfig,
       serviceTier,
       cwd,
+      operationMode: requestedOperationMode,
       streamId: providedStreamId,
     },
     { dispatch, getState, extra, rejectWithValue, signal }
@@ -2667,6 +2816,15 @@ export const sendMessage = createAsyncThunk<
         },
       })
     )
+    void createStreamingRun({
+      streamId,
+      conversationId,
+      parentMessageId: parent ?? null,
+      streamType: 'primary',
+      operation: 'send',
+      source: 'renderer',
+      lineage: { rootMessageId: parent },
+    })
 
     let controller: AbortController | undefined
     let unregisterGenerationAbortController = () => {}
@@ -2718,7 +2876,7 @@ export const sendMessage = createAsyncThunk<
 
       // Combine mode, user default, project, and conversation system prompts.
       const selectedProject = selectSelectedProject(state)
-      const operationModeAtSend = state.chat.operationMode
+      const operationModeAtSend = requestedOperationMode ?? state.chat.operationMode
       const defaultUserPrompt = getDefaultUserSystemPromptFromCache(extra.queryClient, auth.userId)
       const systemPrompt = buildOperationModeSystemPrompt({
         operationMode: operationModeAtSend,
@@ -2837,16 +2995,6 @@ export const sendMessage = createAsyncThunk<
           updateMessageCache(extra.queryClient, conversationId, newUserMessage)
           dispatch(chatSliceActions.optimisticMessageCleared())
 
-          // Save to local DB if in local storage mode
-          if (storageMode === 'local' && attachmentsBase64 && attachmentsBase64.length > 0) {
-            localApi
-              .post('/local/attachments/save-base64', {
-                messageId: newUserMessage.id,
-                attachments: attachmentsBase64,
-              })
-              .catch(err => console.error('[sendMessage][lmstudio] Failed to save local attachments:', err))
-          }
-
           // Append draft artifacts immediately for UI parity
           if (preSendDrafts.length > 0) {
             const artifactDataUrls = preSendDrafts.map(d => d.dataUrl)
@@ -2870,19 +3018,22 @@ export const sendMessage = createAsyncThunk<
           // Directly persist to local SQLite for LM Studio/OpenAI ChatGPT (dualSync skips local-only records)
           if ((shouldUseLmStudio || shouldUseOpenAIChatGPT || shouldUseZai || shouldUseBedrock) && isElectronMode) {
             const providerLabel = shouldUseLmStudio ? 'lmstudio' : shouldUseZai ? 'zai' : shouldUseBedrock ? 'bedrock' : 'openai-chatgpt'
-            localApi
-              .post('/sync/message', {
-                ...newUserMessage,
-                conversation_id: conversationId,
-                children_ids: newUserMessage.children_ids,
-                content_blocks: newUserMessage.content_blocks,
-                tool_calls: newUserMessage.tool_calls,
-                user_id: auth.userId,
-                owner_id: auth.userId,
-                project_id: selectedProject?.id || null,
-                storage_mode: storageMode,
+            const localMessageSynced = await persistMessageToLocalForAttachments({
+              message: newUserMessage,
+              conversationId,
+              storageMode,
+              userId: auth.userId,
+              projectId: selectedProject?.id || null,
+              contextLabel: `sendMessage/${providerLabel}`,
+            })
+            if (localMessageSynced) {
+              await saveLocalBase64AttachmentsForMessage({
+                messageId: newUserMessage.id,
+                attachments: attachmentsBase64,
+                storageMode,
+                contextLabel: `sendMessage/${providerLabel}`,
               })
-              .catch(err => console.error(`[sendMessage][${providerLabel}] Failed to sync user message locally:`, err))
+            }
           }
 
           // Track for return payload
@@ -3034,6 +3185,12 @@ export const sendMessage = createAsyncThunk<
                     {
                       conversationId,
                       messageId: lastMsg.id,
+                      parentMessageId: resolveToolUndoParentMessageId({
+                        userMessage,
+                        currentTurnHistory,
+                        assistantMessage: lastMsg,
+                        fallbackParentId: parent,
+                      }),
                       streamId,
                       accessToken: auth.accessToken,
                       queryClient: extra.queryClient,
@@ -3071,7 +3228,14 @@ export const sendMessage = createAsyncThunk<
                   })
                 )
 
-                currentTurnHistory.push(createToolResultMessage(conversationId, lastMsg.id, toolCall.id, content))
+                currentTurnHistory.push(
+                  createToolResultMessage(
+                    conversationId,
+                    lastMsg.id,
+                    toolCall.id,
+                    stringifyToolResultContentForModel(content, toolCall?.name)
+                  )
+                )
               }
 
               if (toolResultBlocks.length > 0 && lastMsg.id) {
@@ -3298,6 +3462,12 @@ export const sendMessage = createAsyncThunk<
                     {
                       conversationId,
                       messageId: lastMsg.id,
+                      parentMessageId: resolveToolUndoParentMessageId({
+                        userMessage,
+                        currentTurnHistory,
+                        assistantMessage: lastMsg,
+                        fallbackParentId: parent,
+                      }),
                       streamId,
                       accessToken: auth.accessToken,
                       queryClient: extra.queryClient,
@@ -3334,7 +3504,14 @@ export const sendMessage = createAsyncThunk<
                   })
                 )
 
-                currentTurnHistory.push(createToolResultMessage(conversationId, lastMsg.id, toolCall.id, content))
+                currentTurnHistory.push(
+                  createToolResultMessage(
+                    conversationId,
+                    lastMsg.id,
+                    toolCall.id,
+                    stringifyToolResultContentForModel(content, toolCall?.name)
+                  )
+                )
               }
 
               if (toolResultBlocks.length > 0 && lastMsg.id) {
@@ -3594,6 +3771,12 @@ export const sendMessage = createAsyncThunk<
                     {
                       conversationId,
                       messageId: lastMsg.id,
+                      parentMessageId: resolveToolUndoParentMessageId({
+                        userMessage,
+                        currentTurnHistory,
+                        assistantMessage: lastMsg,
+                        fallbackParentId: parent,
+                      }),
                       streamId,
                       accessToken: auth.accessToken,
                       queryClient: extra.queryClient,
@@ -3637,7 +3820,14 @@ export const sendMessage = createAsyncThunk<
                 )
 
                 // Add tool result to history for next LM Studio request
-                currentTurnHistory.push(createToolResultMessage(conversationId, lastMsg.id, toolCall.id, content))
+                currentTurnHistory.push(
+                  createToolResultMessage(
+                    conversationId,
+                    lastMsg.id,
+                    toolCall.id,
+                    stringifyToolResultContentForModel(content, toolCall?.name)
+                  )
+                )
               }
 
               // Update assistant message with tool results (like non-LM Studio flow)
@@ -3866,6 +4056,12 @@ export const sendMessage = createAsyncThunk<
                     {
                       conversationId,
                       messageId: lastMsg.id,
+                      parentMessageId: resolveToolUndoParentMessageId({
+                        userMessage,
+                        currentTurnHistory,
+                        assistantMessage: lastMsg,
+                        fallbackParentId: parent,
+                      }),
                       streamId,
                       accessToken: auth.accessToken,
                       queryClient: extra.queryClient,
@@ -3915,7 +4111,14 @@ export const sendMessage = createAsyncThunk<
                 )
 
                 // Add tool result to history for next request
-                currentTurnHistory.push(createToolResultMessage(conversationId, lastMsg.id, toolCall.id, content))
+                currentTurnHistory.push(
+                  createToolResultMessage(
+                    conversationId,
+                    lastMsg.id,
+                    toolCall.id,
+                    stringifyToolResultContentForModel(content, toolCall?.name)
+                  )
+                )
               }
 
               // Update assistant message with tool results
@@ -4139,14 +4342,24 @@ export const sendMessage = createAsyncThunk<
                     touchProjectTimestampInCache(extra.queryClient, selectedProject.id, auth.userId)
                   }
 
-                  // Save image attachments to local DB when in local mode
+                  // Save image attachments only after the user message exists in local SQLite.
                   if (storageMode === 'local' && attachmentsBase64 && attachmentsBase64.length > 0) {
-                    localApi
-                      .post('/local/attachments/save-base64', {
+                    const localMessageSynced = await persistMessageToLocalForAttachments({
+                      message: chunk.message,
+                      conversationId,
+                      storageMode,
+                      userId: auth.userId,
+                      projectId: selectedProject?.id || null,
+                      contextLabel: 'sendMessage',
+                    })
+                    if (localMessageSynced) {
+                      await saveLocalBase64AttachmentsForMessage({
                         messageId: chunk.message.id,
                         attachments: attachmentsBase64,
+                        storageMode,
+                        contextLabel: 'sendMessage',
                       })
-                      .catch(err => console.error('[sendMessage] Failed to save local attachments:', err))
+                    }
                   }
 
                   // Add to local history tracking for next turn
@@ -4365,6 +4578,12 @@ export const sendMessage = createAsyncThunk<
                   {
                     conversationId,
                     messageId: messageId ?? turnAssistantMessageId ?? undefined,
+                    parentMessageId: resolveToolUndoParentMessageId({
+                      userMessage,
+                      currentTurnHistory,
+                      assistantMessage: messageId != null ? ({ id: messageId, role: 'assistant', parent_id: turnAssistantMessageId } as any) : null,
+                      fallbackParentId: parent,
+                    }),
                     streamId,
                     accessToken: auth.accessToken,
                     queryClient: extra.queryClient,
@@ -4502,6 +4721,17 @@ export const sendMessage = createAsyncThunk<
 
       if (messageId) {
         dispatch(chatSliceActions.streamCompleted({ streamId, messageId, updatePath: true }))
+        void finishStreamingRun(streamId, {
+          status: 'completed',
+          endReason: 'completed',
+          assistantMessageId: messageId,
+          finalMessageId: messageId,
+        })
+        void markStreamUndoFinalMessage(streamId, messageId != null ? String(messageId) : null)
+          .then(summary => {
+            if (summary) dispatch(chatSliceActions.streamUndoSummariesReceived({ conversationId: String(conversationId), summaries: [summary] }))
+          })
+          .catch(error => console.warn('[streamUndo] Failed to mark final message', error))
       }
 
       dispatch(chatSliceActions.sendingCompleted({ streamId }))
@@ -4520,6 +4750,11 @@ export const sendMessage = createAsyncThunk<
       }
 
       const message = error instanceof Error ? error.message : 'Failed to send message'
+      void finishStreamingRun(streamId, {
+        status: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        endReason: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        error: message,
+      })
       dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'error', error: message } }))
       return rejectWithValue(message)
     } finally {
@@ -4690,7 +4925,17 @@ export const editMessageWithBranching = createAsyncThunk<
 >(
   'chat/editMessageWithBranching',
   async (
-    { conversationId, originalMessageId, newContent, modelOverride, think, serviceTier, cwd, streamId: providedStreamId },
+    {
+      conversationId,
+      originalMessageId,
+      newContent,
+      modelOverride,
+      think,
+      serviceTier,
+      cwd,
+      operationMode: requestedOperationMode,
+      streamId: providedStreamId,
+    },
     { dispatch, getState, extra, rejectWithValue, signal }
   ) => {
     const { auth } = extra
@@ -4726,6 +4971,15 @@ export const editMessageWithBranching = createAsyncThunk<
         },
       })
     )
+    void createStreamingRun({
+      streamId,
+      conversationId,
+      parentMessageId: parentMessageId ?? null,
+      streamType: 'branch',
+      operation: 'edit-branch',
+      source: 'renderer',
+      lineage: { originMessageId: originalMessageId, rootMessageId: parentMessageId },
+    })
 
     let controller: AbortController | undefined
     let unregisterGenerationAbortController = () => {}
@@ -4770,7 +5024,7 @@ export const editMessageWithBranching = createAsyncThunk<
 
       // Combine mode, user default, project, and conversation system prompts.
       const selectedProject = selectSelectedProject(state)
-      const operationModeAtSend = state.chat.operationMode
+      const operationModeAtSend = requestedOperationMode ?? state.chat.operationMode
       const defaultUserPrompt = getDefaultUserSystemPromptFromCache(extra.queryClient, auth.userId)
       const systemPrompt = buildOperationModeSystemPrompt({
         operationMode: operationModeAtSend,
@@ -5168,6 +5422,11 @@ export const editMessageWithBranching = createAsyncThunk<
                   {
                     conversationId,
                     messageId: lastMsg.id,
+                    parentMessageId: resolveToolUndoParentMessageId({
+                      userMessage,
+                      currentTurnHistory,
+                      assistantMessage: lastMsg,
+                    }),
                     streamId,
                     accessToken: auth.accessToken,
                     queryClient: extra.queryClient,
@@ -5204,7 +5463,14 @@ export const editMessageWithBranching = createAsyncThunk<
                 })
               )
 
-              currentTurnHistory.push(createToolResultMessage(conversationId, lastMsg.id, toolCall.id, content))
+              currentTurnHistory.push(
+                  createToolResultMessage(
+                    conversationId,
+                    lastMsg.id,
+                    toolCall.id,
+                    stringifyToolResultContentForModel(content, toolCall?.name)
+                  )
+                )
             }
 
             if (toolResultBlocks.length > 0 && lastMsg.id) {
@@ -5290,32 +5556,23 @@ export const editMessageWithBranching = createAsyncThunk<
             updateMessageCache(extra.queryClient, conversationId, newUserMessage)
             dispatch(chatSliceActions.optimisticBranchMessageCleared())
 
-            try {
-              await localApi.post('/sync/message', {
-                ...newUserMessage,
-                conversation_id: conversationId,
-                children_ids: newUserMessage.children_ids,
-                content_blocks: newUserMessage.content_blocks,
-                tool_calls: newUserMessage.tool_calls,
-                user_id: auth.userId,
-                owner_id: auth.userId,
-                project_id: selectedProject?.id || null,
-                storage_mode: storageMode,
-              })
-            } catch (err) {
-              console.error('[editMessageWithBranching][openai-chatgpt] Failed to sync user message:', err)
-            }
+            const localMessageSynced = await persistMessageToLocalForAttachments({
+              message: newUserMessage,
+              conversationId,
+              storageMode,
+              userId: auth.userId,
+              projectId: selectedProject?.id || null,
+              contextLabel: 'editMessageWithBranching/openai-chatgpt',
+            })
 
             // Save image attachments to local DB for the new branched user message
-            if (storageMode === 'local' && attachmentsBase64 && attachmentsBase64.length > 0) {
-              localApi
-                .post('/local/attachments/save-base64', {
-                  messageId: newUserMessage.id,
-                  attachments: attachmentsBase64,
-                })
-                .catch(err =>
-                  console.error('[editMessageWithBranching][openai-chatgpt] Failed to save local attachments:', err)
-                )
+            if (localMessageSynced) {
+              await saveLocalBase64AttachmentsForMessage({
+                messageId: newUserMessage.id,
+                attachments: attachmentsBase64,
+                storageMode,
+                contextLabel: 'editMessageWithBranching/openai-chatgpt',
+              })
             }
 
             // Ensure branched user message shows intended artifacts immediately
@@ -5512,6 +5769,11 @@ export const editMessageWithBranching = createAsyncThunk<
                   {
                     conversationId,
                     messageId: lastMsg.id,
+                    parentMessageId: resolveToolUndoParentMessageId({
+                      userMessage,
+                      currentTurnHistory,
+                      assistantMessage: lastMsg,
+                    }),
                     streamId,
                     accessToken: auth.accessToken,
                     queryClient: extra.queryClient,
@@ -5547,7 +5809,14 @@ export const editMessageWithBranching = createAsyncThunk<
                 })
               )
 
-              currentTurnHistory.push(createToolResultMessage(conversationId, lastMsg.id, toolCall.id, content))
+              currentTurnHistory.push(
+                  createToolResultMessage(
+                    conversationId,
+                    lastMsg.id,
+                    toolCall.id,
+                    stringifyToolResultContentForModel(content, toolCall?.name)
+                  )
+                )
             }
 
             if (toolResultBlocks.length > 0 && lastMsg.id) {
@@ -5762,14 +6031,24 @@ export const editMessageWithBranching = createAsyncThunk<
                     touchProjectTimestampInCache(extra.queryClient, selectedProject.id, auth.userId)
                   }
 
-                  // Save image attachments to local DB when in local mode
+                  // Save image attachments only after the user message exists in local SQLite.
                   if (storageMode === 'local' && attachmentsBase64 && attachmentsBase64.length > 0) {
-                    localApi
-                      .post('/local/attachments/save-base64', {
+                    const localMessageSynced = await persistMessageToLocalForAttachments({
+                      message: chunk.message,
+                      conversationId,
+                      storageMode,
+                      userId: auth.userId,
+                      projectId: selectedProject?.id || null,
+                      contextLabel: 'editMessageWithBranching',
+                    })
+                    if (localMessageSynced) {
+                      await saveLocalBase64AttachmentsForMessage({
                         messageId: chunk.message.id,
                         attachments: attachmentsBase64,
+                        storageMode,
+                        contextLabel: 'editMessageWithBranching',
                       })
-                      .catch(err => console.error('[editMessageWithBranching] Failed to save local attachments:', err))
+                    }
                   }
 
                   // Add to local history for next turn
@@ -5994,6 +6273,12 @@ export const editMessageWithBranching = createAsyncThunk<
                   {
                     conversationId,
                     messageId: messageId ?? turnAssistantMessageId ?? undefined,
+                    parentMessageId: resolveToolUndoParentMessageId({
+                      userMessage,
+                      currentTurnHistory,
+                      assistantMessage: messageId != null ? ({ id: messageId, role: 'assistant', parent_id: turnAssistantMessageId } as any) : null,
+                      fallbackParentId: activeParentId,
+                    }),
                     streamId,
                     accessToken: auth.accessToken,
                     queryClient: extra.queryClient,
@@ -6118,6 +6403,17 @@ export const editMessageWithBranching = createAsyncThunk<
 
       if (messageId) {
         dispatch(chatSliceActions.streamCompleted({ streamId, messageId, updatePath: true }))
+        void finishStreamingRun(streamId, {
+          status: 'completed',
+          endReason: 'completed',
+          assistantMessageId: messageId,
+          finalMessageId: messageId,
+        })
+        void markStreamUndoFinalMessage(streamId, messageId != null ? String(messageId) : null)
+          .then(summary => {
+            if (summary) dispatch(chatSliceActions.streamUndoSummariesReceived({ conversationId: String(conversationId), summaries: [summary] }))
+          })
+          .catch(error => console.warn('[streamUndo] Failed to mark final message', error))
         // Clear backup after successfully creating the branch
         dispatch(chatSliceActions.messageArtifactsBackupCleared({ messageId: originalMessageId }))
       }
@@ -6138,6 +6434,11 @@ export const editMessageWithBranching = createAsyncThunk<
       }
 
       const message = error instanceof Error ? error.message : 'Failed to edit message'
+      void finishStreamingRun(streamId, {
+        status: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        endReason: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        error: message,
+      })
       dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'error', error: message } }))
       return rejectWithValue(message)
     } finally {
@@ -6154,7 +6455,18 @@ export const sendMessageToBranch = createAsyncThunk<
 >(
   'chat/sendMessageToBranch',
   async (
-    { conversationId, parentId, content, modelOverride, systemPrompt, think, serviceTier, cwd, streamId: providedStreamId },
+    {
+      conversationId,
+      parentId,
+      content,
+      modelOverride,
+      systemPrompt,
+      think,
+      serviceTier,
+      cwd,
+      operationMode: requestedOperationMode,
+      streamId: providedStreamId,
+    },
     { dispatch, getState, extra, rejectWithValue, signal }
   ) => {
     const { auth } = extra
@@ -6178,6 +6490,15 @@ export const sendMessageToBranch = createAsyncThunk<
         },
       })
     )
+    void createStreamingRun({
+      streamId,
+      conversationId,
+      parentMessageId: parentId ?? null,
+      streamType: 'branch',
+      operation: 'branch',
+      source: 'renderer',
+      lineage: { rootMessageId: parentId },
+    })
 
     let controller: AbortController | undefined
     let unregisterGenerationAbortController = () => {}
@@ -6227,7 +6548,7 @@ export const sendMessageToBranch = createAsyncThunk<
       // Use React Query cache as fallback for storage mode detection (handles local conversations not yet in Redux)
       const storageMode = conversationMeta?.storage_mode || getStorageModeFromCache(extra.queryClient, conversationId)
       // Keep cwd for tool execution context only (do not inject cwd into system prompt)
-      const operationModeAtSend = state.chat.operationMode
+      const operationModeAtSend = requestedOperationMode ?? state.chat.operationMode
       const effectiveSystemPrompt = buildOperationModeSystemPrompt({
         operationMode: operationModeAtSend,
         basePrompt: systemPrompt,
@@ -6468,6 +6789,11 @@ export const sendMessageToBranch = createAsyncThunk<
                   {
                     conversationId,
                     messageId: lastMsg.id,
+                    parentMessageId: resolveToolUndoParentMessageId({
+                      userMessage,
+                      currentTurnHistory,
+                      assistantMessage: lastMsg,
+                    }),
                     streamId,
                     accessToken: auth.accessToken,
                     queryClient: extra.queryClient,
@@ -6504,7 +6830,14 @@ export const sendMessageToBranch = createAsyncThunk<
                 })
               )
 
-              currentTurnHistory.push(createToolResultMessage(conversationId, lastMsg.id, toolCall.id, content))
+              currentTurnHistory.push(
+                  createToolResultMessage(
+                    conversationId,
+                    lastMsg.id,
+                    toolCall.id,
+                    stringifyToolResultContentForModel(content, toolCall?.name)
+                  )
+                )
             }
 
             if (toolResultBlocks.length > 0 && lastMsg.id) {
@@ -6588,32 +6921,23 @@ export const sendMessageToBranch = createAsyncThunk<
             dispatch(chatSliceActions.messageBranchCreated({ newMessage: newUserMessage }))
             updateMessageCache(extra.queryClient, conversationId, newUserMessage)
 
-            try {
-              await localApi.post('/sync/message', {
-                ...newUserMessage,
-                conversation_id: conversationId,
-                children_ids: newUserMessage.children_ids,
-                content_blocks: newUserMessage.content_blocks,
-                tool_calls: newUserMessage.tool_calls,
-                user_id: auth.userId,
-                owner_id: auth.userId,
-                project_id: selectedProject?.id || null,
-                storage_mode: storageMode,
-              })
-            } catch (err) {
-              console.error('[sendMessageToBranch][openai-chatgpt] Failed to sync user message:', err)
-            }
+            const localMessageSynced = await persistMessageToLocalForAttachments({
+              message: newUserMessage,
+              conversationId,
+              storageMode,
+              userId: auth.userId,
+              projectId: selectedProject?.id || null,
+              contextLabel: 'sendMessageToBranch/openai-chatgpt',
+            })
 
             // Save image attachments to local DB for the new branched user message
-            if (storageMode === 'local' && attachmentsBase64 && attachmentsBase64.length > 0) {
-              localApi
-                .post('/local/attachments/save-base64', {
-                  messageId: newUserMessage.id,
-                  attachments: attachmentsBase64,
-                })
-                .catch(err =>
-                  console.error('[sendMessageToBranch][openai-chatgpt] Failed to save local attachments:', err)
-                )
+            if (localMessageSynced) {
+              await saveLocalBase64AttachmentsForMessage({
+                messageId: newUserMessage.id,
+                attachments: attachmentsBase64,
+                storageMode,
+                contextLabel: 'sendMessageToBranch/openai-chatgpt',
+              })
             }
 
             // Live-update artifacts so images appear immediately in the branch message
@@ -6792,6 +7116,11 @@ export const sendMessageToBranch = createAsyncThunk<
                   {
                     conversationId,
                     messageId: lastMsg.id,
+                    parentMessageId: resolveToolUndoParentMessageId({
+                      userMessage,
+                      currentTurnHistory,
+                      assistantMessage: lastMsg,
+                    }),
                     streamId,
                     accessToken: auth.accessToken,
                     queryClient: extra.queryClient,
@@ -6827,7 +7156,14 @@ export const sendMessageToBranch = createAsyncThunk<
                 })
               )
 
-              currentTurnHistory.push(createToolResultMessage(conversationId, lastMsg.id, toolCall.id, content))
+              currentTurnHistory.push(
+                  createToolResultMessage(
+                    conversationId,
+                    lastMsg.id,
+                    toolCall.id,
+                    stringifyToolResultContentForModel(content, toolCall?.name)
+                  )
+                )
             }
 
             if (toolResultBlocks.length > 0 && lastMsg.id) {
@@ -6992,14 +7328,24 @@ export const sendMessageToBranch = createAsyncThunk<
                     touchProjectTimestampInCache(extra.queryClient, selectedProject.id, auth.userId)
                   }
 
-                  // Save image attachments to local DB when in local mode
+                  // Save image attachments only after the user message exists in local SQLite.
                   if (storageMode === 'local' && attachmentsBase64 && attachmentsBase64.length > 0) {
-                    localApi
-                      .post('/local/attachments/save-base64', {
+                    const localMessageSynced = await persistMessageToLocalForAttachments({
+                      message: chunk.message,
+                      conversationId,
+                      storageMode,
+                      userId: auth.userId,
+                      projectId: selectedProject?.id || null,
+                      contextLabel: 'sendMessageToBranch',
+                    })
+                    if (localMessageSynced) {
+                      await saveLocalBase64AttachmentsForMessage({
                         messageId: chunk.message.id,
                         attachments: attachmentsBase64,
+                        storageMode,
+                        contextLabel: 'sendMessageToBranch',
                       })
-                      .catch(err => console.error('[sendMessageToBranch] Failed to save local attachments:', err))
+                    }
                   }
 
                   await maybePersistAutoConversationTitle({
@@ -7195,6 +7541,12 @@ export const sendMessageToBranch = createAsyncThunk<
                   {
                     conversationId,
                     messageId: messageId ?? turnAssistantMessageId ?? undefined,
+                    parentMessageId: resolveToolUndoParentMessageId({
+                      userMessage,
+                      currentTurnHistory,
+                      assistantMessage: messageId != null ? ({ id: messageId, role: 'assistant', parent_id: turnAssistantMessageId } as any) : null,
+                      fallbackParentId: currentParentId,
+                    }),
                     streamId,
                     accessToken: auth.accessToken,
                     queryClient: extra.queryClient,
@@ -7331,6 +7683,17 @@ export const sendMessageToBranch = createAsyncThunk<
 
       if (messageId) {
         dispatch(chatSliceActions.streamCompleted({ streamId, messageId, updatePath: true }))
+        void finishStreamingRun(streamId, {
+          status: 'completed',
+          endReason: 'completed',
+          assistantMessageId: messageId,
+          finalMessageId: messageId,
+        })
+        void markStreamUndoFinalMessage(streamId, messageId != null ? String(messageId) : null)
+          .then(summary => {
+            if (summary) dispatch(chatSliceActions.streamUndoSummariesReceived({ conversationId: String(conversationId), summaries: [summary] }))
+          })
+          .catch(error => console.warn('[streamUndo] Failed to mark final message', error))
       }
 
       dispatch(chatSliceActions.sendingCompleted({ streamId }))
@@ -7349,6 +7712,11 @@ export const sendMessageToBranch = createAsyncThunk<
       }
 
       const message = error instanceof Error ? error.message : 'Failed to send message'
+      void finishStreamingRun(streamId, {
+        status: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        endReason: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        error: message,
+      })
       dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'error', error: message } }))
       return rejectWithValue(message)
     } finally {
@@ -7986,6 +8354,7 @@ export const abortStreaming = createAsyncThunk<
 
       if (response.success) {
         dispatch(chatSliceActions.streamingAborted(streamId ? { streamId } : undefined))
+        void finishStreamingRun(streamId, { status: 'aborted', endReason: 'aborted', error: 'Generation aborted' })
 
         // If the assistant message was deleted, refetch messages to update the UI
         if (response.messageDeleted) {
@@ -8042,6 +8411,7 @@ export const abortGeneration = createAsyncThunk<
 
   if (streamId) {
     dispatch(chatSliceActions.streamingAborted({ streamId }))
+    void finishStreamingRun(streamId, { status: 'aborted', endReason: 'aborted', error: 'Generation aborted' })
   } else {
     dispatch(chatSliceActions.allStreamsAborted())
   }
@@ -8370,6 +8740,17 @@ export const sendHermesMessage = createAsyncThunk<
             : undefined,
       })
     )
+    void createStreamingRun({
+      streamId,
+      conversationId,
+      parentMessageId: parentId ?? null,
+      streamType,
+      provider: 'hermes',
+      modelName: model ?? null,
+      operation: streamType === 'branch' ? 'branch' : 'send',
+      source: 'renderer',
+      lineage: streamType === 'branch' && parentId !== undefined && parentId !== null ? { rootMessageId: parentId } : undefined,
+    })
 
     let controller: AbortController | undefined
     let unregisterGenerationAbortController = () => {}
@@ -8692,6 +9073,12 @@ export const sendHermesMessage = createAsyncThunk<
         throw new Error('No session ID received from Hermes ACP')
       }
 
+      void finishStreamingRun(streamId, {
+        status: 'completed',
+        endReason: 'completed',
+        userMessageId: userMessageId ?? null,
+        metadata: { sessionId, messageCount },
+      })
       dispatch(chatSliceActions.sendingCompleted({ streamId }))
 
       setTimeout(() => {
@@ -8707,6 +9094,11 @@ export const sendHermesMessage = createAsyncThunk<
       }
 
       const message = error instanceof Error ? error.message : 'Failed to send Hermes message'
+      void finishStreamingRun(streamId, {
+        status: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        endReason: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        error: message,
+      })
       dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'error', error: message } }))
       return rejectWithValue(message)
     } finally {
@@ -8752,6 +9144,14 @@ export const sendCCMessage = createAsyncThunk<
         conversationId,
       })
     )
+    void createStreamingRun({
+      streamId,
+      conversationId,
+      streamType: 'primary',
+      provider: 'claude-code',
+      operation: 'send',
+      source: 'renderer',
+    })
 
     let controller: AbortController | undefined
     let unregisterGenerationAbortController = () => {}
@@ -8940,6 +9340,12 @@ export const sendCCMessage = createAsyncThunk<
         throw new Error('No session ID received from CC')
       }
 
+      void finishStreamingRun(streamId, {
+        status: 'completed',
+        endReason: 'completed',
+        userMessageId: userMessageId ?? null,
+        metadata: { sessionId, messageCount },
+      })
       dispatch(chatSliceActions.sendingCompleted({ streamId }))
 
       // Schedule stream cleanup after delay
@@ -8956,6 +9362,11 @@ export const sendCCMessage = createAsyncThunk<
       }
 
       const message = error instanceof Error ? error.message : 'Failed to send CC message'
+      void finishStreamingRun(streamId, {
+        status: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        endReason: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        error: message,
+      })
       dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'error', error: message } }))
       return rejectWithValue(message)
     } finally {
@@ -9001,6 +9412,16 @@ export const sendCCBranch = createAsyncThunk<
         },
       })
     )
+    void createStreamingRun({
+      streamId,
+      conversationId,
+      parentMessageId: parentId ?? null,
+      streamType: 'branch',
+      provider: 'claude-code',
+      operation: 'branch',
+      source: 'renderer',
+      lineage: { rootMessageId: parentId },
+    })
 
     let controller: AbortController | undefined
     let unregisterGenerationAbortController = () => {}
@@ -9191,6 +9612,12 @@ export const sendCCBranch = createAsyncThunk<
         throw new Error('No session ID received from CC branch')
       }
 
+      void finishStreamingRun(streamId, {
+        status: 'completed',
+        endReason: 'completed',
+        userMessageId: userMessageId ?? null,
+        metadata: { sessionId, messageCount },
+      })
       dispatch(chatSliceActions.sendingCompleted({ streamId }))
 
       // Schedule stream cleanup after delay
@@ -9207,6 +9634,11 @@ export const sendCCBranch = createAsyncThunk<
       }
 
       const message = error instanceof Error ? error.message : 'Failed to send CC branch message'
+      void finishStreamingRun(streamId, {
+        status: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        endReason: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
+        error: message,
+      })
       dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'error', error: message } }))
       return rejectWithValue(message)
     } finally {
@@ -9306,3 +9738,51 @@ export const fetchUserSystemPrompts = createAsyncThunk<
 })
 // LM Studio models loader hook wiring TODO: integrate fetchLmStudioModels into useModels when provider = 'lmstudio'
 // Type shim for LM Studio branch to track parent across tool turns
+
+export const fetchConversationStreamUndo = createAsyncThunk<
+  void,
+  ConversationId | string,
+  { state: RootState }
+>('chat/fetchConversationStreamUndo', async (conversationId, { dispatch }) => {
+  const id = String(conversationId)
+  dispatch(chatSliceActions.streamUndoConversationLoadingSet({ conversationId: id, loading: true }))
+  try {
+    const summaries = await fetchConversationUndoSummaries(id)
+    dispatch(chatSliceActions.streamUndoSummariesReceived({ conversationId: id, summaries }))
+  } catch (error) {
+    console.warn('[streamUndo] Failed to fetch conversation undo summaries', error)
+    dispatch(chatSliceActions.streamUndoSummariesReceived({ conversationId: id, summaries: [] }))
+  } finally {
+    dispatch(chatSliceActions.streamUndoConversationLoadingSet({ conversationId: id, loading: false }))
+  }
+})
+
+export const restoreStreamFileEdits = createAsyncThunk<
+  void,
+  { streamId: string; conversationId?: ConversationId | string | null; parentMessageId?: MessageId | string | null; force?: boolean },
+  { state: RootState }
+>('chat/restoreStreamFileEdits', async ({ streamId, conversationId, parentMessageId, force }, { dispatch, getState }) => {
+  dispatch(chatSliceActions.streamUndoRestoringSet({ streamId, restoring: true }))
+  dispatch(chatSliceActions.streamUndoErrorSet({ streamId, error: null }))
+  try {
+    const result = await restoreStreamUndoApi(streamId, {
+      force,
+      expectedParentMessageId: parentMessageId != null ? String(parentMessageId) : null,
+    })
+    if (!result.success) {
+      const conflictText = Array.isArray(result.conflicts) && result.conflicts.length > 0 ? ' File changed after the agent edit.' : ''
+      throw new Error((result.error || 'Failed to restore file edits') + conflictText)
+    }
+    const currentConversationId = conversationId ?? getState().chat.conversation.currentConversationId
+    if (currentConversationId != null) {
+      const summaries = await fetchConversationUndoSummaries(String(currentConversationId))
+      dispatch(chatSliceActions.streamUndoSummariesReceived({ conversationId: String(currentConversationId), summaries }))
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    dispatch(chatSliceActions.streamUndoErrorSet({ streamId, error: message }))
+    throw error
+  } finally {
+    dispatch(chatSliceActions.streamUndoRestoringSet({ streamId, restoring: false }))
+  }
+})

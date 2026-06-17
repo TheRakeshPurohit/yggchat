@@ -39,6 +39,7 @@ Use this when changing:
 - Some hook types must be synchronous because they make decisions or mutate prompt/tool input.
 - Non-decision hooks can run asynchronously where configured to avoid blocking chat persistence/generation.
 - Tool/prompt-mutating hooks should default to awaited/synchronous unless intentionally changed.
+- `PreToolUse` can observe/rewrite edit tool inputs, but managed file-edit undo backups are captured by the local tool runtime after hook rewriting and before `edit_file`/`multi_edit` execution.
 
 ## Important Invariants
 

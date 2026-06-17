@@ -35,7 +35,7 @@ export interface GlobalAgentQueuedTasksData {
  *
  * @returns Query result with messages array and conversation metadata
  */
-export function useGlobalAgentMessages() {
+export function useGlobalAgentMessages(enabled = true) {
   const { userId } = useAuth()
 
   return useQuery({
@@ -61,7 +61,7 @@ export function useGlobalAgentMessages() {
         conversationDate: conversation?.created_at || null
       }
     },
-    enabled: !!userId && environment === 'electron',
+    enabled: enabled && !!userId && environment === 'electron',
     staleTime: 5000, // 5 seconds - shorter for agent messages
     refetchOnMount: 'always', // Always fetch latest messages when component mounts
     refetchOnReconnect: false,
@@ -77,13 +77,13 @@ export function useGlobalAgentMessages() {
  *
  * @returns Current stream buffer string
  */
-export function useGlobalAgentStreamBuffer(): string {
+export function useGlobalAgentStreamBuffer(enabled = true): string {
   const queryClient = useQueryClient()
 
   const { data } = useQuery({
     queryKey: ['globalAgent', 'streamBuffer'],
     queryFn: () => '',  // Initial value - cache is updated by GlobalAgentLoop
-    enabled: environment === 'electron',
+    enabled: enabled && environment === 'electron',
     staleTime: Infinity, // Never stale - only updated via setQueryData
     refetchInterval: false, // Don't refetch - we poll the cache directly
     refetchOnMount: false,
@@ -94,7 +94,10 @@ export function useGlobalAgentStreamBuffer(): string {
   const [buffer, setBuffer] = useState('')
   
   useEffect(() => {
-    if (environment !== 'electron') return
+    if (!enabled || environment !== 'electron') {
+      setBuffer('')
+      return
+    }
     
     const interval = setInterval(() => {
       const cached = queryClient.getQueryData<string>(['globalAgent', 'streamBuffer'])
@@ -102,7 +105,7 @@ export function useGlobalAgentStreamBuffer(): string {
     }, 100)
     
     return () => clearInterval(interval)
-  }, [queryClient])
+  }, [enabled, queryClient])
 
   return buffer || data || ''
 }
@@ -115,7 +118,7 @@ export function useGlobalAgentStreamBuffer(): string {
  *
  * @returns Current optimistic message or null
  */
-export function useGlobalAgentOptimisticMessage(): any | null {
+export function useGlobalAgentOptimisticMessage(enabled = true): any | null {
   const queryClient = useQueryClient()
 
   const { data } = useQuery({
@@ -124,9 +127,9 @@ export function useGlobalAgentOptimisticMessage(): any | null {
       // Read current optimistic message from cache
       return queryClient.getQueryData<any>(['globalAgent', 'optimisticMessage']) || null
     },
-    enabled: environment === 'electron',
+    enabled: enabled && environment === 'electron',
     staleTime: 0, // Always fresh
-    refetchInterval: 100, // Poll every 100ms
+    refetchInterval: enabled ? 100 : false, // Poll every 100ms only while visible
   })
 
   return data || null

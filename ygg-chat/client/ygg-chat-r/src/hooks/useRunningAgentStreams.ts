@@ -1,5 +1,5 @@
-import { useCallback, useMemo } from 'react'
-import type { StreamEvent, StreamState } from '../features/chats/chatTypes'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Message, StreamEvent, StreamState } from '../features/chats/chatTypes'
 import type { Conversation } from '../features/conversations/conversationTypes'
 import { useAppSelector } from './redux'
 import type { ResearchNoteItem } from './useQueries'
@@ -16,6 +16,8 @@ export type AgentStreamListItem = {
   hasError: boolean
   createdAt: string
   rootMessageId: string | null
+  parentMessageId: string | null
+  parentMessageText: string | null
   activityKind: AgentStreamActivityKind
   activityLabel: string
   completedAt: string | null
@@ -86,9 +88,57 @@ const getStreamActivity = (stream: StreamState): { activityKind: AgentStreamActi
   return { activityKind: 'idle', activityLabel: 'starting' }
 }
 
+const normalizeMessagePreview = (message: Message | null | undefined): string | null => {
+  if (!message) return null
+  const rawContent =
+    message.content_plain_text ||
+    (message as any).plain_text_content ||
+    message.content ||
+    (Array.isArray(message.content_blocks)
+      ? message.content_blocks
+          .map(block => ('content' in block && typeof block.content === 'string' ? block.content : ''))
+          .filter(Boolean)
+          .join(' ')
+      : '')
+  const preview = String(rawContent || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return preview.length > 0 ? preview : null
+}
+
+const resolveParentMessage = (messagesById: Map<string, Message>, stream: StreamState): Message | null => {
+  const candidateIds = [
+    stream.lineage.originMessageId,
+    stream.lineage.rootMessageId,
+    stream.branchAnchorMessageId,
+    stream.messageId,
+  ]
+
+  const visitedIds = new Set<string>()
+
+  for (const candidateId of candidateIds) {
+    if (!candidateId) continue
+    let current: Message | null | undefined = messagesById.get(String(candidateId))
+
+    while (current) {
+      const currentId = String(current.id)
+      if (visitedIds.has(currentId)) break
+      visitedIds.add(currentId)
+
+      if (current.role === 'user') return current
+      current = current.parent_id ? messagesById.get(String(current.parent_id)) : null
+    }
+  }
+
+  return null
+}
+
 export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
   const conversations = useAppSelector(state => state.conversations.items)
   const streamingRoot = useAppSelector(state => state.chat.streaming)
+  const messages = useAppSelector(state => state.chat.conversation.messages)
+  const [streamHistory, setStreamHistory] = useState<AgentStreamListItem[]>([])
+  const previousActiveStreamIdsRef = useRef<Set<string>>(new Set())
 
   const notesByConversationId = useMemo(() => {
     const map = new Map<string, ResearchNoteItem>()
@@ -106,6 +156,14 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
     return map
   }, [conversations])
 
+  const messagesById = useMemo(() => {
+    const map = new Map<string, Message>()
+    for (const message of messages) {
+      map.set(String(message.id), message)
+    }
+    return map
+  }, [messages])
+
   const buildAgentStreamListItem = useCallback(
     (streamId: string, stream: StreamState, completedAt: string | null = null, displayIndex = 0): AgentStreamListItem => {
       const streamConversationId = stream.conversationId ? String(stream.conversationId) : null
@@ -118,6 +176,8 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
         stream.lineage.rootMessageId ||
         null
       const { activityKind, activityLabel } = getStreamActivity(stream)
+      const parentMessage = resolveParentMessage(messagesById, stream)
+      const parentMessageText = normalizeMessagePreview(parentMessage)
 
       return {
         streamId,
@@ -129,13 +189,15 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
         hasError: Boolean(stream.error),
         createdAt: stream.createdAt,
         rootMessageId: stream.lineage.rootMessageId ? String(stream.lineage.rootMessageId) : null,
+        parentMessageId: parentMessage?.id ? String(parentMessage.id) : null,
+        parentMessageText,
         activityKind,
         activityLabel,
         completedAt,
         displayName: `agent-${displayIndex + 1}`,
       }
     },
-    [conversationsById, notesByConversationId]
+    [conversationsById, messagesById, notesByConversationId]
   )
 
   const activeStreams = useMemo(() => {
@@ -148,12 +210,46 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
     }
 
     return streams
-      .sort((a, b) => b.stream.createdAt.localeCompare(a.stream.createdAt))
+      .sort((a, b) => a.stream.createdAt.localeCompare(b.stream.createdAt))
       .map((entry, index) => buildAgentStreamListItem(entry.streamId, entry.stream, null, index))
+  }, [buildAgentStreamListItem, streamingRoot.activeIds, streamingRoot.byId])
+
+  useEffect(() => {
+    const currentActiveIds = new Set<string>()
+
+    for (const streamId of streamingRoot.activeIds) {
+      const stream = streamingRoot.byId[streamId]
+      if (stream?.active) {
+        currentActiveIds.add(streamId)
+      }
+    }
+
+    const completedItems: AgentStreamListItem[] = []
+
+    previousActiveStreamIdsRef.current.forEach(streamId => {
+      if (currentActiveIds.has(streamId)) return
+      const stream = streamingRoot.byId[streamId]
+      if (!stream) return
+      completedItems.push(buildAgentStreamListItem(streamId, stream, new Date().toISOString(), completedItems.length))
+    })
+
+    if (completedItems.length > 0) {
+      setStreamHistory(previous => {
+        const incomingById = new Map(completedItems.map(item => [item.streamId, item]))
+        const merged = [...previous.filter(item => !incomingById.has(item.streamId)), ...completedItems]
+        return merged
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+          .slice(-40)
+          .map((item, index) => ({ ...item, displayName: `agent-${index + 1}` }))
+      })
+    }
+
+    previousActiveStreamIdsRef.current = currentActiveIds
   }, [buildAgentStreamListItem, streamingRoot.activeIds, streamingRoot.byId])
 
   return {
     activeStreams,
+    streamHistory,
     buildAgentStreamListItem,
     streamingRoot,
   }

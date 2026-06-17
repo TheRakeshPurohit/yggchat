@@ -1,6 +1,11 @@
 import type { OperationMode } from './chatTypes'
 import sysPromptConfig from './sys_prompt.json'
 import { getActiveChatModePrompt, getAgentModePrompt } from '../../helpers/operationModePromptStorage'
+import {
+  loadPlanModeResponseSettings,
+  normalizePlanModeVerbosity,
+  type PlanModeVerbosity,
+} from '../../helpers/planModeResponseSettingsStorage'
 import type { ToolDefinition } from './toolDefinitions'
 
 const appendPromptPart = (parts: string[], value?: string | null) => {
@@ -15,10 +20,25 @@ export interface BuildOperationModeSystemPromptInput {
   conversationPrompt?: string | null
   basePrompt?: string | null
   includeCustomToolsPrompt?: boolean
+  planModeVerbosity?: PlanModeVerbosity | null
 }
 
 export function getOperationModeSystemPrompt(operationMode: OperationMode): string {
   return operationMode === 'plan' ? getActiveChatModePrompt().prompt : getAgentModePrompt().prompt
+}
+
+export function buildPlanModeResponseStylePrompt(verbosity?: PlanModeVerbosity | null): string {
+  const resolvedVerbosity = normalizePlanModeVerbosity(verbosity ?? loadPlanModeResponseSettings().verbosity)
+
+  switch (resolvedVerbosity) {
+    case 'detailed':
+      return '## Plan Response Style\n\nUse detailed plans when helpful, but stay focused and avoid unrelated explanation.'
+    case 'normal':
+      return '## Plan Response Style\n\nUse a balanced plan with enough detail to implement the change. Avoid unnecessary verbosity.'
+    case 'concise':
+    default:
+      return '## Plan Response Style\n\nUse short, concise plans. Prefer brief bullets and avoid unnecessary detail.'
+  }
 }
 
 export function buildOperationModeSystemPrompt({
@@ -28,10 +48,14 @@ export function buildOperationModeSystemPrompt({
   conversationPrompt,
   basePrompt,
   includeCustomToolsPrompt = true,
+  planModeVerbosity,
 }: BuildOperationModeSystemPromptInput): string {
   const parts: string[] = []
 
   appendPromptPart(parts, getOperationModeSystemPrompt(operationMode))
+  if (operationMode === 'plan') {
+    appendPromptPart(parts, buildPlanModeResponseStylePrompt(planModeVerbosity))
+  }
   appendPromptPart(parts, basePrompt)
   appendPromptPart(parts, defaultUserPrompt)
   appendPromptPart(parts, projectPrompt)

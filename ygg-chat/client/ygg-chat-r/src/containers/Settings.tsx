@@ -35,10 +35,12 @@ import {
 import {
   loadAutoCompactionEnabled,
   loadHeimdallNotePreviewHoverPaddingEnabled,
+  loadShowAddedFilesPills,
   loadShowTokenUsageBar,
   loadShowTokenUsageHoverDetails,
   saveAutoCompactionEnabled,
   saveHeimdallNotePreviewHoverPaddingEnabled,
+  saveShowAddedFilesPills,
   saveShowTokenUsageBar,
   saveShowTokenUsageHoverDetails,
 } from '../helpers/chatUiSettingsStorage'
@@ -83,6 +85,13 @@ import {
   selectChatModePrompt,
   updateChatModePrompt,
 } from '../helpers/operationModePromptStorage'
+import {
+  loadPlanModeResponseSettings,
+  PLAN_MODE_RESPONSE_SETTINGS_CHANGE_EVENT,
+  PlanModeResponseSettings,
+  PLAN_MODE_VERBOSITY_OPTIONS,
+  savePlanModeResponseSettings,
+} from '../helpers/planModeResponseSettingsStorage'
 import {
   DEFAULT_LMSTUDIO_BASE_URL,
   loadProviderSettings,
@@ -333,6 +342,9 @@ const Settings: React.FC = () => {
   const [operationModePromptSettings, setOperationModePromptSettings] = useState<OperationModePromptSettings>(() =>
     loadOperationModePromptSettings()
   )
+  const [planModeResponseSettings, setPlanModeResponseSettings] = useState<PlanModeResponseSettings>(() =>
+    loadPlanModeResponseSettings()
+  )
   const [chatModePromptNameInput, setChatModePromptNameInput] = useState('')
   const [chatModePromptInput, setChatModePromptInput] = useState('')
   const [showTokenUsageBar, setShowTokenUsageBar] = useState<boolean>(() => loadShowTokenUsageBar())
@@ -340,6 +352,7 @@ const Settings: React.FC = () => {
     loadShowTokenUsageHoverDetails()
   )
   const [autoCompactionEnabled, setAutoCompactionEnabled] = useState<boolean>(() => loadAutoCompactionEnabled())
+  const [showAddedFilesPills, setShowAddedFilesPills] = useState<boolean>(() => loadShowAddedFilesPills())
   const [heimdallNotePreviewHoverPaddingEnabled, setHeimdallNotePreviewHoverPaddingEnabled] = useState<boolean>(() =>
     loadHeimdallNotePreviewHoverPaddingEnabled()
   )
@@ -718,6 +731,22 @@ const Settings: React.FC = () => {
       window.removeEventListener(
         OPERATION_MODE_PROMPT_SETTINGS_CHANGE_EVENT,
         handleOperationModePromptSettingsChange as EventListener
+      )
+  }, [])
+
+  useEffect(() => {
+    const handlePlanModeResponseSettingsChange = (e: CustomEvent<PlanModeResponseSettings>) => {
+      setPlanModeResponseSettings(e.detail)
+    }
+
+    window.addEventListener(
+      PLAN_MODE_RESPONSE_SETTINGS_CHANGE_EVENT,
+      handlePlanModeResponseSettingsChange as EventListener
+    )
+    return () =>
+      window.removeEventListener(
+        PLAN_MODE_RESPONSE_SETTINGS_CHANGE_EVENT,
+        handlePlanModeResponseSettingsChange as EventListener
       )
   }, [])
 
@@ -1731,10 +1760,29 @@ const Settings: React.FC = () => {
     })
   }
 
+  const handleAddedFilesPillsToggle = () => {
+    const nextValue = !showAddedFilesPills
+    saveShowAddedFilesPills(nextValue)
+    setShowAddedFilesPills(nextValue)
+    showStatus({
+      type: 'success',
+      text: nextValue ? 'Added file pills shown in Chat.' : 'Added file pills hidden in Chat.',
+    })
+  }
+
   const handleChatModePromptSelect = (promptId: string) => {
     const saved = selectChatModePrompt(promptId)
     setOperationModePromptSettings(saved)
     showStatus({ type: 'success', text: 'Chat Mode prompt selected.' })
+  }
+
+  const handlePlanModeVerbosityChange = (value: string) => {
+    const verbosity = PLAN_MODE_VERBOSITY_OPTIONS.includes(value as PlanModeResponseSettings['verbosity'])
+      ? (value as PlanModeResponseSettings['verbosity'])
+      : 'concise'
+    const saved = savePlanModeResponseSettings({ ...planModeResponseSettings, verbosity })
+    setPlanModeResponseSettings(saved)
+    showStatus({ type: 'success', text: `Plan verbosity set to ${verbosity}.` })
   }
 
   const handleSaveNewChatModePrompt = () => {
@@ -2439,6 +2487,27 @@ const Settings: React.FC = () => {
 
             <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
               <div>
+                <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Show Added File Pills</p>
+                <p className='text-sm text-stone-500 dark:text-stone-400'>
+                  Display selected @ files as removable pills below the chat input.
+                </p>
+              </div>
+              <button
+                onClick={handleAddedFilesPillsToggle}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  showAddedFilesPills ? 'bg-emerald-500 dark:bg-emerald-600' : 'bg-stone-300 dark:bg-stone-600'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    showAddedFilesPills ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <div>
                 <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Auto Compaction</p>
                 <p className='text-sm text-stone-500 dark:text-stone-400'>
                   Automatically compact the visible branch before send when context usage gets near the model or credit
@@ -2504,6 +2573,22 @@ const Settings: React.FC = () => {
                   ...operationModePromptSettings.chatPrompts.map(prompt => ({ value: prompt.id, label: prompt.name })),
                 ]}
                 className='max-w-xl'
+              />
+            </div>
+
+            <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Plan Verbosity</p>
+              <p className='text-sm text-stone-500 dark:text-stone-400'>
+                Controls how much detail Plan Mode asks the model to include in implementation plans.
+              </p>
+              <Select
+                value={planModeResponseSettings.verbosity}
+                onChange={handlePlanModeVerbosityChange}
+                options={PLAN_MODE_VERBOSITY_OPTIONS.map(option => ({
+                  value: option,
+                  label: option === 'concise' ? 'Concise' : option === 'normal' ? 'Normal' : 'Detailed',
+                }))}
+                className='max-w-xs'
               />
             </div>
 

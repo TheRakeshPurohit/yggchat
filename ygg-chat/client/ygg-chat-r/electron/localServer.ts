@@ -63,6 +63,14 @@ import { UtilityToolRuntimeHost } from './tools/runtime/UtilityToolRuntimeHost.j
 import { execute as executeThemeManager } from './tools/themeManager.js'
 import { createTodoList, editTodoList, listTodoLists, readTodoList } from './tools/todoMd.js'
 import { executePlanMd } from './tools/planMd.js'
+import {
+  getStreamUndoSummary,
+  listStreamUndoSummariesByConversation,
+  markStreamUndoAssistantMessage,
+  recordPreEditBackup,
+  recordToolEditSuccess,
+  restoreStreamUndo,
+} from './tools/streamUndoManager.js'
 
 /**
  * Validates and resolves a path to ensure it's within the allowed rootPath scope.
@@ -536,7 +544,8 @@ function initializeBuiltInToolRegistry() {
     })
   })
 
-  builtInTools.set('edit_file', async (args, { rootPath, operationMode }) => {
+  builtInTools.set('edit_file', async (args, options) => {
+    const { rootPath, operationMode } = options
     const {
       path: filePath,
       operation,
@@ -555,7 +564,24 @@ function initializeBuiltInToolRegistry() {
       approxEndLine,
     } = args
     if (!filePath) throw new Error('path is required')
-    return await editFile(filePath, operation, {
+
+    const effectiveCwd = rootPath
+    const absolutePath = validateAndResolvePath(filePath, effectiveCwd, false)
+    if (operationMode === 'execute' && options.streamId) {
+      await recordPreEditBackup({
+        streamId: options.streamId,
+        conversationId: options.conversationId ?? null,
+        messageId: options.messageId ?? null,
+        parentMessageId: options.parentMessageId ?? null,
+        rootPath: rootPath ?? null,
+        cwd: effectiveCwd ?? null,
+        toolCallId: options.toolCallId ?? null,
+        originalPath: filePath,
+        absolutePath,
+      })
+    }
+
+    const result = await editFile(filePath, operation, {
       searchPattern,
       replacement,
       content,
@@ -576,9 +602,29 @@ function initializeBuiltInToolRegistry() {
       operationMode,
       cwd: rootPath,
     })
+
+    if (operationMode === 'execute' && options.streamId && result?.success && (result.replacements ?? 0) > 0) {
+      await recordToolEditSuccess({
+        streamId: options.streamId,
+        conversationId: options.conversationId ?? null,
+        messageId: options.messageId ?? null,
+        parentMessageId: options.parentMessageId ?? null,
+        rootPath: rootPath ?? null,
+        cwd: effectiveCwd ?? null,
+        toolCallId: options.toolCallId ?? null,
+        originalPath: filePath,
+        absolutePath,
+        toolName: 'edit_file',
+        operation,
+      })
+      return { ...result, undo: { tracked: true, streamId: options.streamId } }
+    }
+
+    return result
   })
 
-  builtInTools.set('multi_edit', async (args, { rootPath, operationMode }) => {
+  builtInTools.set('multi_edit', async (args, options) => {
+    const { rootPath, operationMode } = options
     const {
       edits,
       stopOnError,
@@ -590,7 +636,33 @@ function initializeBuiltInToolRegistry() {
       validateContent,
     } = args
     if (!Array.isArray(edits) || edits.length === 0) throw new Error('edits are required')
-    return await multiEdit(edits, {
+
+    const effectiveCwd = rootPath
+    const editPaths = edits
+      .map((edit: any, index: number) => ({ edit, index, filePath: typeof edit?.path === 'string' ? edit.path : null }))
+      .filter((item: { filePath: string | null }): item is { edit: any; index: number; filePath: string } => Boolean(item.filePath))
+
+    if (operationMode === 'execute' && options.streamId) {
+      const seen = new Set<string>()
+      for (const item of editPaths) {
+        const absolutePath = validateAndResolvePath(item.filePath, effectiveCwd, false)
+        if (seen.has(absolutePath)) continue
+        seen.add(absolutePath)
+        await recordPreEditBackup({
+          streamId: options.streamId,
+          conversationId: options.conversationId ?? null,
+          messageId: options.messageId ?? null,
+          parentMessageId: options.parentMessageId ?? null,
+          rootPath: rootPath ?? null,
+          cwd: effectiveCwd ?? null,
+          toolCallId: options.toolCallId ?? null,
+          originalPath: item.filePath,
+          absolutePath,
+        })
+      }
+    }
+
+    const result = await multiEdit(edits, {
       stopOnError,
       createBackup,
       encoding,
@@ -603,6 +675,35 @@ function initializeBuiltInToolRegistry() {
       operationMode,
       cwd: rootPath,
     })
+
+    if (operationMode === 'execute' && options.streamId && result?.results) {
+      let tracked = 0
+      for (const item of result.results) {
+        if (!item?.success || (item.replacements ?? 0) <= 0) continue
+        const sourceEdit = edits[item.index]
+        const originalPath = item.path || sourceEdit?.path
+        if (typeof originalPath !== 'string') continue
+        const absolutePath = validateAndResolvePath(originalPath, effectiveCwd, false)
+        await recordToolEditSuccess({
+          streamId: options.streamId,
+          conversationId: options.conversationId ?? null,
+          messageId: options.messageId ?? null,
+          parentMessageId: options.parentMessageId ?? null,
+          rootPath: rootPath ?? null,
+          cwd: effectiveCwd ?? null,
+          toolCallId: options.toolCallId ?? null,
+          originalPath,
+          absolutePath,
+          toolName: 'multi_edit',
+          operation: item.operation ?? sourceEdit?.operation ?? null,
+          index: item.index,
+        })
+        tracked += 1
+      }
+      if (tracked > 0) return { ...result, undo: { tracked: true, streamId: options.streamId, edits: tracked } }
+    }
+
+    return result
   })
 
   builtInTools.set('delete_file', async (args, { rootPath, operationMode }) => {
@@ -917,7 +1018,9 @@ type LocalToolExecutionOptions = {
   operationMode?: 'plan' | 'execute'
   conversationId?: string | null
   messageId?: string | null
+  parentMessageId?: string | null
   streamId?: string | null
+  toolCallId?: string | null
 }
 
 type HermesYggMcpToolDefinition = {
@@ -1546,6 +1649,41 @@ function initializeLocalDatabase(dbPath: string) {
   }
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS streaming_runs (
+      stream_id TEXT PRIMARY KEY,
+      conversation_id TEXT,
+      parent_message_id TEXT,
+      user_message_id TEXT,
+      assistant_message_id TEXT,
+      final_message_id TEXT,
+      stream_type TEXT NOT NULL DEFAULT 'primary' CHECK (stream_type IN ('primary','branch','tool','subagent')),
+      status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','aborted','error')),
+      end_reason TEXT CHECK (end_reason IN ('completed','aborted','error','pruned','unknown') OR end_reason IS NULL),
+      provider TEXT,
+      model_name TEXT,
+      operation TEXT,
+      source TEXT NOT NULL DEFAULT 'renderer' CHECK (source IN ('renderer','headless','subagent','tool','unknown')),
+      root_message_id TEXT,
+      origin_message_id TEXT,
+      parent_stream_id TEXT,
+      tool_call_id TEXT,
+      error TEXT,
+      metadata_json TEXT,
+      started_at DATETIME NOT NULL,
+      ended_at DATETIME,
+      duration_ms INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_streaming_runs_conversation_started ON streaming_runs(conversation_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_streaming_runs_status_started ON streaming_runs(status, started_at);
+    CREATE INDEX IF NOT EXISTS idx_streaming_runs_parent_stream ON streaming_runs(parent_stream_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_streaming_runs_final_message ON streaming_runs(final_message_id);
+  `)
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS subagent_runs (
       id TEXT PRIMARY KEY,
       conversation_id TEXT NOT NULL,
@@ -1933,7 +2071,17 @@ function initializeLocalDatabase(dbPath: string) {
     `)
 
     db.exec(`
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_fts_insert
+      DROP TRIGGER IF EXISTS note_search_docs_fts_insert;
+      DROP TRIGGER IF EXISTS note_search_docs_fts_update;
+      DROP TRIGGER IF EXISTS note_search_docs_fts_delete;
+      DROP TRIGGER IF EXISTS note_search_docs_from_messages_insert;
+      DROP TRIGGER IF EXISTS note_search_docs_from_messages_update;
+      DROP TRIGGER IF EXISTS note_search_docs_from_messages_delete;
+      DROP TRIGGER IF EXISTS note_search_docs_from_conversations_update;
+    `)
+
+    db.exec(`
+      CREATE TRIGGER note_search_docs_fts_insert
       AFTER INSERT ON note_search_docs
       BEGIN
         INSERT INTO note_search_fts (message_id, conversation_title, note)
@@ -1944,7 +2092,7 @@ function initializeLocalDatabase(dbPath: string) {
         );
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_fts_update
+      CREATE TRIGGER note_search_docs_fts_update
       AFTER UPDATE ON note_search_docs
       BEGIN
         DELETE FROM note_search_fts WHERE message_id = OLD.message_id;
@@ -1956,13 +2104,13 @@ function initializeLocalDatabase(dbPath: string) {
         );
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_fts_delete
+      CREATE TRIGGER note_search_docs_fts_delete
       AFTER DELETE ON note_search_docs
       BEGIN
         DELETE FROM note_search_fts WHERE message_id = OLD.message_id;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_messages_insert
+      CREATE TRIGGER note_search_docs_from_messages_insert
       AFTER INSERT ON messages
       WHEN LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0
       BEGIN
@@ -1988,9 +2136,18 @@ function initializeLocalDatabase(dbPath: string) {
           COALESCE(NEW.created_at, CURRENT_TIMESTAMP),
           CURRENT_TIMESTAMP
         FROM conversations c
-        WHERE c.id = NEW.conversation_id;
+        WHERE c.id = NEW.conversation_id
+        ON CONFLICT(message_id) DO UPDATE SET
+          conversation_id = excluded.conversation_id,
+          project_id = excluded.project_id,
+          user_id = excluded.user_id,
+          storage_mode = excluded.storage_mode,
+          conversation_title = excluded.conversation_title,
+          note = excluded.note,
+          message_created_at = excluded.message_created_at,
+          note_updated_at = excluded.note_updated_at;
 
-        INSERT OR REPLACE INTO note_search_embedding_state (
+        INSERT INTO note_search_embedding_state (
           message_id,
           content_hash,
           embedding_model,
@@ -2006,13 +2163,24 @@ function initializeLocalDatabase(dbPath: string) {
           NULL,
           'pending',
           NULL
-        );
+        )
+        ON CONFLICT(message_id) DO UPDATE SET
+          content_hash = NULL,
+          embedding_status = CASE
+            WHEN note_search_embedding_state.embedding_status = 'ready' THEN 'stale'
+            ELSE note_search_embedding_state.embedding_status
+          END,
+          last_error = NULL;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_messages_update
+      CREATE TRIGGER note_search_docs_from_messages_update
       AFTER UPDATE ON messages
+      WHEN COALESCE(OLD.note, '') IS NOT COALESCE(NEW.note, '')
       BEGIN
-        DELETE FROM note_search_docs WHERE message_id = OLD.id;
+        DELETE FROM note_search_docs
+        WHERE message_id = OLD.id
+          AND LENGTH(TRIM(COALESCE(NEW.note, ''))) = 0;
+
         INSERT INTO note_search_docs (
           message_id,
           conversation_id,
@@ -2036,34 +2204,22 @@ function initializeLocalDatabase(dbPath: string) {
           CURRENT_TIMESTAMP
         FROM conversations c
         WHERE c.id = NEW.conversation_id
-          AND LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0;
+          AND LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0
+        ON CONFLICT(message_id) DO UPDATE SET
+          conversation_id = excluded.conversation_id,
+          project_id = excluded.project_id,
+          user_id = excluded.user_id,
+          storage_mode = excluded.storage_mode,
+          conversation_title = excluded.conversation_title,
+          note = excluded.note,
+          message_created_at = excluded.message_created_at,
+          note_updated_at = excluded.note_updated_at;
 
         DELETE FROM note_search_embedding_state
         WHERE message_id = OLD.id
           AND LENGTH(TRIM(COALESCE(NEW.note, ''))) = 0;
 
-        INSERT OR REPLACE INTO note_search_embedding_state (
-          message_id,
-          content_hash,
-          embedding_model,
-          embedding_dimensions,
-          embedding_updated_at,
-          embedding_status,
-          last_error
-        )
-        SELECT
-          NEW.id,
-          NULL,
-          s.embedding_model,
-          s.embedding_dimensions,
-          s.embedding_updated_at,
-          'stale',
-          NULL
-        FROM note_search_embedding_state s
-        WHERE s.message_id = OLD.id
-          AND LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0;
-
-        INSERT OR IGNORE INTO note_search_embedding_state (
+        INSERT INTO note_search_embedding_state (
           message_id,
           content_hash,
           embedding_model,
@@ -2080,17 +2236,25 @@ function initializeLocalDatabase(dbPath: string) {
           NULL,
           'pending',
           NULL
-        WHERE LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0;
+        WHERE LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0
+        ON CONFLICT(message_id) DO UPDATE SET
+          content_hash = NULL,
+          embedding_status = CASE
+            WHEN COALESCE(OLD.note, '') IS COALESCE(NEW.note, '') THEN note_search_embedding_state.embedding_status
+            WHEN note_search_embedding_state.embedding_status = 'ready' THEN 'stale'
+            ELSE 'pending'
+          END,
+          last_error = NULL;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_messages_delete
+      CREATE TRIGGER note_search_docs_from_messages_delete
       AFTER DELETE ON messages
       BEGIN
         DELETE FROM note_search_docs WHERE message_id = OLD.id;
         DELETE FROM note_search_embedding_state WHERE message_id = OLD.id;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_conversations_update
+      CREATE TRIGGER note_search_docs_from_conversations_update
       AFTER UPDATE ON conversations
       BEGIN
         UPDATE note_search_docs
@@ -2235,8 +2399,14 @@ function initializeLocalDatabase(dbPath: string) {
     getLocalConversations: db.prepare(
       "SELECT * FROM conversations WHERE user_id = ? AND storage_mode = 'local' ORDER BY updated_at DESC"
     ),
+    getLocalConversationsPaginated: db.prepare(
+      "SELECT * FROM conversations WHERE user_id = ? AND storage_mode = 'local' ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+    ),
     getLocalConversationsByUserAndProject: db.prepare(
       "SELECT * FROM conversations WHERE user_id = ? AND project_id = ? AND storage_mode = 'local' ORDER BY updated_at DESC"
+    ),
+    getLocalConversationsByUserAndProjectPaginated: db.prepare(
+      "SELECT * FROM conversations WHERE user_id = ? AND project_id = ? AND storage_mode = 'local' ORDER BY updated_at DESC LIMIT ? OFFSET ?"
     ),
     getFavoriteConversations: db.prepare(
       'SELECT * FROM conversations WHERE user_id = ? AND favorite = 1 ORDER BY updated_at DESC'
@@ -2305,6 +2475,58 @@ function initializeLocalDatabase(dbPath: string) {
     getLastMessageByConversationId: db.prepare(
       'SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1'
     ),
+
+    // Streaming run lifecycle tracking
+    upsertStreamingRun: db.prepare(`
+        INSERT INTO streaming_runs (
+          stream_id, conversation_id, parent_message_id, user_message_id, assistant_message_id,
+          final_message_id, stream_type, status, end_reason, provider, model_name, operation,
+          source, root_message_id, origin_message_id, parent_stream_id, tool_call_id, error,
+          metadata_json, started_at, ended_at, duration_ms, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(stream_id) DO UPDATE SET
+          conversation_id = COALESCE(excluded.conversation_id, streaming_runs.conversation_id),
+          parent_message_id = COALESCE(excluded.parent_message_id, streaming_runs.parent_message_id),
+          user_message_id = COALESCE(excluded.user_message_id, streaming_runs.user_message_id),
+          assistant_message_id = COALESCE(excluded.assistant_message_id, streaming_runs.assistant_message_id),
+          final_message_id = COALESCE(excluded.final_message_id, streaming_runs.final_message_id),
+          stream_type = excluded.stream_type,
+          status = excluded.status,
+          end_reason = COALESCE(excluded.end_reason, streaming_runs.end_reason),
+          provider = COALESCE(excluded.provider, streaming_runs.provider),
+          model_name = COALESCE(excluded.model_name, streaming_runs.model_name),
+          operation = COALESCE(excluded.operation, streaming_runs.operation),
+          source = excluded.source,
+          root_message_id = COALESCE(excluded.root_message_id, streaming_runs.root_message_id),
+          origin_message_id = COALESCE(excluded.origin_message_id, streaming_runs.origin_message_id),
+          parent_stream_id = COALESCE(excluded.parent_stream_id, streaming_runs.parent_stream_id),
+          tool_call_id = COALESCE(excluded.tool_call_id, streaming_runs.tool_call_id),
+          error = COALESCE(excluded.error, streaming_runs.error),
+          metadata_json = COALESCE(excluded.metadata_json, streaming_runs.metadata_json),
+          ended_at = COALESCE(excluded.ended_at, streaming_runs.ended_at),
+          duration_ms = COALESCE(excluded.duration_ms, streaming_runs.duration_ms),
+          updated_at = excluded.updated_at
+      `),
+    updateStreamingRun: db.prepare(`
+        UPDATE streaming_runs
+        SET status = COALESCE(?, status),
+            end_reason = COALESCE(?, end_reason),
+            assistant_message_id = COALESCE(?, assistant_message_id),
+            final_message_id = COALESCE(?, final_message_id),
+            user_message_id = COALESCE(?, user_message_id),
+            error = ?,
+            metadata_json = COALESCE(?, metadata_json),
+            ended_at = COALESCE(?, ended_at),
+            duration_ms = COALESCE(?, duration_ms),
+            updated_at = ?
+        WHERE stream_id = ?
+      `),
+    getStreamingRunById: db.prepare('SELECT * FROM streaming_runs WHERE stream_id = ?'),
+    getStreamingRunsByConversationId: db.prepare(
+      'SELECT * FROM streaming_runs WHERE conversation_id = ? ORDER BY started_at ASC'
+    ),
+    getActiveStreamingRuns: db.prepare("SELECT * FROM streaming_runs WHERE status = 'running' ORDER BY started_at ASC"),
 
     // Subagent runs/transcripts
     upsertSubagentRun: db.prepare(`
@@ -2698,6 +2920,36 @@ const normalizeSubagentRunRow = (row: any, messages: any[] = []) => ({
   tool_calls_used: Number(row.tool_calls_used || 0),
   messages,
 })
+
+const normalizeStreamingRunRow = (row: any) => {
+  if (!row) return null
+  return {
+    ...row,
+    metadata: safeJsonParseLocal(row.metadata_json, null),
+    duration_ms: row.duration_ms == null ? null : Number(row.duration_ms),
+  }
+}
+
+const normalizeStreamingRunMetadata = (value: any): string | null => {
+  if (value == null) return null
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return null
+  }
+}
+
+const isTerminalStreamingRunStatus = (status: any): status is 'completed' | 'aborted' | 'error' =>
+  status === 'completed' || status === 'aborted' || status === 'error'
+
+const calculateStreamingRunDurationMs = (startedAt: any, endedAt: string | null): number | null => {
+  if (!startedAt || !endedAt) return null
+  const started = new Date(startedAt).getTime()
+  const ended = new Date(endedAt).getTime()
+  if (!Number.isFinite(started) || !Number.isFinite(ended)) return null
+  return Math.max(0, ended - started)
+}
 
 // ChatNode interface for message tree structure
 interface ChatNode {
@@ -4193,6 +4445,134 @@ function setupServer() {
     }
   })
 
+  // Streaming run lifecycle APIs (local-only durable stream ledger)
+  app.post('/api/streaming/runs', (req, res) => {
+    try {
+      const body = req.body || {}
+      const streamId = String(body.stream_id || body.streamId || '').trim()
+      if (!streamId) {
+        res.status(400).json({ error: 'stream_id is required' })
+        return
+      }
+
+      const streamType = ['primary', 'branch', 'tool', 'subagent'].includes(body.stream_type || body.streamType)
+        ? body.stream_type || body.streamType
+        : 'primary'
+      const status = ['running', 'completed', 'aborted', 'error'].includes(body.status) ? body.status : 'running'
+      const source = ['renderer', 'headless', 'subagent', 'tool', 'unknown'].includes(body.source) ? body.source : 'renderer'
+      const now = new Date().toISOString()
+      const startedAt = body.started_at || body.startedAt || now
+      const endedAt = body.ended_at || body.endedAt || (isTerminalStreamingRunStatus(status) ? now : null)
+      const durationMs =
+        typeof body.duration_ms === 'number'
+          ? body.duration_ms
+          : typeof body.durationMs === 'number'
+            ? body.durationMs
+            : calculateStreamingRunDurationMs(startedAt, endedAt)
+      const metadataJson = normalizeStreamingRunMetadata(body.metadata_json ?? body.metadata)
+
+      statements.upsertStreamingRun.run(
+        streamId,
+        body.conversation_id || body.conversationId || null,
+        body.parent_message_id || body.parentMessageId || null,
+        body.user_message_id || body.userMessageId || null,
+        body.assistant_message_id || body.assistantMessageId || null,
+        body.final_message_id || body.finalMessageId || null,
+        streamType,
+        status,
+        body.end_reason || body.endReason || null,
+        body.provider || null,
+        body.model_name || body.modelName || null,
+        body.operation || null,
+        source,
+        body.root_message_id || body.rootMessageId || null,
+        body.origin_message_id || body.originMessageId || null,
+        body.parent_stream_id || body.parentStreamId || null,
+        body.tool_call_id || body.toolCallId || null,
+        body.error || null,
+        metadataJson,
+        startedAt,
+        endedAt,
+        durationMs,
+        body.created_at || body.createdAt || now,
+        now
+      )
+
+      const run = statements.getStreamingRunById.get(streamId)
+      res.json({ run: normalizeStreamingRunRow(run) })
+    } catch (error) {
+      console.error('[LocalServer] Error upserting streaming run:', error)
+      res.status(500).json({ error: 'Failed to upsert streaming run' })
+    }
+  })
+
+  app.patch('/api/streaming/runs/:streamId', (req, res) => {
+    try {
+      const { streamId } = req.params
+      const existing = statements.getStreamingRunById.get(streamId)
+      if (!existing) {
+        res.status(404).json({ error: 'Streaming run not found' })
+        return
+      }
+
+      const body = req.body || {}
+      const status = ['running', 'completed', 'aborted', 'error'].includes(body.status) ? body.status : null
+      const endedAt = body.ended_at || body.endedAt || (isTerminalStreamingRunStatus(status) ? new Date().toISOString() : null)
+      const durationMs =
+        typeof body.duration_ms === 'number'
+          ? body.duration_ms
+          : typeof body.durationMs === 'number'
+            ? body.durationMs
+            : calculateStreamingRunDurationMs(existing.started_at, endedAt)
+      const metadataJson = normalizeStreamingRunMetadata(body.metadata_json ?? body.metadata)
+      const now = new Date().toISOString()
+
+      statements.updateStreamingRun.run(
+        status,
+        body.end_reason || body.endReason || null,
+        body.assistant_message_id || body.assistantMessageId || null,
+        body.final_message_id || body.finalMessageId || null,
+        body.user_message_id || body.userMessageId || null,
+        body.error ?? null,
+        metadataJson,
+        endedAt,
+        durationMs,
+        now,
+        streamId
+      )
+
+      const run = statements.getStreamingRunById.get(streamId)
+      res.json({ run: normalizeStreamingRunRow(run) })
+    } catch (error) {
+      console.error('[LocalServer] Error updating streaming run:', error)
+      res.status(500).json({ error: 'Failed to update streaming run' })
+    }
+  })
+
+  app.get('/api/streaming/runs/:streamId', (req, res) => {
+    try {
+      const run = statements.getStreamingRunById.get(req.params.streamId)
+      if (!run) {
+        res.status(404).json({ error: 'Streaming run not found' })
+        return
+      }
+      res.json({ run: normalizeStreamingRunRow(run) })
+    } catch (error) {
+      console.error('[LocalServer] Error fetching streaming run:', error)
+      res.status(500).json({ error: 'Failed to fetch streaming run' })
+    }
+  })
+
+  app.get('/api/conversations/:conversationId/streaming-runs', (req, res) => {
+    try {
+      const runs = statements.getStreamingRunsByConversationId.all(req.params.conversationId).map(normalizeStreamingRunRow)
+      res.json({ runs })
+    } catch (error) {
+      console.error('[LocalServer] Error fetching conversation streaming runs:', error)
+      res.status(500).json({ error: 'Failed to fetch conversation streaming runs' })
+    }
+  })
+
   // Subagent run/transcript APIs (local-only side channel; not part of main message tree)
   app.post('/api/subagents/runs', (req, res) => {
     try {
@@ -4663,6 +5043,16 @@ function setupServer() {
 
       if (!db || !statements || !currentDbPath) {
         res.status(500).json({ error: 'Database not initialized' })
+        return
+      }
+
+      const existingMessage = statements.getMessageById.get(messageId) as { id: string } | undefined
+      if (!existingMessage) {
+        console.warn('[LocalServer] Cannot save base64 attachments: message not found', {
+          messageId,
+          attachmentCount: attachments.length,
+        })
+        res.status(409).json({ error: 'message_not_found', messageId })
         return
       }
 
@@ -5314,10 +5704,63 @@ function setupServer() {
     }
   })
 
+  // Stream edit undo endpoints
+  app.get('/api/undo/streams/:streamId', async (req, res) => {
+    try {
+      const summary = await getStreamUndoSummary(req.params.streamId)
+      if (!summary) {
+        res.status(404).json({ success: false, error: 'Undo manifest not found' })
+        return
+      }
+      res.json({ success: true, summary })
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.status(500).json({ success: false, error: msg })
+    }
+  })
+
+  app.get('/api/undo/conversations/:conversationId', async (req, res) => {
+    try {
+      const summaries = await listStreamUndoSummariesByConversation(req.params.conversationId)
+      res.json({ success: true, summaries })
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.status(500).json({ success: false, error: msg })
+    }
+  })
+
+  app.post('/api/undo/streams/:streamId/final-message', async (req, res) => {
+    try {
+      const summary = await markStreamUndoAssistantMessage(
+        req.params.streamId,
+        typeof req.body?.assistantMessageId === 'string' ? req.body.assistantMessageId : null
+      )
+      res.json({ success: true, summary })
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.status(500).json({ success: false, error: msg })
+    }
+  })
+
+  app.post('/api/undo/streams/:streamId/restore', async (req, res) => {
+    try {
+      const result = await restoreStreamUndo(req.params.streamId, {
+        force: req.body?.force === true,
+        expectedParentMessageId:
+          typeof req.body?.expectedParentMessageId === 'string' ? req.body.expectedParentMessageId : null,
+        restoredByMessageId: typeof req.body?.restoredByMessageId === 'string' ? req.body.restoredByMessageId : null,
+      })
+      res.status(result.success ? 200 : result.conflicts.length > 0 ? 409 : 400).json(result)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.status(500).json({ success: false, error: msg })
+    }
+  })
+
   // Tool Execution Endpoint (uses built-in and custom tool registries)
   app.post('/api/tools/execute', async (req, res) => {
     try {
-      const { toolName, args, rootPath, operationMode, conversationId, messageId, streamId } = req.body
+      const { toolName, args, rootPath, operationMode, conversationId, messageId, parentMessageId, streamId, toolCallId } = req.body
       const normalizedToolName = typeof toolName === 'string' ? toolName.trim() : toolName
       // console.log(`[LocalServer] Executing tool: ${toolName} (operationMode: ${operationMode || 'execute'})`)
 
@@ -5327,7 +5770,9 @@ function setupServer() {
         operationMode: operationMode as 'plan' | 'execute' | undefined,
         conversationId: conversationId ?? null,
         messageId: messageId ?? null,
+        parentMessageId: parentMessageId ?? null,
         streamId: streamId ?? null,
+        toolCallId: toolCallId ?? null,
       }
 
       let result: ToolResult
@@ -6324,6 +6769,36 @@ function setupServer() {
         const name = direct || functionName
         return name && name.trim() ? name.trim() : null
       }
+      const parseToolArgs = (toolCall: unknown): Record<string, unknown> => {
+        if (!toolCall || typeof toolCall !== 'object') return {}
+        const record = toolCall as Record<string, unknown>
+        const candidates = [
+          record.args,
+          record.arguments,
+          record.input,
+          record.function && typeof record.function === 'object'
+            ? (record.function as Record<string, unknown>).arguments
+            : undefined,
+        ]
+
+        for (const candidate of candidates) {
+          if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+            return candidate as Record<string, unknown>
+          }
+          if (typeof candidate === 'string' && candidate.trim()) {
+            try {
+              const parsed = JSON.parse(candidate)
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                return parsed as Record<string, unknown>
+              }
+            } catch {
+              // ignore malformed tool argument JSON
+            }
+          }
+        }
+
+        return {}
+      }
 
       const rangeDaysParam = Number(req.query.rangeDays)
       const rangeDays = Number.isFinite(rangeDaysParam) ? clamp(Math.trunc(rangeDaysParam), 1, 365) : 30
@@ -6473,6 +6948,68 @@ function setupServer() {
       const filteredRequestedToolCalls = toolNameFilter
         ? requestedToolCalls.filter(toolName => toolName === toolNameFilter)
         : requestedToolCalls
+
+      const batchingByTool = new Map<
+        string,
+        { toolName: string; batches: number; expandedCalls: number; savedCalls: number }
+      >()
+      const batchingDailyMap = new Map<
+        string,
+        { date: string; batchedCalls: number; unbatchedEquivalentCalls: number; savedCalls: number }
+      >()
+      let batchedCalls = 0
+      let unbatchedEquivalentCalls = 0
+      let savedCalls = 0
+
+      const addBatchingToolStat = (toolName: string, expandedCalls: number) => {
+        if (toolName !== 'multi_call' && toolName !== 'multi_edit') return
+        const existing = batchingByTool.get(toolName) || { toolName, batches: 0, expandedCalls: 0, savedCalls: 0 }
+        existing.batches += 1
+        existing.expandedCalls += expandedCalls
+        existing.savedCalls += Math.max(0, expandedCalls - 1)
+        batchingByTool.set(toolName, existing)
+      }
+
+      for (const message of filteredMessages) {
+        const date = dayKey(message.created_at)
+        for (const toolCall of parseToolCalls(message.tool_calls)) {
+          const toolName = extractToolName(toolCall)
+          if (!toolName) continue
+          // toolNameFilter is intentionally matched against the persisted outer tool call.
+          // Nested multi_call calls are a different semantic and need a separate filter if exposed later.
+          if (toolNameFilter && toolName !== toolNameFilter) continue
+
+          const args = parseToolArgs(toolCall)
+          const nestedCalls = Array.isArray(args.calls) ? args.calls.length : 0
+          const edits = Array.isArray(args.edits) ? args.edits.length : 0
+          const expandedCalls =
+            toolName === 'multi_call' && nestedCalls > 0
+              ? nestedCalls
+              : toolName === 'multi_edit' && edits > 0
+                ? edits
+                : 1
+          const saved = Math.max(0, expandedCalls - 1)
+
+          batchedCalls += 1
+          unbatchedEquivalentCalls += expandedCalls
+          savedCalls += saved
+          addBatchingToolStat(toolName, expandedCalls)
+
+          const daily = batchingDailyMap.get(date) || {
+            date,
+            batchedCalls: 0,
+            unbatchedEquivalentCalls: 0,
+            savedCalls: 0,
+          }
+          daily.batchedCalls += 1
+          daily.unbatchedEquivalentCalls += expandedCalls
+          daily.savedCalls += saved
+          batchingDailyMap.set(date, daily)
+        }
+      }
+
+      const batchingByBatchTool = Array.from(batchingByTool.values()).sort((a, b) => a.toolName.localeCompare(b.toolName))
+      const batchingDaily = Array.from(batchingDailyMap.values()).sort((a, b) => a.date.localeCompare(b.date))
 
       const scopedToolJobs = toolJobs.filter(job => {
         const created = parseTimestamp(job.created_at)
@@ -6911,6 +7448,15 @@ function setupServer() {
             total: filteredRequestedToolCalls.length,
             byName: toolRequestedByName,
           },
+          batching: {
+            batchedCalls,
+            unbatchedEquivalentCalls,
+            savedCalls,
+            savedCallsPct: unbatchedEquivalentCalls > 0 ? round((savedCalls / unbatchedEquivalentCalls) * 100, 2) : 0,
+            cachePrefixSavingsFactorPct: round(savedCalls * 10, 2),
+            byBatchTool: batchingByBatchTool,
+            daily: batchingDaily,
+          },
           jobs: {
             available: true,
             statusCounts: toolStatusCounts,
@@ -7291,15 +7837,36 @@ function setupServer() {
     }
   })
 
-  // GET /api/local/conversations?userId=xxx[&projectId=yyy]
+  // GET /api/local/conversations?userId=xxx[&projectId=yyy][&limit=50&cursor=0]
   app.get('/api/local/conversations', (req, res) => {
     try {
       const userId = req.query.userId as string
       const projectId = (req.query.projectId as string | undefined) || undefined
+      const limitParam = req.query.limit as string | undefined
+      const cursorParam = req.query.cursor as string | undefined
       // console.log('[LocalServer] 📋 GET /api/local/conversations - userId:', userId, 'projectId:', projectId)
       if (!userId) {
         // console.log('[LocalServer] ❌ Missing userId parameter')
         res.status(400).json({ error: 'userId required' })
+        return
+      }
+
+      if (limitParam) {
+        const parsedLimit = Number(limitParam)
+        const parsedOffset = cursorParam ? Number(cursorParam) : 0
+        const limit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(200, Math.floor(parsedLimit))) : 50
+        const offset = Number.isFinite(parsedOffset) ? Math.max(0, Math.floor(parsedOffset)) : 0
+        const rows = projectId
+          ? statements.getLocalConversationsByUserAndProjectPaginated.all(userId, projectId, limit + 1, offset)
+          : statements.getLocalConversationsPaginated.all(userId, limit + 1, offset)
+        const hasMore = rows.length > limit
+        const conversations = hasMore ? rows.slice(0, limit) : rows
+
+        res.json({
+          conversations,
+          nextCursor: hasMore ? String(offset + limit) : null,
+          hasMore,
+        })
         return
       }
 

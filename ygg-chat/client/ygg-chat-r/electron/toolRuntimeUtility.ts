@@ -11,6 +11,7 @@ import { readFileContinuation, readTextFile } from './tools/readFile.js'
 import { formatReadFilesContent, readMultipleTextFiles } from './tools/readFiles.js'
 import { ripgrepSearch } from './tools/ripgrep.js'
 import { viewImage } from './tools/viewImage.js'
+import { recordPreEditBackup, recordToolEditSuccess } from './tools/streamUndoManager.js'
 import { customToolRegistry } from './tools/customToolLoader.js'
 import type { ToolExecutionOptions, UtilityRuntimeRequest, UtilityRuntimeResponse } from './tools/runtime/protocol.js'
 import { isManagedToolPath } from './utils/managedToolPaths.js'
@@ -165,7 +166,8 @@ function initializeBuiltInToolRegistry(): void {
     })
   })
 
-  builtInTools.set('edit_file', async (args, { rootPath, operationMode }) => {
+  builtInTools.set('edit_file', async (args, options) => {
+    const { rootPath, operationMode } = options
     const {
       path: filePath,
       operation,
@@ -184,7 +186,21 @@ function initializeBuiltInToolRegistry(): void {
       approxEndLine,
     } = args
     if (!filePath) throw new Error('path is required')
-    return await editFile(filePath, operation, {
+    const absolutePath = validateAndResolvePath(filePath, rootPath, false)
+    if (operationMode === 'execute' && options.streamId) {
+      await recordPreEditBackup({
+        streamId: options.streamId,
+        conversationId: options.conversationId ?? null,
+        messageId: options.messageId ?? null,
+        parentMessageId: options.parentMessageId ?? null,
+        rootPath: rootPath ?? null,
+        cwd: rootPath ?? null,
+        toolCallId: options.toolCallId ?? null,
+        originalPath: filePath,
+        absolutePath,
+      })
+    }
+    const result = await editFile(filePath, operation, {
       searchPattern,
       replacement,
       content,
@@ -203,9 +219,27 @@ function initializeBuiltInToolRegistry(): void {
       operationMode,
       cwd: rootPath,
     })
+    if (operationMode === 'execute' && options.streamId && result?.success && (result.replacements ?? 0) > 0) {
+      await recordToolEditSuccess({
+        streamId: options.streamId,
+        conversationId: options.conversationId ?? null,
+        messageId: options.messageId ?? null,
+        parentMessageId: options.parentMessageId ?? null,
+        rootPath: rootPath ?? null,
+        cwd: rootPath ?? null,
+        toolCallId: options.toolCallId ?? null,
+        originalPath: filePath,
+        absolutePath,
+        toolName: 'edit_file',
+        operation,
+      })
+      return { ...result, undo: { tracked: true, streamId: options.streamId } }
+    }
+    return result
   })
 
-  builtInTools.set('multi_edit', async (args, { rootPath, operationMode }) => {
+  builtInTools.set('multi_edit', async (args, options) => {
+    const { rootPath, operationMode } = options
     const {
       edits,
       stopOnError,
@@ -217,7 +251,29 @@ function initializeBuiltInToolRegistry(): void {
       validateContent,
     } = args
     if (!Array.isArray(edits) || edits.length === 0) throw new Error('edits are required')
-    return await multiEdit(edits, {
+    const editPaths = edits
+      .map((edit: any, index: number) => ({ edit, index, filePath: typeof edit?.path === 'string' ? edit.path : null }))
+      .filter((item: { filePath: string | null }): item is { edit: any; index: number; filePath: string } => Boolean(item.filePath))
+    if (operationMode === 'execute' && options.streamId) {
+      const seen = new Set<string>()
+      for (const item of editPaths) {
+        const absolutePath = validateAndResolvePath(item.filePath, rootPath, false)
+        if (seen.has(absolutePath)) continue
+        seen.add(absolutePath)
+        await recordPreEditBackup({
+          streamId: options.streamId,
+          conversationId: options.conversationId ?? null,
+          messageId: options.messageId ?? null,
+          parentMessageId: options.parentMessageId ?? null,
+          rootPath: rootPath ?? null,
+          cwd: rootPath ?? null,
+          toolCallId: options.toolCallId ?? null,
+          originalPath: item.filePath,
+          absolutePath,
+        })
+      }
+    }
+    const result = await multiEdit(edits, {
       stopOnError,
       createBackup,
       encoding,
@@ -230,6 +286,33 @@ function initializeBuiltInToolRegistry(): void {
       operationMode,
       cwd: rootPath,
     })
+    if (operationMode === 'execute' && options.streamId && result?.results) {
+      let tracked = 0
+      for (const item of result.results) {
+        if (!item?.success || (item.replacements ?? 0) <= 0) continue
+        const sourceEdit = edits[item.index]
+        const originalPath = item.path || sourceEdit?.path
+        if (typeof originalPath !== 'string') continue
+        const absolutePath = validateAndResolvePath(originalPath, rootPath, false)
+        await recordToolEditSuccess({
+          streamId: options.streamId,
+          conversationId: options.conversationId ?? null,
+          messageId: options.messageId ?? null,
+          parentMessageId: options.parentMessageId ?? null,
+          rootPath: rootPath ?? null,
+          cwd: rootPath ?? null,
+          toolCallId: options.toolCallId ?? null,
+          originalPath,
+          absolutePath,
+          toolName: 'multi_edit',
+          operation: item.operation ?? sourceEdit?.operation ?? null,
+          index: item.index,
+        })
+        tracked += 1
+      }
+      if (tracked > 0) return { ...result, undo: { tracked: true, streamId: options.streamId, edits: tracked } }
+    }
+    return result
   })
 
   builtInTools.set('delete_file', async (args, { rootPath, operationMode }) => {

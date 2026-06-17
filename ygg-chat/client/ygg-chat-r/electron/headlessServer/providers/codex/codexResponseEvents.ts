@@ -33,7 +33,8 @@ export function createCodexResponseParseState(options: CodexResponseParseOptions
 }
 
 export function codexResponseParseResult(state: State): CodexParseResult {
-  const reasoningContent = state.reasoningParts.join('')
+  const reasoningContent = canonicalReasoningText(state.reasoningParts)
+  const outputItems = stripDuplicateReasoningFromOutputItems(state.outputItems, reasoningContent)
   return {
     content: selectFinalText(state),
     ...(reasoningContent ? { reasoningContent } : {}),
@@ -42,11 +43,11 @@ export function codexResponseParseResult(state: State): CodexParseResult {
     ...(state.generatedImages.length ? { generatedImages: state.generatedImages } : {}),
     ...(state.responseId ? { responseId: state.responseId } : {}),
     ...(state.usage !== undefined ? { usage: state.usage } : {}),
-    ...(state.outputItems.length ? { outputItems: state.outputItems } : {}),
+    ...(outputItems.length ? { outputItems } : {}),
     ...(state.responseItemsAdded.length ? { responseItemsAdded: state.responseItemsAdded } : {}),
     debug: {
       eventCounts: Object.fromEntries(state.eventCounts.entries()),
-      outputItemCount: state.outputItems.length,
+      outputItemCount: outputItems.length,
       addedItemCount: state.responseItemsAdded.length,
     },
   }
@@ -180,14 +181,83 @@ function selectFinalText(state: State): string {
 }
 
 function appendReasoning(state: State, value: unknown): void {
-  const text = textFromUnknown(value)
-  if (!text.trim()) return
-  const current = state.reasoningParts.join('')
-  if (!current || !normalizeReasoningText(current).includes(normalizeReasoningText(text))) state.reasoningParts.push(text)
+  for (const text of textPartsFromUnknown(value)) {
+    mergeReasoningSegment(state.reasoningParts, text)
+  }
+}
+
+function canonicalReasoningText(parts: string[]): string {
+  const merged: string[] = []
+  for (const part of parts) mergeReasoningSegment(merged, part)
+  return merged.join('\n\n').trim()
+}
+
+function mergeReasoningSegment(parts: string[], value: string): void {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (!text) return
+
+  const normalizedText = normalizeReasoningText(text)
+  if (!normalizedText) return
+
+  for (let index = parts.length - 1; index >= 0; index--) {
+    const existing = parts[index]
+    const normalizedExisting = normalizeReasoningText(existing)
+    if (!normalizedExisting) {
+      parts.splice(index, 1)
+      continue
+    }
+
+    if (normalizedExisting === normalizedText) return
+
+    if (normalizedExisting.includes(normalizedText)) {
+      return
+    }
+
+    if (normalizedText.includes(normalizedExisting)) {
+      parts.splice(index, 1)
+      continue
+    }
+
+    if (areSimilarReasoningSegments(normalizedExisting, normalizedText)) {
+      if (normalizedText.length > normalizedExisting.length) {
+        parts.splice(index, 1)
+        continue
+      }
+      return
+    }
+  }
+
+  parts.push(text)
 }
 
 function normalizeReasoningText(value: string): string {
-  return value.trim().replace(/\s+/g, ' ').toLowerCase()
+  return value
+    .trim()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+}
+
+function areSimilarReasoningSegments(normalizedA: string, normalizedB: string): boolean {
+  if (!normalizedA || !normalizedB) return false
+
+  const [headingA] = normalizedA.split(/\n|\. /)
+  const [headingB] = normalizedB.split(/\n|\. /)
+  if (headingA && headingB && headingA === headingB && Math.min(normalizedA.length, normalizedB.length) > 80) {
+    return true
+  }
+
+  const wordsA = new Set(normalizedA.match(/[a-z0-9']+/g) || [])
+  const wordsB = new Set(normalizedB.match(/[a-z0-9']+/g) || [])
+  if (wordsA.size < 8 || wordsB.size < 8) return false
+
+  let overlap = 0
+  for (const word of wordsA) {
+    if (wordsB.has(word)) overlap++
+  }
+
+  return overlap / Math.min(wordsA.size, wordsB.size) >= 0.65
 }
 
 function isHostedToolOutputItem(item: any): boolean {
@@ -195,7 +265,43 @@ function isHostedToolOutputItem(item: any): boolean {
 }
 
 function reasoningTextFromItem(item: any): string {
-  return [item.summary, item.content, item.text, item.delta].map(textFromUnknown).filter(Boolean).join('')
+  return canonicalReasoningText([item.summary, item.content, item.text, item.delta].flatMap(textPartsFromUnknown))
+}
+
+function stripDuplicateReasoningFromOutputItems(items: any[], canonicalReasoning: string): any[] {
+  if (!Array.isArray(items) || !canonicalReasoning.trim()) return Array.isArray(items) ? items : []
+
+  return items.map(item => {
+    if (!item || typeof item !== 'object' || item.type !== 'reasoning') return item
+    return stripDuplicateReasoningFromItem(item, canonicalReasoning)
+  })
+}
+
+function stripDuplicateReasoningFromItem(item: any, canonicalReasoning: string): any {
+  const stripped = { ...item }
+  const canonicalNormalized = normalizeReasoningText(canonicalReasoning)
+  const stripParts = (parts: any): any => {
+    if (!Array.isArray(parts)) return parts
+    return parts.map(part => {
+      if (!part || typeof part !== 'object' || typeof part.text !== 'string') return part
+      const partNormalized = normalizeReasoningText(part.text)
+      if (!partNormalized || canonicalNormalized === partNormalized || canonicalNormalized.includes(partNormalized)) {
+        const { text: _text, ...rest } = part
+        return rest
+      }
+      return part
+    })
+  }
+
+  stripped.summary = stripParts(stripped.summary)
+  stripped.content = stripParts(stripped.content)
+  if (typeof stripped.text === 'string' && canonicalNormalized.includes(normalizeReasoningText(stripped.text))) {
+    delete stripped.text
+  }
+  if (typeof stripped.delta === 'string' && canonicalNormalized.includes(normalizeReasoningText(stripped.delta))) {
+    delete stripped.delta
+  }
+  return stripped
 }
 
 function outputTextFromItem(item: any): string {

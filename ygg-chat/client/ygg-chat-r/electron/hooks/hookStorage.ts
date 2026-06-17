@@ -16,6 +16,8 @@ function logHookStorage(message: string, details?: Record<string, unknown>): voi
 }
 
 let cachedHooksDir: string | null = null
+let initializationPromise: Promise<string> | null = null
+let hasInitializedManagedHooks = false
 
 type ElectronAppLike = {
   getPath: (name: string) => string
@@ -50,6 +52,45 @@ async function pathExists(targetPath: string): Promise<boolean> {
   }
 }
 
+async function readFileIfExists(targetPath: string): Promise<Buffer | null> {
+  try {
+    return await fsPromises.readFile(targetPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+async function writeFileAtomically(targetPath: string, content: Buffer): Promise<void> {
+  const targetDir = path.dirname(targetPath)
+  await fsPromises.mkdir(targetDir, { recursive: true })
+
+  const tempPath = path.join(
+    targetDir,
+    `.${path.basename(targetPath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`,
+  )
+
+  try {
+    await fsPromises.writeFile(tempPath, content)
+    await fsPromises.rename(tempPath, targetPath)
+  } catch (error) {
+    await fsPromises.rm(tempPath, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
+
+async function syncBundledFile(sourcePath: string, targetPath: string): Promise<void> {
+  const sourceContent = await fsPromises.readFile(sourcePath)
+  const targetContent = await readFileIfExists(targetPath)
+  if (targetContent && Buffer.compare(sourceContent, targetContent) === 0) {
+    logHookStorage('bundled hook file already up to date', { sourcePath, targetPath })
+    return
+  }
+
+  await writeFileAtomically(targetPath, sourceContent)
+  logHookStorage('copied bundled hook file', { sourcePath, targetPath, bytes: sourceContent.byteLength })
+}
+
 async function syncBundledTree(sourcePath: string, targetPath: string): Promise<void> {
   const sourceStats = await fsPromises.stat(sourcePath)
 
@@ -62,9 +103,7 @@ async function syncBundledTree(sourcePath: string, targetPath: string): Promise<
     return
   }
 
-  await fsPromises.mkdir(path.dirname(targetPath), { recursive: true })
-  await fsPromises.copyFile(sourcePath, targetPath)
-  logHookStorage('copied bundled hook file', { sourcePath, targetPath })
+  await syncBundledFile(sourcePath, targetPath)
 }
 
 function resolveBundledHooksDirectory(): string {
@@ -130,7 +169,7 @@ export function getManagedHooksWorkingDirectory(): string {
   return path.dirname(getManagedHooksDirectory())
 }
 
-export async function ensureManagedHooksInitialized(): Promise<string> {
+async function initializeManagedHooks(): Promise<string> {
   const managedHooksDir = getManagedHooksDirectory()
   await fsPromises.mkdir(managedHooksDir, { recursive: true })
 
@@ -146,11 +185,13 @@ export async function ensureManagedHooksInitialized(): Promise<string> {
 
   if (normalizedManaged === normalizedBundled) {
     logHookStorage('managed hooks directory is bundled hooks directory; skipping copy', { managedHooksDir })
+    hasInitializedManagedHooks = true
     return managedHooksDir
   }
 
   if (!(await pathExists(bundledHooksDir))) {
     logHookStorage('bundled hooks directory not found; using managed directory as-is', { bundledHooksDir, managedHooksDir })
+    hasInitializedManagedHooks = true
     return managedHooksDir
   }
 
@@ -170,6 +211,23 @@ export async function ensureManagedHooksInitialized(): Promise<string> {
     logHookStorage('bundled hook scripts directory not found', { bundledHooksScriptsDir })
   }
 
+  hasInitializedManagedHooks = true
   logHookStorage('managed hooks initialized', { managedHooksDir })
   return managedHooksDir
+}
+
+export async function ensureManagedHooksInitialized(): Promise<string> {
+  if (hasInitializedManagedHooks) {
+    return getManagedHooksDirectory()
+  }
+
+  if (!initializationPromise) {
+    initializationPromise = initializeManagedHooks().finally(() => {
+      initializationPromise = null
+    })
+  } else {
+    logHookStorage('reusing in-flight managed hooks initialization')
+  }
+
+  return initializationPromise
 }

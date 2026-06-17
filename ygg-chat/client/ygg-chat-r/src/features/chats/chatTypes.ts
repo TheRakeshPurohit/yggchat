@@ -243,6 +243,30 @@ export interface StreamingAbortedPayload {
   error?: string
 }
 
+export type StreamUndoStatus = 'available' | 'restoring' | 'restored' | 'invalidated' | 'failed'
+
+export interface StreamUndoSummary {
+  streamId: string
+  conversationId: string | null
+  parentMessageId: string | null
+  assistantMessageId?: string | null
+  status: StreamUndoStatus
+  createdAt: string
+  updatedAt: string
+  restoredAt?: string | null
+  fileCount: number
+  files: Array<{ path: string; absolutePath: string; sizeBytes: number; operationCount: number }>
+}
+
+export interface StreamUndoState {
+  byStreamId: Record<string, StreamUndoSummary>
+  streamIdsByParentMessageId: Record<string, string[]>
+  streamIdsByAssistantMessageId: Record<string, string[]>
+  loadingByConversationId: Record<string, boolean>
+  restoringByStreamId: Record<string, boolean>
+  errorByStreamId: Record<string, string | null>
+}
+
 export interface Model extends BaseModel {}
 
 export interface Provider {
@@ -337,6 +361,7 @@ export interface ChatState {
   providerState: ProviderState
   composition: CompositionState
   streaming: StreamingRootState
+  streamUndo: StreamUndoState
   ui: {
     modelSelectorOpen: boolean
   }
@@ -371,6 +396,8 @@ export interface SendMessagePayload {
   reasoningConfig?: ReasoningConfig
   serviceTier?: OpenAIServiceTier
   cwd?: string | null
+  // Captured at send time: 'plan' = Chat Mode, 'execute' = Agent Mode.
+  operationMode?: OperationMode
 }
 
 export interface EditMessagePayload {
@@ -382,6 +409,8 @@ export interface EditMessagePayload {
   think: boolean
   serviceTier?: OpenAIServiceTier
   cwd?: string | null
+  // Captured at send time: 'plan' = Chat Mode, 'execute' = Agent Mode.
+  operationMode?: OperationMode
 }
 
 export interface BranchMessagePayload {
@@ -393,6 +422,8 @@ export interface BranchMessagePayload {
   think: boolean
   serviceTier?: OpenAIServiceTier
   cwd?: string | null
+  // Captured at send time: 'plan' = Chat Mode, 'execute' = Agent Mode.
+  operationMode?: OperationMode
 }
 
 export interface CCSessionInfo {

@@ -829,7 +829,122 @@ function selectReasoningFromReplayItems(replayItems: any[], fallbackReasoning: s
     .map((item: any) => extractReasoningTextFromReplayItem(item))
     .filter((text: string) => text.trim().length > 0)
 
-  return reasoningSegments.join('\n\n').trim() || fallbackReasoning
+  return canonicalReasoningText(reasoningSegments) || fallbackReasoning
+}
+
+function normalizeReasoningTextForDedupe(value: string): string {
+  return value
+    .trim()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+}
+
+function areSimilarReasoningSegmentsForDedupe(normalizedA: string, normalizedB: string): boolean {
+  if (!normalizedA || !normalizedB) return false
+
+  const [headingA] = normalizedA.split(/\n|\. /)
+  const [headingB] = normalizedB.split(/\n|\. /)
+  if (headingA && headingB && headingA === headingB && Math.min(normalizedA.length, normalizedB.length) > 80) {
+    return true
+  }
+
+  const wordsA = new Set(normalizedA.match(/[a-z0-9']+/g) || [])
+  const wordsB = new Set(normalizedB.match(/[a-z0-9']+/g) || [])
+  if (wordsA.size < 8 || wordsB.size < 8) return false
+
+  let overlap = 0
+  for (const word of wordsA) {
+    if (wordsB.has(word)) overlap++
+  }
+
+  return overlap / Math.min(wordsA.size, wordsB.size) >= 0.65
+}
+
+function mergeReasoningSegmentForDedupe(segments: string[], value: string): void {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (!text) return
+
+  const normalizedText = normalizeReasoningTextForDedupe(text)
+  if (!normalizedText) return
+
+  for (let index = segments.length - 1; index >= 0; index--) {
+    const existing = segments[index]
+    const normalizedExisting = normalizeReasoningTextForDedupe(existing)
+
+    if (!normalizedExisting) {
+      segments.splice(index, 1)
+      continue
+    }
+
+    if (normalizedExisting === normalizedText || normalizedExisting.includes(normalizedText)) {
+      return
+    }
+
+    if (normalizedText.includes(normalizedExisting)) {
+      segments.splice(index, 1)
+      continue
+    }
+
+    if (areSimilarReasoningSegmentsForDedupe(normalizedExisting, normalizedText)) {
+      if (normalizedText.length > normalizedExisting.length) {
+        segments.splice(index, 1)
+        continue
+      }
+      return
+    }
+  }
+
+  segments.push(text)
+}
+
+function canonicalReasoningText(values: any[]): string {
+  const segments: string[] = []
+  for (const value of values || []) {
+    if (Array.isArray(value)) {
+      for (const nested of value) mergeReasoningSegmentForDedupe(segments, String(nested ?? ''))
+    } else {
+      mergeReasoningSegmentForDedupe(segments, String(value ?? ''))
+    }
+  }
+  return segments.join('\n\n').trim()
+}
+
+function stripDuplicateReasoningTextFromResponseItems(items: any[], canonicalReasoning: string): any[] {
+  if (!Array.isArray(items)) return []
+  const canonicalNormalized = normalizeReasoningTextForDedupe(canonicalReasoning || '')
+  if (!canonicalNormalized) return items
+
+  const stripReasoningParts = (parts: any): any => {
+    if (!Array.isArray(parts)) return parts
+    return parts.map(part => {
+      if (!part || typeof part !== 'object' || typeof part.text !== 'string') return part
+      const partNormalized = normalizeReasoningTextForDedupe(part.text)
+      if (!partNormalized || canonicalNormalized === partNormalized || canonicalNormalized.includes(partNormalized)) {
+        const { text: _text, ...rest } = part
+        return rest
+      }
+      return part
+    })
+  }
+
+  return items.map(item => {
+    if (!item || typeof item !== 'object' || item.type !== 'reasoning') return item
+
+    const stripped = { ...item }
+    stripped.summary = stripReasoningParts(stripped.summary)
+    stripped.content = stripReasoningParts(stripped.content)
+
+    if (typeof stripped.text === 'string' && canonicalNormalized.includes(normalizeReasoningTextForDedupe(stripped.text))) {
+      delete stripped.text
+    }
+    if (typeof stripped.delta === 'string' && canonicalNormalized.includes(normalizeReasoningTextForDedupe(stripped.delta))) {
+      delete stripped.delta
+    }
+
+    return stripped
+  })
 }
 
 type OpenAiResponseUsage = {
@@ -2016,9 +2131,10 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
       usage: parsed.usage,
     })
 
-    const responseOutputItems = parsed.outputItems || []
+    const normalizedReasoning = canonicalReasoningText([parsed.reasoningContent || ''])
+    const responseOutputItems = stripDuplicateReasoningTextFromResponseItems(parsed.outputItems || [], normalizedReasoning)
     const contentBlocks: any[] = []
-    if (parsed.reasoningContent) contentBlocks.push({ type: 'thinking', content: parsed.reasoningContent })
+    if (normalizedReasoning) contentBlocks.push({ type: 'thinking', content: normalizedReasoning })
     if (parsed.content) contentBlocks.push({ type: 'text', content: parsed.content })
 
     const imageBlocks = extractImageBlocksFromResponseItems(responseOutputItems)
@@ -2037,7 +2153,7 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
 
     const output: ProviderGenerateOutput = {
       content: parsed.content,
-      reasoning: parsed.reasoningContent || undefined,
+      reasoning: normalizedReasoning || undefined,
       toolCalls: parsed.toolCalls,
       contentBlocks,
       raw: {

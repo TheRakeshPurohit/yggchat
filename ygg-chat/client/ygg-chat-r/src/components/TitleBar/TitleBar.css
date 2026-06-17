@@ -186,6 +186,7 @@
   border-radius: 9999px;
   /* border: 1px solid rgba(229, 229, 229, 0.8); */
   background: rgb(250, 250, 250);
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.12);
   color: rgb(64, 64, 64);
   transition:
     transform 0.1s ease,
@@ -376,4 +377,30 @@ body.has-titlebar .app-content {
   background-color: #e81123;
   border-color: #e81123;
   color: white;
+}
+
+/* Keep title bar acrylic buttons from inheriting the stronger global acrylic shadow. */
+.titlebar .titlebar-control-icon-shell.acrylic-subtle,
+.titlebar .titlebar-control-icon-shell.acrylic-ultra-light-nb-3,
+.titlebar .titlebar-pill.acrylic-light {
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.12);
+}
+
+.dark .titlebar .titlebar-control-icon-shell.acrylic-subtle,
+.dark .titlebar .titlebar-control-icon-shell.acrylic-ultra-light-nb-3,
+.dark .titlebar .titlebar-pill.acrylic-light {
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.2);
+}
+
+/* Slightly stronger shadow for native window control buttons only. */
+.titlebar .titlebar-minimize .titlebar-control-icon-shell.acrylic-subtle,
+.titlebar .titlebar-maximize .titlebar-control-icon-shell.acrylic-subtle,
+.titlebar .titlebar-close .titlebar-control-icon-shell.acrylic-subtle {
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.22);
+}
+
+.dark .titlebar .titlebar-minimize .titlebar-control-icon-shell.acrylic-subtle,
+.dark .titlebar .titlebar-maximize .titlebar-control-icon-shell.acrylic-subtle,
+.dark .titlebar .titlebar-close .titlebar-control-icon-shell.acrylic-subtle {
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.32);
 }

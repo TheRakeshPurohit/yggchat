@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '../Button/button'
@@ -15,8 +16,32 @@ interface PopoverPosition {
   measured: boolean // Whether we've measured the popover dimensions
 }
 
+const springTransition = {
+  type: 'spring' as const,
+  stiffness: 340,
+  damping: 44,
+  mass: 0.86,
+}
+
+const internalTransition = {
+  type: 'spring' as const,
+  stiffness: 300,
+  damping: 40,
+  mass: 0.8,
+}
+
+const softTransition = { duration: 0.18, ease: 'easeOut' as const }
+const collapseSoftTransition = { duration: 0.24, ease: 'easeInOut' as const }
+
+const getPopoverTransformOrigin = (popoverTop: number, button: HTMLButtonElement | null): string => {
+  if (!button || typeof window === 'undefined') return 'bottom center'
+  return popoverTop < button.getBoundingClientRect().top ? 'bottom center' : 'top center'
+}
+
 export const ActionPopover: React.FC<ActionPopoverProps> = ({ children, isActive = false, footer }) => {
   const [open, setOpen] = useState(false)
+  const shouldReduceMotion = useReducedMotion()
+  const prefersReducedMotion = shouldReduceMotion ?? false
   const btnRef = useRef<HTMLButtonElement | null>(null)
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const [popoverPosition, setPopoverPosition] = useState<PopoverPosition | null>(null)
@@ -71,8 +96,6 @@ export const ActionPopover: React.FC<ActionPopoverProps> = ({ children, isActive
         left: rect.left + rect.width / 2,
         measured: false,
       })
-    } else {
-      setPopoverPosition(null)
     }
   }, [open])
 
@@ -190,24 +213,57 @@ export const ActionPopover: React.FC<ActionPopoverProps> = ({ children, isActive
         />
       </Button>
 
-      {open &&
-        popoverPosition &&
+      {popoverPosition &&
         createPortal(
-          <div
-            ref={popoverRef}
-            className='fixed z-[1000] rounded-2xl p-1 overflow-visible border-2 bg-white/90 dark:bg-neutral-900/60 backdrop-blur-md shadow-xl'
-            style={{
-              top: `${popoverPosition.top}px`,
-              left: `${popoverPosition.left}px`,
-              borderColor: actionPopoverBorderColor,
-              // Hide until measured to prevent visual jump
-              visibility: popoverPosition.measured ? 'visible' : 'hidden',
-              opacity: popoverPosition.measured ? 1 : 0,
-            }}
-          >
-            <div className='flex items-center gap-1 px-1 py-0.5'>{children}</div>
-            {footer && <div className='px-2 pb-2'>{footer}</div>}
-          </div>,
+          <>
+            {open && !popoverPosition.measured && (
+              <div
+                ref={popoverRef}
+                key='action-popover-measure'
+                className='fixed z-[1000] rounded-2xl border-2 bg-white/90 p-1 shadow-xl backdrop-blur-md dark:bg-neutral-900/60'
+                style={{
+                  top: `${popoverPosition.top}px`,
+                  left: `${popoverPosition.left}px`,
+                  borderColor: actionPopoverBorderColor,
+                  visibility: 'hidden',
+                }}
+              >
+                <div className='flex items-center gap-1 px-1 py-0.5'>{children}</div>
+                {footer && <div className='px-2 pb-2'>{footer}</div>}
+              </div>
+            )}
+
+            <AnimatePresence initial={false} mode='popLayout' onExitComplete={() => setPopoverPosition(null)}>
+              {open && popoverPosition.measured && (
+                <motion.div
+                  ref={popoverRef}
+                  key='action-popover-shell'
+                  layout
+                  className='fixed z-[1000] overflow-visible rounded-2xl border-2 bg-white/90 p-1 shadow-xl backdrop-blur-md will-change-[transform,opacity] dark:bg-neutral-900/60'
+                  initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.965 }}
+                  animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0, scale: 1 }}
+                  exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.965 }}
+                  transition={prefersReducedMotion ? collapseSoftTransition : springTransition}
+                  style={{
+                    top: `${popoverPosition.top}px`,
+                    left: `${popoverPosition.left}px`,
+                    borderColor: actionPopoverBorderColor,
+                    transformOrigin: getPopoverTransformOrigin(popoverPosition.top, btnRef.current),
+                  }}
+                >
+                  <motion.div
+                    initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.985 }}
+                    animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0, scale: 1 }}
+                    exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.985 }}
+                    transition={prefersReducedMotion ? softTransition : internalTransition}
+                  >
+                    <div className='flex items-center gap-1 px-1 py-0.5'>{children}</div>
+                    {footer && <div className='px-2 pb-2'>{footer}</div>}
+                  </motion.div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </>,
           document.body
         )}
     </div>

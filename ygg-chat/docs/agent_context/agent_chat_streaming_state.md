@@ -21,7 +21,9 @@ Use this when changing:
 - `client/ygg-chat-r/src/features/chats/chatSelectors.ts`: current view/current branch stream selectors.
 - `client/ygg-chat-r/src/features/chats/streamHelpers.ts`: stream utility functions.
 - `client/ygg-chat-r/src/features/chats/streamResilience.ts`: stream resilience helpers.
+- `client/ygg-chat-r/src/features/chats/streamRunTracking.ts`: best-effort renderer local API helper for durable SQLite stream run lifecycle rows.
 - `client/ygg-chat-r/src/containers/Chat.tsx`: consumes stream selectors and pending fallback.
+- `client/ygg-chat-r/electron/tools/streamUndoManager.ts`: durable per-stream file-edit undo manifests/backups.
 
 ## Mental Model
 
@@ -33,6 +35,8 @@ Streaming state is not a single global boolean. It is a container:
 - `lastCompletedId`: last stream that reached completion.
 
 Each stream has buffers/events/tool calls plus lineage metadata that lets the UI associate it with a conversation/branch.
+
+In Electron/local mode, individual stream run lifecycle is also mirrored to SQLite table `streaming_runs` through local server routes under `/api/streaming/runs`. Redux remains the live rendering state and can be pruned; `streaming_runs.status`, `ended_at`, `end_reason`, and `duration_ms` are the durable record for when an individual agent stream ended.
 
 ## Important Invariants
 
@@ -46,6 +50,8 @@ Each stream has buffers/events/tool calls plus lineage metadata that lets the UI
 - Old code may still assume `DEFAULT_STREAM_ID`; preserve compatibility while preferring explicit stream IDs in new code.
 - Pending stream fallbacks in `Chat.tsx` are deliberately short-lived to avoid flicker during message materialization.
 - Tool-result events and persisted tool messages are related but not identical; update both paths deliberately.
+- Stream Redux state is pruned; durable file-edit undo state lives under Electron app user-data `.ygg/backups/<stream>/`, keyed by `streamId` and parent user message ID.
+- Durable stream lifecycle rows are best-effort in local/Electron mode; failures to write `streaming_runs` should not interrupt generation.
 
 ## Testing and Validation
 

@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { BaseModel } from '../../../../../shared/types'
@@ -46,6 +47,23 @@ interface SelectProps {
 const DROPDOWN_LIMIT = 25
 const DEFAULT_SELECT_DROPDOWN_Z_INDEX = 100
 
+const springTransition = {
+  type: 'spring' as const,
+  stiffness: 340,
+  damping: 44,
+  mass: 0.86,
+}
+
+const internalTransition = {
+  type: 'spring' as const,
+  stiffness: 300,
+  damping: 40,
+  mass: 0.8,
+}
+
+const softTransition = { duration: 0.18, ease: 'easeOut' as const }
+const collapseSoftTransition = { duration: 0.24, ease: 'easeInOut' as const }
+
 export const Select: React.FC<SelectProps> = ({
   value,
   options,
@@ -70,6 +88,8 @@ export const Select: React.FC<SelectProps> = ({
   dropdownWidthOffset,
 }) => {
   const [open, setOpen] = useState(false)
+  const shouldReduceMotion = useReducedMotion()
+  const prefersReducedMotion = shouldReduceMotion ?? false
   const [activeIndex, setActiveIndex] = useState<number>(-1)
   const [searchTerm, setSearchTerm] = useState('')
   const [showModelInfo, setShowModelInfo] = useState(false)
@@ -300,30 +320,44 @@ export const Select: React.FC<SelectProps> = ({
         <i className={`bx bx-chevron-down shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} aria-hidden='true' />
       </Button>
 
-      {open &&
-        dropdownPosition &&
+      {dropdownPosition &&
         createPortal(
-          <div
-            ref={listRef}
-            role='listbox'
-            tabIndex={-1}
-            className={`fixed rounded-2xl overflow-hidden border border-neutral-200 dark:border-0 dark:border-neutral-700 bg-white/50 dark:bg-transparent flex flex-col`}
-            style={{
-              zIndex: dropdownZIndex,
-              maxHeight: listMaxHeight,
-              top: dropdownPosition.top !== undefined ? `${dropdownPosition.top}px` : undefined,
-              bottom: dropdownPosition.bottom !== undefined ? `${dropdownPosition.bottom}px` : undefined,
-              left: `${dropdownPosition.left}px`,
-              width: `${dropdownPosition.width}px`,
-            }}
-          >
+          <AnimatePresence initial={false} mode='popLayout'>
+            {open && (
+              <motion.div
+                ref={listRef}
+                role='listbox'
+                tabIndex={-1}
+                layout
+                className={`fixed flex flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white/60 shadow-xl backdrop-blur-md will-change-[transform,opacity] dark:border-0 dark:border-neutral-700 dark:bg-neutral-950/45`}
+                initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: dropdownPosition.bottom ? -8 : 8, scale: 0.965 }}
+                animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0, scale: 1 }}
+                exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: dropdownPosition.bottom ? -8 : 8, scale: 0.965 }}
+                transition={prefersReducedMotion ? collapseSoftTransition : springTransition}
+                style={{
+                  zIndex: dropdownZIndex,
+                  maxHeight: listMaxHeight,
+                  top: dropdownPosition.top !== undefined ? `${dropdownPosition.top}px` : undefined,
+                  bottom: dropdownPosition.bottom !== undefined ? `${dropdownPosition.bottom}px` : undefined,
+                  left: `${dropdownPosition.left}px`,
+                  width: `${dropdownPosition.width}px`,
+                  transformOrigin: dropdownPosition.bottom ? 'bottom center' : 'top center',
+                }}
+              >
+                <motion.div
+                  className='flex min-h-0 flex-1 flex-col'
+                  initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.985 }}
+                  animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0, scale: 1 }}
+                  exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.985 }}
+                  transition={prefersReducedMotion ? softTransition : internalTransition}
+                >
             {filterUI && (
-              <div className='px-2 py-2 border-b acrylic-ultra-light-nb-2 dark:bg-transparent border-neutral-200 dark:border-neutral-900'>
+              <div className='border-b border-neutral-200 bg-white/35 px-2 py-2 backdrop-blur-md dark:border-neutral-900 dark:bg-neutral-950/25'>
                 {filterUI}
               </div>
             )}
             {searchBarVisible && (
-              <div className='px-2 py-2 border-b acrylic-ultra-light-nb-2 dark:bg-transparent border-neutral-200 dark:border-neutral-900'>
+              <div className='border-b border-neutral-200 bg-white/35 px-2 py-2 backdrop-blur-md dark:border-neutral-900 dark:bg-neutral-950/25'>
                 <input
                   ref={searchRef}
                   type='text'
@@ -336,7 +370,7 @@ export const Select: React.FC<SelectProps> = ({
               </div>
             )}
             <div
-              className={`flex-1 min-h-0 overflow-y-scroll no-scrollbar ${blur === 'high' ? 'acrylic-medium' : 'acrylic-ultra-light-nb-2'}`}
+              className={`min-h-0 flex-1 overflow-y-scroll bg-white/25 backdrop-blur-md no-scrollbar dark:bg-neutral-950/20 ${blur === 'high' ? 'supports-[backdrop-filter]:bg-white/30 dark:supports-[backdrop-filter]:bg-neutral-950/30' : ''}`}
               style={{ maxHeight: searchBarVisible ? (listMaxHeight || 280) - 50 : listMaxHeight }}
             >
               {filteredOptions.length === 0 ? (
@@ -409,7 +443,7 @@ export const Select: React.FC<SelectProps> = ({
             </div>
             {/* View All Models button */}
             {showExpandButton && allFilteredCount > DROPDOWN_LIMIT && (
-              <div className='acrylic border-t border-neutral-200 dark:border-neutral-700 dark:bg-transparent'>
+              <div className='border-t border-neutral-200 bg-white/35 backdrop-blur-md dark:border-neutral-700 dark:bg-neutral-950/25'>
                 <Button
                   variant='outline2'
                   size='medium'
@@ -429,11 +463,14 @@ export const Select: React.FC<SelectProps> = ({
               </div>
             )}
             {footerContent && (
-              <div className='border-t border-neutral-200 dark:border-neutral-700 acrylic-medium dark:bg-transparent'>
+              <div className='border-t border-neutral-200 bg-white/35 backdrop-blur-md dark:border-neutral-700 dark:bg-neutral-950/25'>
                 {footerContent}
               </div>
             )}
-          </div>,
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>,
           document.body
         )}
 

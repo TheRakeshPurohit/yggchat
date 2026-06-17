@@ -113,6 +113,14 @@ interface ChatMessageProps {
   onEditingStateChange?: (id: string, isEditing: boolean, mode: 'edit' | 'branch' | null) => void
   onLayoutChange?: () => void
   userTurnElapsedLabel?: string
+  undoState?: {
+    available: boolean
+    fileCount: number
+    restoring?: boolean
+    restored?: boolean
+    error?: string | null
+  }
+  onUndoStreamEdits?: () => void
 }
 
 interface MessageActionsProps {
@@ -128,6 +136,9 @@ interface MessageActionsProps {
   onCancel?: () => void
   onSaveBranch?: () => void
   onMore?: () => void
+  onUndoEdits?: () => void
+  undoLabel?: string
+  undoDisabled?: boolean
   isEditing: boolean
   editMode?: 'edit' | 'branch'
   copied?: boolean
@@ -157,6 +168,9 @@ const MessageActions: React.FC<MessageActionsProps> = ({
   onCancel,
   onSaveBranch,
   onMore,
+  onUndoEdits,
+  undoLabel,
+  undoDisabled,
   isEditing,
   editMode = 'edit',
   copied = false,
@@ -422,6 +436,19 @@ const MessageActions: React.FC<MessageActionsProps> = ({
                 </button>
               )}
 
+              {/* Undo file edits Button */}
+              {onUndoEdits && (
+                <button
+                  onClick={onUndoEdits}
+                  disabled={undoDisabled}
+                  className={`${baseButtonClassName} text-neutral-500 dark:text-neutral-400 hover:bg-amber-500/10 hover:text-amber-500 disabled:opacity-50 disabled:cursor-not-allowed`}
+                  title={undoLabel || 'Undo file edits'}
+                >
+                  <i className='bx bx-undo text-[15px]'></i>
+                  {showLabels && <span className='text-sm'>{undoLabel || 'Undo edits'}</span>}
+                </button>
+              )}
+
               {/* More Options Button */}
               {onMore && (
                 <button
@@ -484,6 +511,8 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
     onEditingStateChange,
     onLayoutChange,
     userTurnElapsedLabel,
+    undoState,
+    onUndoStreamEdits,
   }) => {
     const dispatch = useAppDispatch()
     const navigate = useNavigate()
@@ -577,6 +606,14 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       },
       [dispatch]
     )
+
+    const undoLabel = undoState?.restored
+      ? `Restored ${undoState.fileCount} file${undoState.fileCount === 1 ? '' : 's'}`
+      : undoState?.restoring
+        ? 'Restoring edits...'
+        : undoState?.available
+          ? `Undo ${undoState.fileCount} file${undoState.fileCount === 1 ? '' : 's'}`
+          : undefined
 
     const hasContent = useMemo(() => {
       const hasSimpleContent = content && content.trim().length > 0
@@ -2803,6 +2840,9 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 onSaveBranch={handleSaveBranch}
                 onCancel={handleCancel}
                 onMore={handleMoreClick}
+                onUndoEdits={undoState?.available ? onUndoStreamEdits : undefined}
+                undoLabel={undoLabel}
+                undoDisabled={undoState?.restoring || undoState?.restored}
                 isEditing={editingState}
                 editMode={editMode}
                 copied={copied}
@@ -2976,6 +3016,16 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                       }
                     : undefined
                 }
+                onUndoEdits={
+                  !hasSelection && undoState?.available && onUndoStreamEdits
+                    ? () => {
+                        closeFloatingActions()
+                        onUndoStreamEdits()
+                      }
+                    : undefined
+                }
+                undoLabel={undoLabel}
+                undoDisabled={undoState?.restoring || undoState?.restored}
                 isEditing={editingState}
                 editMode={editMode}
                 copied={copied}

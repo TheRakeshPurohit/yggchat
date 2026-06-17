@@ -517,23 +517,53 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
       const rawProjectId = (req.query.projectId as string) || (req.query.project_id as string) || undefined
       const noProjectOnly = rawProjectId === '__none__' || rawProjectId === 'null'
       const projectId = noProjectOnly ? undefined : rawProjectId
+      const limitParam = req.query.limit as string | undefined
+      const cursorParam = req.query.cursor as string | undefined
 
       if (!userId) {
         res.status(400).json({ error: 'userId required' })
         return
       }
 
-      const conversations = noProjectOnly
-        ? db.prepare('SELECT * FROM conversations WHERE user_id = ? AND project_id IS NULL ORDER BY updated_at DESC').all(userId)
-        : projectId
-          ? typeof statements.getLocalConversationsByUserAndProject?.all === 'function'
-            ? statements.getLocalConversationsByUserAndProject.all(userId, projectId)
-            : db
-                .prepare('SELECT * FROM conversations WHERE user_id = ? AND project_id = ? ORDER BY updated_at DESC')
-                .all(userId, projectId)
-          : typeof statements.getLocalConversations?.all === 'function'
-            ? statements.getLocalConversations.all(userId)
-            : db.prepare('SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC').all(userId)
+      const selectConversations = (limit?: number, offset?: number) => {
+        const limitClause = typeof limit === 'number' ? ' LIMIT ? OFFSET ?' : ''
+        const paginationArgs = typeof limit === 'number' ? [limit, offset || 0] : []
+
+        if (noProjectOnly) {
+          return db
+            .prepare(`SELECT * FROM conversations WHERE user_id = ? AND project_id IS NULL ORDER BY updated_at DESC${limitClause}`)
+            .all(userId, ...paginationArgs)
+        }
+
+        if (projectId) {
+          return db
+            .prepare(`SELECT * FROM conversations WHERE user_id = ? AND project_id = ? ORDER BY updated_at DESC${limitClause}`)
+            .all(userId, projectId, ...paginationArgs)
+        }
+
+        return db
+          .prepare(`SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC${limitClause}`)
+          .all(userId, ...paginationArgs)
+      }
+
+      if (limitParam) {
+        const parsedLimit = Number(limitParam)
+        const parsedOffset = cursorParam ? Number(cursorParam) : 0
+        const limit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(200, Math.floor(parsedLimit))) : 50
+        const offset = Number.isFinite(parsedOffset) ? Math.max(0, Math.floor(parsedOffset)) : 0
+        const rows = selectConversations(limit + 1, offset)
+        const hasMore = rows.length > limit
+        const conversations = hasMore ? rows.slice(0, limit) : rows
+
+        res.json({
+          conversations,
+          nextCursor: hasMore ? String(offset + limit) : null,
+          hasMore,
+        })
+        return
+      }
+
+      const conversations = selectConversations()
 
       res.json(conversations)
     } catch (error) {

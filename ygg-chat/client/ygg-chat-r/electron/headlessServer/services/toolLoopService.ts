@@ -8,6 +8,7 @@ import type {
 } from '../providers/openRouterProvider.js'
 import { ProviderRouter, normalizeProviderRoute } from './providerRouter.js'
 import { persistWithFallback, type ToolResultPersistencePolicy } from './toolResultPersistenceService.js'
+import { sanitizeToolResultContentForModel } from '../providers/toolResultSanitizer.js'
 
 export interface ToolExecutionContext {
   conversationId: string
@@ -110,6 +111,16 @@ function toToolResultContent(result: any): string {
     return JSON.stringify(result)
   } catch {
     return String(result)
+  }
+}
+
+function toModelToolResultContent(content: string, toolName?: string | null): string {
+  const sanitized = sanitizeToolResultContentForModel(content, toolName ?? null)
+  if (typeof sanitized === 'string') return sanitized
+  try {
+    return JSON.stringify(sanitized ?? null)
+  } catch {
+    return String(sanitized)
   }
 }
 
@@ -386,7 +397,7 @@ export class ToolLoopService {
         history.push({
           role: 'tool',
           tool_call_id: toolCall.id,
-          content: toolResultContent,
+          content: toModelToolResultContent(toolResultContent, toolCall.name),
         })
       }
 

@@ -393,3 +393,17 @@ export const selectToolByName = createSelector(
 
 // CC Slash Commands selector
 export const selectCCSlashCommands = createSelector([selectChatState], chat => chat.ccSlashCommands)
+
+export const selectStreamUndoRoot = createSelector([selectChatState], chat => chat.streamUndo)
+
+export const selectStreamUndoSummariesForParentMessage = (parentMessageId: MessageId | string) =>
+  createSelector([selectStreamUndoRoot], undo => {
+    const streamIds = undo.streamIdsByParentMessageId[String(parentMessageId)] || []
+    return streamIds.map(id => undo.byStreamId[id]).filter(Boolean)
+  })
+
+export const selectStreamUndoRestoringByStreamId = (streamId: string) =>
+  createSelector([selectStreamUndoRoot], undo => undo.restoringByStreamId[streamId] ?? false)
+
+export const selectStreamUndoErrorByStreamId = (streamId: string) =>
+  createSelector([selectStreamUndoRoot], undo => undo.errorByStreamId[streamId] ?? null)

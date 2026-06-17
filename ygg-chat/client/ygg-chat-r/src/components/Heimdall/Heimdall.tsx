@@ -241,6 +241,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const isMobile = useIsMobile()
 
   const svgRef = useRef<SVGSVGElement>(null)
+  const graphTransformRef = useRef<SVGGElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [zoom, setZoom] = useState<number>(compactMode ? 1 : 1)
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -380,6 +381,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const panRef = useRef<{ x: number; y: number }>(pan)
   const interactionRafRef = useRef<number | null>(null)
   const pendingPanRef = useRef<{ x: number; y: number } | null>(null)
+  const pendingZoomRef = useRef<number | null>(null)
   const pendingSelectionEndRef = useRef<{ x: number; y: number } | null>(null)
   const cullingSnapshotRef = useRef<{ pan: { x: number; y: number }; zoom: number } | null>(null)
   const wheelIdleTimeoutRef = useRef<number | null>(null)
@@ -813,22 +815,53 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const getNoteBadgeMetrics = (noteText?: string) => {
     const normalized = (noteText || '').replace(/\s+/g, ' ').trim()
     if (!normalized) {
-      const label = 'Note'
-      const width = Math.max(44, Math.round(label.length * 6.5 + 14))
-      return { label, width, height: 20 }
+      const lines = ['Note']
+      const width = Math.max(44, Math.round(lines[0].length * 6.5 + 14))
+      return { lines, width, height: 20 }
     }
 
-    const firstWords = normalized.split(' ').slice(0, 4).join(' ')
-    const maxChars = 22
-    let label = firstWords
-    if (label.length > maxChars) {
-      label = `${label.slice(0, maxChars).trimEnd()}…`
-    } else if (label.length < normalized.length) {
-      label = `${label}…`
+    const maxLineChars = 22
+    const maxLines = 2
+    const words = normalized.split(' ')
+    const lines: string[] = []
+    let currentLine = ''
+    let consumedWords = 0
+
+    for (const word of words) {
+      const candidate = currentLine ? `${currentLine} ${word}` : word
+      if (candidate.length <= maxLineChars) {
+        currentLine = candidate
+        consumedWords += 1
+        continue
+      }
+
+      if (currentLine) {
+        lines.push(currentLine)
+        currentLine = word
+        consumedWords += 1
+      } else {
+        lines.push(word.slice(0, maxLineChars))
+        consumedWords += 1
+        currentLine = ''
+      }
+
+      if (lines.length === maxLines) break
     }
 
-    const width = Math.min(150, Math.max(56, Math.round(label.length * 6.2 + 16)))
-    return { label, width, height: 20 }
+    if (lines.length < maxLines && currentLine) {
+      lines.push(currentLine)
+    }
+
+    const hasMoreText = consumedWords < words.length || lines.join(' ').length < normalized.length
+    if (hasMoreText && lines.length > 0) {
+      const lastIndex = lines.length - 1
+      const lastLine = lines[lastIndex]
+      lines[lastIndex] = `${lastLine.slice(0, maxLineChars - 1).trimEnd()}…`
+    }
+
+    const longestLineLength = Math.max(...lines.map(line => line.length))
+    const width = Math.min(150, Math.max(56, Math.round(longestLineLength * 6.2 + 16)))
+    return { lines, width, height: lines.length > 1 ? 34 : 20 }
   }
 
   // Maintain a plain-text processed copy of messages for client-side search
@@ -1067,6 +1100,16 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     }
   }, [])
 
+  const applyGraphTransform = useCallback(
+    (nextPan: { x: number; y: number } = panRef.current, nextZoom: number = zoomRef.current) => {
+      graphTransformRef.current?.setAttribute(
+        'transform',
+        `translate(${nextPan.x + dimensions.width / 2}, ${nextPan.y + 100}) scale(${nextZoom})`
+      )
+    },
+    [dimensions.width]
+  )
+
   const flushPendingInteractionFrame = useCallback(() => {
     if (interactionRafRef.current !== null) {
       cancelAnimationFrame(interactionRafRef.current)
@@ -1074,13 +1117,18 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     }
 
     const nextPan = pendingPanRef.current
+    const nextZoom = pendingZoomRef.current
     const nextSelectionEnd = pendingSelectionEndRef.current
 
     pendingPanRef.current = null
+    pendingZoomRef.current = null
     pendingSelectionEndRef.current = null
 
     if (nextPan) {
       setPan(nextPan)
+    }
+    if (nextZoom !== null) {
+      setZoom(nextZoom)
     }
     if (nextSelectionEnd) {
       setSelectionEnd(nextSelectionEnd)
@@ -1093,15 +1141,12 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     interactionRafRef.current = requestAnimationFrame(() => {
       interactionRafRef.current = null
 
-      const nextPan = pendingPanRef.current
       const nextSelectionEnd = pendingSelectionEndRef.current
-
-      pendingPanRef.current = null
       pendingSelectionEndRef.current = null
 
-      if (nextPan) {
-        setPan(nextPan)
-      }
+      // Pan/zoom are applied imperatively to the SVG group during high-frequency
+      // interactions and committed to React state on interaction end/idle. This
+      // avoids regenerating all visible node/edge JSX every pointer or wheel frame.
       if (nextSelectionEnd) {
         setSelectionEnd(nextSelectionEnd)
       }
@@ -1112,9 +1157,10 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     (nextPan: { x: number; y: number }) => {
       pendingPanRef.current = nextPan
       panRef.current = nextPan
+      applyGraphTransform(nextPan, zoomRef.current)
       queueInteractionFrame()
     },
-    [queueInteractionFrame]
+    [applyGraphTransform, queueInteractionFrame]
   )
 
   const queueSelectionEndUpdate = useCallback(
@@ -1214,11 +1260,13 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     const newPanX = cursorX - (worldX + ox) * clampedZoom - rect.width / 2
     const newPanY = cursorY - (worldY + oy) * clampedZoom - 100
 
-    if (Math.abs(clampedZoom - currentZoom) > 0.0001) {
-      setZoom(clampedZoom)
-    }
-    setPan({ x: newPanX, y: newPanY })
-  }, [])
+    const nextPan = { x: newPanX, y: newPanY }
+    zoomRef.current = clampedZoom
+    panRef.current = nextPan
+    pendingZoomRef.current = clampedZoom
+    pendingPanRef.current = nextPan
+    applyGraphTransform(nextPan, clampedZoom)
+  }, [applyGraphTransform])
 
   const queuePinchFrame = useCallback(
     (point: { clientX: number; clientY: number }, targetZoom: number) => {
@@ -1526,6 +1574,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         interactionRafRef.current = null
       }
       pendingPanRef.current = null
+      pendingZoomRef.current = null
       pendingSelectionEndRef.current = null
       pinchStateRef.current = null
       if (wheelIdleTimeoutRef.current !== null) {
@@ -1559,17 +1608,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   }, [pan])
 
   useEffect(() => {
-    const shouldFreeze = isDragging || isPinching || isWheeling
-
-    if (shouldFreeze) {
-      if (!isCullingFrozen) {
-        cullingSnapshotRef.current = { pan: panRef.current, zoom: zoomRef.current }
-        setIsCullingFrozen(true)
-      }
-      return
-    }
-
-    if (isCullingFrozen) {
+    if (!isDragging && !isPinching && !isWheeling && isCullingFrozen) {
       cullingSnapshotRef.current = null
       setIsCullingFrozen(false)
     }
@@ -1736,31 +1775,43 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   //   [currentChatData]
   // )
 
-  // Calculate tree layout
+  // Calculate tree layout in two linear passes. The previous implementation
+  // recalculated subtree widths recursively for each sibling and ancestor, which
+  // becomes very expensive on large/deep image-heavy trees.
   const calculateTreeLayout = (node: ChatNode): Record<string, Position> => {
     const positions: Record<string, Position> = {}
+    const subtreeWidths = new Map<string, number>()
 
-    const calculateSubtreeWidth = (node: ChatNode): number => {
-      if (!node.children || node.children.length === 0) return 1
-      return node.children.reduce((sum, child) => sum + calculateSubtreeWidth(child), 0)
-    }
-
-    const layoutNode = (node: ChatNode, x: number, y: number): void => {
-      positions[node.id] = { x, y, node }
-
-      if (node.children && node.children.length > 0) {
-        const totalWidth = node.children.reduce((sum, child) => sum + calculateSubtreeWidth(child), 0)
-        let currentX = x - ((totalWidth - 1) * horizontalSpacing) / 2
-
-        node.children.forEach(child => {
-          const childWidth = calculateSubtreeWidth(child)
-          const childX = currentX + ((childWidth - 1) * horizontalSpacing) / 2
-          layoutNode(child, childX, y + verticalSpacing)
-          currentX += childWidth * horizontalSpacing
-        })
+    const calculateSubtreeWidth = (current: ChatNode): number => {
+      const children = current.children || []
+      if (children.length === 0) {
+        subtreeWidths.set(current.id, 1)
+        return 1
       }
+
+      const width = children.reduce((sum, child) => sum + calculateSubtreeWidth(child), 0)
+      subtreeWidths.set(current.id, width)
+      return width
     }
 
+    const layoutNode = (current: ChatNode, x: number, y: number): void => {
+      positions[current.id] = { x, y, node: current }
+
+      const children = current.children || []
+      if (children.length === 0) return
+
+      const totalWidth = subtreeWidths.get(current.id) ?? 1
+      let currentX = x - ((totalWidth - 1) * horizontalSpacing) / 2
+
+      children.forEach(child => {
+        const childWidth = subtreeWidths.get(child.id) ?? 1
+        const childX = currentX + ((childWidth - 1) * horizontalSpacing) / 2
+        layoutNode(child, childX, y + verticalSpacing)
+        currentX += childWidth * horizontalSpacing
+      })
+    }
+
+    calculateSubtreeWidth(node)
     layoutNode(node, 0, 0)
     return positions
   }
@@ -1770,13 +1821,16 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     () => (currentChatData ? calculateTreeLayout(currentChatData) : {}),
     [currentChatData, horizontalSpacing, verticalSpacing]
   )
+  const positionEntries = useMemo(() => Object.entries(positions), [positions])
+  const positionValues = useMemo(() => positionEntries.map(([, pos]) => pos), [positionEntries])
 
   // Memoized set for quick membership checks of nodes on the current conversation path
   const currentPathSet = useMemo(() => new Set(currentPathIds ?? []), [currentPathIds])
+  const selectedNodeSet = useMemo(() => new Set((selectedNodes ?? []).map(id => String(id))), [selectedNodes])
 
   // Calculate SVG bounds (memoized)
   const bounds = useMemo(() => {
-    const values = Object.values(positions)
+    const values = positionValues
     if (values.length === 0) {
       return { minX: 0, maxX: 0, minY: 0, maxY: 0 }
     }
@@ -1795,7 +1849,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       },
       { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity }
     )
-  }, [positions, compactMode, focusedNodeId])
+  }, [positionValues, compactMode, focusedNodeId])
 
   // Initialize offsets once (when we have real data) so the tree doesn't jump when nodes change
   useEffect(() => {
@@ -1936,6 +1990,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       setIsWheeling(prev => (prev ? prev : true))
       wheelIdleTimeoutRef.current = window.setTimeout(() => {
         wheelIdleTimeoutRef.current = null
+        flushPendingInteractionFrame()
         setIsWheeling(false)
       }, WHEEL_IDLE_MS)
 
@@ -1969,7 +2024,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         wheelIdleTimeoutRef.current = null
       }
     }
-  }, [applyZoomAtPoint])
+  }, [applyZoomAtPoint, flushPendingInteractionFrame])
 
   // Expand a visual selection to include hidden messages that sit between selected visible nodes.
   // This keeps filtering as a rendering-only concern: tool-only/empty nodes can be hidden,
@@ -2699,7 +2754,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
     const visible: Record<string, Position> = {}
 
-    Object.entries(positions).forEach(([id, pos]) => {
+    positionEntries.forEach(([id, pos]) => {
       const { x, y, node } = pos
       const isExpanded = !compactMode || node.id === focusedNodeId
       const width = isExpanded ? nodeWidth : circleRadius * 2
@@ -2728,7 +2783,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
     return visible
   }, [
-    positions,
+    positionEntries,
     viewportBounds,
     compactMode,
     focusedNodeId,
@@ -2742,16 +2797,18 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
   const parentByChildId = useMemo(() => {
     const parentMap = new Map<string, string>()
-    Object.values(positions).forEach(({ node }) => {
+    positionValues.forEach(({ node }) => {
       node.children?.forEach(child => {
         parentMap.set(child.id, node.id)
       })
     })
     return parentMap
-  }, [positions])
+  }, [positionValues])
 
-  const heimdallNodeIdSet = useMemo(() => new Set(Object.keys(positions)), [positions])
-  const visiblePositionIdSet = useMemo(() => new Set(Object.keys(visiblePositions)), [visiblePositions])
+  const heimdallNodeIdSet = useMemo(() => new Set(positionEntries.map(([id]) => id)), [positionEntries])
+  const visiblePositionEntries = useMemo(() => Object.entries(visiblePositions), [visiblePositions])
+  const visiblePositionValues = useMemo(() => visiblePositionEntries.map(([, pos]) => pos), [visiblePositionEntries])
+  const visiblePositionIdSet = useMemo(() => new Set(visiblePositionEntries.map(([id]) => id)), [visiblePositionEntries])
 
   const handleNodeMouseEnter = useCallback(
     (e: React.MouseEvent<SVGElement>) => {
@@ -2896,7 +2953,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     }
 
     // First pass: Draw connections from visible parent nodes to all their children
-    Object.values(visiblePositions).forEach(pos => {
+    visiblePositionValues.forEach(pos => {
       const { node } = pos
       if (node.children && node.children.length > 0) {
         const parentPos = positions[node.id]
@@ -2962,7 +3019,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     })
 
     // Second pass: Draw connections from visible children to their culled parents
-    Object.values(visiblePositions).forEach(pos => {
+    visiblePositionValues.forEach(pos => {
       const { node } = pos
       const parentId = parentByChildId.get(node.id)
       if (!parentId) return
@@ -2997,8 +3054,15 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   )
 
   const heimdallNodeTimestamps = useMemo(() => {
-    const entries = Object.keys(positions)
-      .map(nodeId => {
+    if (!heatmapMode) {
+      return {
+        byNodeId: new Map<string, number>(),
+        progressByNodeId: new Map<string, number>(),
+      }
+    }
+
+    const entries = positionEntries
+      .map(([nodeId]) => {
         const createdAt = messageById.get(String(nodeId))?.created_at
         const timestamp = createdAt ? new Date(createdAt).getTime() : Number.NaN
         return Number.isFinite(timestamp) ? [String(nodeId), timestamp] : null
@@ -3023,7 +3087,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       byNodeId: new Map(entries),
       progressByNodeId,
     }
-  }, [messageById, positions])
+  }, [heatmapMode, messageById, positionEntries])
 
   const getHeatmapNodeColors = useCallback(
     (nodeId: string, isVisible: boolean) => {
@@ -3206,12 +3270,12 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const activeBranchIndicatorColors = useMemo(() => getNotePillColors(), [getNotePillColors])
 
   const renderNodes = (): JSX.Element[] => {
-    return Object.values(visiblePositions).map(({ x, y, node }) => {
+    return visiblePositionValues.map(({ x, y, node }) => {
       const isExpanded = !compactMode || node.id === focusedNodeId
       const nodeIdParsed = parseId(node.id)
       const isNodeSelected =
         ((typeof nodeIdParsed === 'number' && !isNaN(nodeIdParsed)) || typeof nodeIdParsed === 'string') &&
-        selectedNodes.includes(nodeIdParsed)
+        selectedNodeSet.has(String(nodeIdParsed))
       // const isOnCurrentPath =
       //   ((typeof nodeIdParsed === 'number' && !isNaN(nodeIdParsed)) || typeof nodeIdParsed === 'string') &&
       //   currentPathSet.has(nodeIdParsed)
@@ -3422,13 +3486,17 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                     strokeWidth='1'
                   />
                   <text
-                    x={badge.width / 2}
-                    y={badge.height / 2 + 4}
-                    textAnchor='middle'
+                    x={8}
+                    y={badge.lines.length > 1 ? 12 : badge.height / 2 + 4}
+                    textAnchor='start'
                     className='text-[10px] font-semibold'
                     style={{ fill: pillColors.text }}
                   >
-                    {badge.label}
+                    {badge.lines.map((line, index) => (
+                      <tspan key={`${line}-${index}`} x={8} dy={index === 0 ? 0 : 11}>
+                        {line}
+                      </tspan>
+                    ))}
                   </text>
                 </g>
               )
@@ -3533,7 +3601,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
               style={{
                 transform: selectedNode?.id === node.id ? 'scale(1.1)' : 'scale(1)',
                 transformOrigin: `${x}px ${y + circleRadius}px`,
-                filter: `drop-shadow(0 4px 12px rgba(0,0,0,${isDarkMode ? '0.25' : '0.05'})) drop-shadow(0 6px 18px rgba(0,0,0,0.02))`,
+                filter: selectedNode?.id === node.id ? `drop-shadow(0 4px 10px rgba(0,0,0,${isDarkMode ? '0.22' : '0.08'}))` : 'none',
                 ...(effectiveNodeColors
                   ? {
                       fill: effectiveNodeColors.fill,
@@ -3606,13 +3674,17 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                     strokeWidth='1'
                   />
                   <text
-                    x={badge.width / 2}
-                    y={badge.height / 2 + 4}
-                    textAnchor='middle'
+                    x={8}
+                    y={badge.lines.length > 1 ? 12 : badge.height / 2 + 4}
+                    textAnchor='start'
                     className='text-[10px] font-semibold'
                     style={{ fill: pillColors.text }}
                   >
-                    {badge.label}
+                    {badge.lines.map((line, index) => (
+                      <tspan key={`${line}-${index}`} x={8} dy={index === 0 ? 0 : 11}>
+                        {line}
+                      </tspan>
+                    ))}
                   </text>
                 </g>
               )
@@ -3674,7 +3746,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const connectionElements = useMemo(
     () => renderConnections(),
     [
-      visiblePositions,
+      visiblePositionValues,
       positions,
       parentByChildId,
       visiblePositionIdSet,
@@ -3695,10 +3767,10 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const nodeElements = useMemo(
     () => renderNodes(),
     [
-      visiblePositions,
+      visiblePositionValues,
       compactMode,
       focusedNodeId,
-      selectedNodes,
+      selectedNodeSet,
       visibleMessageId,
       subagentMapByParent,
       selectedNode?.id,
@@ -3908,7 +3980,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         onClick={handleSvgClick}
         style={{ cursor: isDragging ? 'grabbing' : isSelecting ? 'crosshair' : 'grab', touchAction: 'none' }}
       >
-        <g transform={`translate(${pan.x + dimensions.width / 2}, ${pan.y + 100}) scale(${zoom})`}>
+        <g ref={graphTransformRef} transform={`translate(${pan.x + dimensions.width / 2}, ${pan.y + 100}) scale(${zoom})`}>
           <g transform={`translate(${offsetX}, ${offsetY})`}>
             <HeimdallGraphLayers connections={connectionElements} nodes={nodeElements} />
           </g>
