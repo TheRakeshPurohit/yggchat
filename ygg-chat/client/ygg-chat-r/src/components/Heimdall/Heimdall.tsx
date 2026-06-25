@@ -108,6 +108,11 @@ const HeimdallGraphLayers = React.memo<GraphLayersProps>(({ connections, nodes }
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 const NOTE_COLOR_PRESETS = ['#ef4444', '#f97316', '#f59e0b', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899']
+const HEIMDALL_NODE_SELECTED_STROKE_WIDTH = 2.75
+const HEIMDALL_NODE_VISIBLE_STROKE_WIDTH = 2.25
+const HEIMDALL_NODE_RADIUS = 22
+const HEIMDALL_NOTE_PILL_RADIUS = 14
+const HEIMDALL_COMPACT_NODE_HOVER_SCALE = 1.06
 
 const isValidHexColor = (value?: string | null): value is string =>
   typeof value === 'string' && /^#[0-9A-Fa-f]{6}$/.test(value)
@@ -118,6 +123,38 @@ const getReadableTextColor = (hex: string) => {
   const b = parseInt(hex.slice(5, 7), 16)
   const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
   return luminance > 150 ? '#0f172a' : '#ffffff'
+}
+
+const getHeimdallNodeFallbackFillClass = (sender: ChatNode['sender'], isVisible: boolean, isDarkMode: boolean) => {
+  if (isVisible) {
+    return isDarkMode ? 'fill-orange-500/20' : 'fill-blue-100'
+  }
+
+  if (sender === 'user') {
+    return 'fill-white dark:fill-neutral-900'
+  }
+
+  if (sender === 'ex_agent') {
+    return 'fill-orange-50 dark:fill-neutral-900'
+  }
+
+  return 'fill-stone-100 dark:fill-neutral-900'
+}
+
+const getHeimdallNodeTextClass = (sender: ChatNode['sender'], isVisible: boolean) => {
+  if (isVisible) {
+    return 'text-blue-950 dark:text-orange-50'
+  }
+
+  if (sender === 'user') {
+    return 'text-stone-900 dark:text-stone-100'
+  }
+
+  if (sender === 'ex_agent') {
+    return 'text-orange-950 dark:text-orange-100'
+  }
+
+  return 'text-stone-700 dark:text-stone-300'
 }
 
 const interpolateHexColor = (from: string, to: string, progress: number) => {
@@ -173,11 +210,13 @@ const getHeatmapColor = (progress: number) => {
 type ConversationTransferMode = 'copy' | 'move'
 
 type MessageToCopy = {
-  role: 'user' | 'assistant'
+  source_id?: string
+  parent_source_id?: string | null
+  role: Message['role']
   content: string
   thinking_block?: string
   model_name?: string
-  tool_calls?: string
+  tool_calls?: string | any
   note?: string
   note_color?: string | null
   content_blocks?: any
@@ -374,6 +413,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null)
   const hasMovedRef = useRef<boolean>(false)
   const clickedNodeRef = useRef<SVGElement | null>(null)
+  const skipNextNodeContextMenuRef = useRef<{ nodeId: string; expiresAt: number } | null>(null)
   // Ref to record last mouse-up position for context menu anchoring
   const lastMouseUpPosRef = useRef<{ x: number; y: number } | null>(null)
   // Refs for latest zoom and pan to avoid stale closures inside wheel listener
@@ -383,6 +423,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const pendingPanRef = useRef<{ x: number; y: number } | null>(null)
   const pendingZoomRef = useRef<number | null>(null)
   const pendingSelectionEndRef = useRef<{ x: number; y: number } | null>(null)
+  const graphTransformDirtyRef = useRef<boolean>(false)
+  const graphTransformCommitRef = useRef<{ pan: { x: number; y: number }; zoom: number } | null>(null)
   const cullingSnapshotRef = useRef<{ pan: { x: number; y: number }; zoom: number } | null>(null)
   const wheelIdleTimeoutRef = useRef<number | null>(null)
   const useGlobalMoveFallbackRef = useRef<boolean>(false)
@@ -412,11 +454,6 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     return []
   }, [])
 
-  const normalizeComparableText = useCallback((value: unknown) => {
-    if (typeof value !== 'string') return ''
-    return value.trim().replace(/\s+/g, ' ')
-  }, [])
-
   const haveSameSubagentNodes = useCallback(
     (a: SubagentNode[], b: SubagentNode[]) => JSON.stringify(a) === JSON.stringify(b),
     []
@@ -424,121 +461,21 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
   const buildSubagentMap = useCallback(
     (messages: Message[]) => {
-      // We compute the map directly from messages to ensure it works even when
-      // nodes are filtered from the tree (e.g. "Filter Empty Messages" is ON).
-      // This handles both:
-      // 1. Legacy: Messages with role="ex_agent" and ex_agent_type="subagent" (grouped by session)
-      // 2. New: Assistant messages containing "subagent" tool calls
+      // Build subagent badges from assistant messages containing "subagent" tool calls.
+      // Dedicated subagent run data is fetched separately and overrides these entries
+      // for the same parent when available.
       const map: Record<string, SubagentNode[]> = {}
-      const assistantIdsWithCapturedSubagentSessions = new Set<string>()
-      const sessionPromptSignaturesByParent: Record<string, Set<string>> = {}
 
-      // Build a message lookup map for efficient parent traversal
-      const messageById = new Map(messages.map(m => [String(m.id), m]))
-
-      // Helper: Find the originating user message by following parent chain
-      const findUserParent = (msgId: string): string | null => {
-        let currentId: string | null = msgId
-        const visited = new Set<string>()
-        while (currentId && !visited.has(currentId)) {
-          visited.add(currentId)
-          const msg = messageById.get(currentId)
-          if (!msg) return null
-          if (msg.role === 'user') return currentId
-          currentId = msg.parent_id ? String(msg.parent_id) : null
-        }
-        return null
-      }
-
-      // 1. Group ex_agent messages with ex_agent_type="subagent" by session
-      const sessionMessages: Record<string, Message[]> = {}
-      messages.forEach(msg => {
-        if (msg.role === 'ex_agent' && msg.ex_agent_type === 'subagent' && msg.ex_agent_session_id) {
-          const sessionId = msg.ex_agent_session_id
-          if (!sessionMessages[sessionId]) sessionMessages[sessionId] = []
-          sessionMessages[sessionId].push(msg)
-        }
-      })
-
-      // For each session, find the user parent and map all session messages to it
-      Object.entries(sessionMessages).forEach(([sessionId, session]) => {
-        if (session.length === 0) return
-
-        // Find the root message of this session (the one whose parent is NOT an ex_agent in this session)
-        const sessionIds = new Set(session.map(m => String(m.id)))
-        const rootMsg = session.find(m => !m.parent_id || !sessionIds.has(String(m.parent_id)))
-        if (!rootMsg) return
-
-        const rootAssistantId = rootMsg.parent_id ? String(rootMsg.parent_id) : null
-        if (rootAssistantId) {
-          assistantIdsWithCapturedSubagentSessions.add(rootAssistantId)
-        }
-
-        // Find the user message that initiated this subagent session
-        const userParentId = findUserParent(rootAssistantId || '')
-        if (!userParentId) return
-
-        if (!map[userParentId]) map[userParentId] = []
-
-        // Add session as a single entry with all messages combined
-        // Sort messages by created_at to maintain order
-        const sortedMessages = [...session].sort(
-          (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-        )
-
-        const sessionPromptSignature = normalizeComparableText(sortedMessages[0]?.content)
-        if (sessionPromptSignature) {
-          if (!sessionPromptSignaturesByParent[userParentId]) {
-            sessionPromptSignaturesByParent[userParentId] = new Set<string>()
-          }
-          sessionPromptSignaturesByParent[userParentId].add(sessionPromptSignature)
-        }
-
-        // Combine all content_blocks from session messages
-        const combinedBlocks: any[] = []
-        sortedMessages.forEach(msg => {
-          const blocks = normalizeContentBlocks(msg.content_blocks)
-          // Add message content as a text block if present
-          // Skip if content_blocks already has text blocks (avoid duplication)
-          const hasTextBlocks = blocks.some((b: any) => b.type === 'text')
-          if (msg.content && msg.content.trim() && !hasTextBlocks) {
-            combinedBlocks.push({ type: 'text', content: msg.content })
-          }
-          // Add content_blocks if present
-          if (blocks.length > 0) {
-            combinedBlocks.push(...blocks)
-          }
-        })
-
-        map[userParentId].push({
-          id: `session_${sessionId}`,
-          message: sortedMessages[0]?.content || 'Subagent Session',
-          sender: 'ex_agent',
-          content_blocks: combinedBlocks,
-        })
-      })
-
-      // 2. Subagent tool calls in assistant messages
-      // Skip if there's already an ex_agent session for this assistant (avoid double counting)
       messages.forEach(msg => {
         const blocks = normalizeContentBlocks(msg.content_blocks)
         if (msg.role === 'assistant' && blocks.length > 0 && msg.parent_id) {
           const subagentCalls = blocks.filter((block: any) => block.type === 'tool_use' && block.name === 'subagent')
 
           if (subagentCalls.length > 0) {
-            if (assistantIdsWithCapturedSubagentSessions.has(String(msg.id))) {
-              return
-            }
-
             const parentId = String(msg.parent_id)
             if (!map[parentId]) map[parentId] = []
 
             subagentCalls.forEach((call: any, idx: number) => {
-              const promptSignature = normalizeComparableText(call.input?.prompt)
-              if (promptSignature && sessionPromptSignaturesByParent[parentId]?.has(promptSignature)) {
-                return
-              }
-
               // Filter content_blocks to include:
               // 1. All blocks between this subagent's tool_use and its tool_result (inclusive)
               //    This captures any tool calls the subagent made during execution
@@ -577,28 +514,9 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         }
       })
 
-      // Final dedupe pass: if we have a persisted session entry and a tool-call entry
-      // with the same prompt under the same parent, keep the session entry only.
-      Object.entries(map).forEach(([parentId, nodes]) => {
-        const sessionPromptSignatures = new Set(
-          nodes
-            .filter(node => String(node.id).startsWith('session_'))
-            .map(node => normalizeComparableText(node.message))
-            .filter(Boolean)
-        )
-
-        if (sessionPromptSignatures.size === 0) return
-
-        map[parentId] = nodes.filter(node => {
-          if (String(node.id).startsWith('session_')) return true
-          const signature = normalizeComparableText(node.message)
-          return !(signature && sessionPromptSignatures.has(signature))
-        })
-      })
-
       return map
     },
-    [normalizeComparableText, normalizeContentBlocks]
+    [normalizeContentBlocks]
   )
 
   const buildDedicatedSubagentMap = useCallback(
@@ -813,15 +731,19 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const NOTE_PREVIEW_CLOSE_DELAY_MS = 180
 
   const getNoteBadgeMetrics = (noteText?: string) => {
-    const normalized = (noteText || '').replace(/\s+/g, ' ').trim()
+    const rawNote = noteText || ''
+    const headingMatch = rawNote.match(/^\s*##\s+(.+)\s*$/m)
+    const isHeadingTitle = !!headingMatch?.[1]
+    const normalized = (headingMatch?.[1] || rawNote).replace(/\s+/g, ' ').trim()
+
     if (!normalized) {
       const lines = ['Note']
       const width = Math.max(44, Math.round(lines[0].length * 6.5 + 14))
-      return { lines, width, height: 20 }
+      return { lines, width, height: Math.max(20, 10 + lines.length * 11), isHeadingTitle: false }
     }
 
     const maxLineChars = 22
-    const maxLines = 2
+    const maxLines = 3
     const words = normalized.split(' ')
     const lines: string[] = []
     let currentLine = ''
@@ -861,7 +783,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
     const longestLineLength = Math.max(...lines.map(line => line.length))
     const width = Math.min(150, Math.max(56, Math.round(longestLineLength * 6.2 + 16)))
-    return { lines, width, height: lines.length > 1 ? 34 : 20 }
+    return { lines, width, height: Math.max(20, 10 + lines.length * 11), isHeadingTitle }
   }
 
   // Maintain a plain-text processed copy of messages for client-side search
@@ -1124,16 +1046,27 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     pendingZoomRef.current = null
     pendingSelectionEndRef.current = null
 
-    if (nextPan) {
-      setPan(nextPan)
+    if (nextPan || nextZoom !== null) {
+      const committedPan = nextPan ?? panRef.current
+      const committedZoom = nextZoom ?? zoomRef.current
+
+      panRef.current = committedPan
+      zoomRef.current = committedZoom
+      graphTransformCommitRef.current = { pan: committedPan, zoom: committedZoom }
+      applyGraphTransform(committedPan, committedZoom)
+
+      if (nextPan) {
+        setPan(committedPan)
+      }
+      if (nextZoom !== null) {
+        setZoom(committedZoom)
+      }
     }
-    if (nextZoom !== null) {
-      setZoom(nextZoom)
-    }
+
     if (nextSelectionEnd) {
       setSelectionEnd(nextSelectionEnd)
     }
-  }, [])
+  }, [applyGraphTransform])
 
   const queueInteractionFrame = useCallback(() => {
     if (interactionRafRef.current !== null) return
@@ -1155,6 +1088,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
   const queuePanUpdate = useCallback(
     (nextPan: { x: number; y: number }) => {
+      graphTransformDirtyRef.current = true
+      graphTransformCommitRef.current = null
       pendingPanRef.current = nextPan
       panRef.current = nextPan
       applyGraphTransform(nextPan, zoomRef.current)
@@ -1261,6 +1196,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     const newPanY = cursorY - (worldY + oy) * clampedZoom - 100
 
     const nextPan = { x: newPanX, y: newPanY }
+    graphTransformDirtyRef.current = true
+    graphTransformCommitRef.current = null
     zoomRef.current = clampedZoom
     panRef.current = nextPan
     pendingZoomRef.current = clampedZoom
@@ -1331,6 +1268,35 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     setIsPinching(false)
   }, [])
 
+  const openNodeContextMenu = useCallback(
+    (params: { nodeId: string; clientX: number; clientY: number; ctrlKey?: boolean; metaKey?: boolean }): void => {
+      const { nodeId, clientX, clientY, ctrlKey = false, metaKey = false } = params
+      const nodeIdParsed = parseId(nodeId)
+      const isAlreadySelected = selectedNodes.includes(nodeIdParsed)
+
+      let newSelectedNodes: MessageId[]
+
+      if (ctrlKey || metaKey) {
+        newSelectedNodes = isAlreadySelected
+          ? selectedNodes.filter(id => id !== nodeIdParsed)
+          : [...selectedNodes, nodeIdParsed]
+      } else {
+        newSelectedNodes = isAlreadySelected ? selectedNodes.filter(id => id !== nodeIdParsed) : [nodeIdParsed]
+      }
+
+      dispatch(chatSliceActions.nodesSelected(newSelectedNodes))
+
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (rect && newSelectedNodes.length > 0) {
+        setContextMenuPos({ x: clientX - rect.left, y: clientY - rect.top })
+        setShowContextMenu(true)
+      } else {
+        setShowContextMenu(false)
+      }
+    },
+    [dispatch, selectedNodes]
+  )
+
   // Pointer Events with pointer capture for robust drag outside element
   const handlePointerDown = (e: React.PointerEvent<SVGSVGElement>): void => {
     pointerMapRef.current.set(e.pointerId, {
@@ -1348,6 +1314,31 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       return
     }
 
+    const isRightButton = e.button === 2 && e.pointerType !== 'touch'
+    const isPrimaryLike = e.button === 0 || e.pointerType === 'touch' || e.buttons === 1
+    const target = e.target as EventTarget | null
+    const pointerDownNodeId = target instanceof Element ? target.closest('[data-node-id]')?.getAttribute('data-node-id') : null
+    const isClickingNode = !!pointerDownNodeId
+
+    if (isRightButton && pointerDownNodeId) {
+      // Linux Chromium/Electron can fail to deliver a usable SVG contextmenu event
+      // after pointer capture/default suppression. Handle node right-click directly
+      // on pointerdown and suppress the follow-up contextmenu if one still arrives.
+      try {
+        e.preventDefault()
+        e.stopPropagation()
+      } catch {}
+      skipNextNodeContextMenuRef.current = { nodeId: pointerDownNodeId, expiresAt: Date.now() + 750 }
+      openNodeContextMenu({
+        nodeId: pointerDownNodeId,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        ctrlKey: e.ctrlKey,
+        metaKey: e.metaKey,
+      })
+      return
+    }
+
     try {
       e.preventDefault()
     } catch {}
@@ -1360,15 +1351,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       hasPointerCapture = true
     } catch {}
 
-    const isRightButton = e.button === 2 && e.pointerType !== 'touch'
-    const isPrimaryLike = e.button === 0 || e.pointerType === 'touch' || e.buttons === 1
-
     if (isRightButton) {
-      // Check if right-clicking on a node element
-      const target = e.target as unknown as SVGElement
-      const isClickingNode =
-        target && (target.tagName === 'rect' || target.tagName === 'circle') && target.getAttribute('data-node-id')
-
       // Only start drag-to-select if clicking on empty space (not on a node)
       if (!isClickingNode) {
         const svgRect = svgRef.current?.getBoundingClientRect()
@@ -1576,6 +1559,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       pendingPanRef.current = null
       pendingZoomRef.current = null
       pendingSelectionEndRef.current = null
+      graphTransformDirtyRef.current = false
+      graphTransformCommitRef.current = null
       pinchStateRef.current = null
       if (wheelIdleTimeoutRef.current !== null) {
         window.clearTimeout(wheelIdleTimeoutRef.current)
@@ -1599,13 +1584,33 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     }
   }, [])
 
-  // Keep refs in sync with latest state for out-of-react listeners
+  // Keep refs in sync with committed React state for out-of-react listeners.
+  // During wheel/pan/pinch, the SVG transform is updated imperatively first and
+  // React state is committed on idle/end. Do not let effects from intermediate
+  // renders overwrite the live refs with stale state, or culling can briefly use
+  // a transform that no longer matches the mounted SVG tree.
   useEffect(() => {
+    const commit = graphTransformCommitRef.current
+
+    if (graphTransformDirtyRef.current) {
+      const hasCommittedImperativeTransform =
+        !!commit &&
+        Math.abs(zoom - commit.zoom) < 0.0001 &&
+        Math.abs(pan.x - commit.pan.x) < 0.0001 &&
+        Math.abs(pan.y - commit.pan.y) < 0.0001
+
+      if (!hasCommittedImperativeTransform) {
+        return
+      }
+
+      graphTransformDirtyRef.current = false
+      graphTransformCommitRef.current = null
+    }
+
     zoomRef.current = zoom
-  }, [zoom])
-  useEffect(() => {
     panRef.current = pan
-  }, [pan])
+    applyGraphTransform(pan, zoom)
+  }, [zoom, pan, applyGraphTransform])
 
   useEffect(() => {
     if (!isDragging && !isPinching && !isWheeling && isCullingFrozen) {
@@ -1672,17 +1677,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     }
   }, [chatData])
 
-  // Helper to recursively filter and flatten the tree
+  // Helper to recursively filter and flatten empty visual nodes
   const filterEmptyNodes = (node: ChatNode, hasSiblings = false): ChatNode[] => {
-    // Always filter out ex_agent nodes - promote their children
-    if (node.sender === 'ex_agent') {
-      if (node.children && node.children.length > 0) {
-        const childrenHaveSiblings = node.children.length > 1
-        return node.children.flatMap(child => filterEmptyNodes(child, childrenHaveSiblings))
-      }
-      return []
-    }
-
     // Look up full message to check for structured content (blocks, tools, etc.)
     const fullMsg = messageById.get(String(node.id))
 
@@ -2159,42 +2155,15 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       e.preventDefault() // Prevent default browser context menu
       e.stopPropagation()
 
-      // Convert nodeId to parsed format for selectedNodes array
-      const nodeIdParsed = parseId(nodeId)
-
-      // Check if the node is already selected
-      const isAlreadySelected = selectedNodes.includes(nodeIdParsed)
-
-      let newSelectedNodes: string[]
-
-      if (e.ctrlKey || e.metaKey) {
-        // Multi-select: toggle the node in the selection
-        if (isAlreadySelected) {
-          newSelectedNodes = selectedNodes.filter(id => id !== nodeIdParsed)
-        } else {
-          newSelectedNodes = [...selectedNodes, nodeIdParsed]
-        }
-      } else {
-        // Without modifiers: toggle off if already selected; otherwise single-select this node
-        if (isAlreadySelected) {
-          newSelectedNodes = selectedNodes.filter(id => id !== nodeIdParsed)
-        } else {
-          newSelectedNodes = [nodeIdParsed]
-        }
-      }
-
-      // Dispatch the nodesSelected action without branch filtering
-      dispatch(chatSliceActions.nodesSelected(newSelectedNodes))
-
-      // Show context menu at the right-click position
-      const rect = containerRef.current?.getBoundingClientRect()
-      if (rect && newSelectedNodes.length > 0) {
-        const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top }
-        setContextMenuPos(pos)
-        setShowContextMenu(true)
-      }
+      openNodeContextMenu({
+        nodeId,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        ctrlKey: e.ctrlKey,
+        metaKey: e.metaKey,
+      })
     },
-    [dispatch, selectedNodes]
+    [openNodeContextMenu]
   )
 
   const getNodeIdFromTarget = useCallback((target: EventTarget | null): string | null => {
@@ -2238,6 +2207,14 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
       const nodeId = getNodeIdFromTarget(e.target)
       if (nodeId) {
+        const skipped = skipNextNodeContextMenuRef.current
+        if (skipped?.nodeId === nodeId && skipped.expiresAt > Date.now()) {
+          e.preventDefault()
+          e.stopPropagation()
+          skipNextNodeContextMenuRef.current = null
+          return
+        }
+
         handleContextMenu(e as unknown as React.MouseEvent<SVGElement>, nodeId)
         return
       }
@@ -2359,111 +2336,77 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     }
   }
 
-  // Helper: Check if all selected nodes belong to the same branch (linear parent-child chain)
-  const areNodesOnSameBranch = (messageIds: MessageId[], messages: Message[]): boolean => {
-    if (messageIds.length <= 1) return true
-
-    const idSet = new Set(messageIds.map(String))
-    const messageMap = new Map(messages.map(m => [String(m.id), m]))
-
-    // Check for valid linear structure (no forks within selection)
-    for (const id of messageIds) {
-      const msg = messageMap.get(String(id))
-      if (!msg) return false
-
-      // Count how many selected messages are this message's children
-      const childrenInSelection = messages.filter(m => m.parent_id === msg.id && idSet.has(String(m.id))).length
-
-      // If more than 1 child in selection, it's a fork - not a linear branch
-      if (childrenInSelection > 1) return false
-    }
-
-    // Find root (node with no parent in selection)
-    const root = messageIds.find(id => {
-      const msg = messageMap.get(String(id))
-      return !msg?.parent_id || !idSet.has(String(msg.parent_id))
-    })
-
-    if (!root) return false
-
-    // Verify all nodes are reachable from root (connected chain)
-    const reachable = new Set<string>()
-    let current: MessageId | null = root
-    while (current) {
-      reachable.add(String(current))
-      // const msg = messageMap.get(String(current))
-      const nextChild = messages.find(m => m.parent_id === current && idSet.has(String(m.id)))
-      current = nextChild?.id || null
-    }
-
-    return reachable.size === messageIds.length
-  }
-
-  // Helper: Sort messages by branch path (root → leaf)
-  const sortMessagesByBranch = (messageIds: MessageId[], messages: Message[]): MessageId[] => {
-    const idSet = new Set(messageIds.map(String))
-    const messageMap = new Map(messages.map(m => [String(m.id), m]))
-
-    // Find root (node with no parent in selection)
-    const root = messageIds.find(id => {
-      const msg = messageMap.get(String(id))
-      return !msg?.parent_id || !idSet.has(String(msg.parent_id))
-    })
-
-    if (!root) return messageIds
-
-    // Build sorted array from root to leaf
-    const sorted: MessageId[] = []
-    let current: MessageId | null = root
-
-    while (current) {
-      sorted.push(current)
-      const nextChild = messages.find(m => m.parent_id === current && idSet.has(String(m.id)))
-      current = nextChild?.id || null
-    }
-
-    return sorted
-  }
-
   const buildMessagesToCopyFromSelection = (): MessageToCopy[] => {
     const ids = selectedNodes || []
     if (ids.length === 0) return []
 
-    // Build a map of message ID to full message data from state
-    const messageMap = new Map<string, any>()
+    const selectedSet = new Set(ids.map(id => String(id)))
+    const childrenByParent = new Map<string, Message[]>()
+
     allMessages.forEach(msg => {
-      messageMap.set(String(msg.id), msg)
+      if (msg.parent_id != null) {
+        const parentId = String(msg.parent_id)
+        const siblings = childrenByParent.get(parentId) || []
+        siblings.push(msg)
+        childrenByParent.set(parentId, siblings)
+      }
     })
 
-    // Check if all selected nodes belong to same branch and sort if they do
-    const onSameBranch = areNodesOnSameBranch(ids, allMessages)
-    const orderedIds = onSameBranch ? sortMessagesByBranch(ids, allMessages) : ids
+    const orderedMessages: Message[] = []
+    const visited = new Set<string>()
 
-    // Collect selected messages in the determined order
-    const messagesToCopy: MessageToCopy[] = []
-    const seen = new Set<string>()
+    const visitSelectedSubtree = (msg: Message): void => {
+      const id = String(msg.id)
+      if (visited.has(id) || !selectedSet.has(id)) return
 
-    for (const idNum of orderedIds) {
-      const idStr = String(idNum)
-      if (seen.has(idStr)) continue
-      seen.add(idStr)
+      visited.add(id)
+      orderedMessages.push(msg)
 
-      const msg = messageMap.get(idStr)
-      if (msg) {
-        messagesToCopy.push({
-          role: msg.role,
-          content: msg.content,
-          thinking_block: msg.thinking_block || '',
-          model_name: msg.model_name || 'unknown',
-          tool_calls: msg.tool_calls || undefined,
-          note: msg.note || undefined,
-          note_color: msg.note_color || null,
-          content_blocks: msg.content_blocks || undefined,
-        })
-      }
+      const children = childrenByParent.get(id) || []
+      children.forEach(child => {
+        if (selectedSet.has(String(child.id))) {
+          visitSelectedSubtree(child)
+        }
+      })
     }
 
-    return messagesToCopy
+    // Start at selected roots so copied branches keep their original parent/child
+    // shape. A selected message becomes a top-level root only when its original
+    // parent is outside the selection.
+    allMessages.forEach(msg => {
+      const id = String(msg.id)
+      if (!selectedSet.has(id)) return
+      const parentId = msg.parent_id == null ? null : String(msg.parent_id)
+      if (parentId == null || !selectedSet.has(parentId)) {
+        visitSelectedSubtree(msg)
+      }
+    })
+
+    // Defensive fallback for malformed/cyclic data or stale selections.
+    allMessages.forEach(msg => {
+      const id = String(msg.id)
+      if (selectedSet.has(id) && !visited.has(id)) {
+        visitSelectedSubtree(msg)
+      }
+    })
+
+    return orderedMessages.map(msg => {
+      const sourceId = String(msg.id)
+      const parentSourceId = msg.parent_id != null && selectedSet.has(String(msg.parent_id)) ? String(msg.parent_id) : null
+
+      return {
+        source_id: sourceId,
+        parent_source_id: parentSourceId,
+        role: msg.role,
+        content: msg.content,
+        thinking_block: msg.thinking_block || '',
+        model_name: msg.model_name || 'unknown',
+        tool_calls: msg.tool_calls || undefined,
+        note: msg.note || undefined,
+        note_color: msg.note_color || null,
+        content_blocks: msg.content_blocks || undefined,
+      }
+    })
   }
 
   const handleOpenConversationSelector = (mode: ConversationTransferMode): void => {
@@ -2901,15 +2844,20 @@ export const Heimdall: React.FC<HeimdallProps> = ({
             x2={childX}
             y2={childY}
             className={
-              isOnCurrentPath ? 'stroke-indigo-400 dark:stroke-neutral-200' : 'stroke-neutral-400 dark:stroke-gray-500'
+              isOnCurrentPath
+                ? 'stroke-blue-400/80 dark:stroke-orange-300/80'
+                : 'stroke-stone-300/70 dark:stroke-white/10'
             }
-            strokeWidth='2'
+            strokeWidth={isOnCurrentPath ? '2.4' : '1.6'}
           />
         )
       } else {
-        // Multiple children - branching structure
-        const verticalDropHeight = verticalSpacing * 0.4
-        const branchY = parentBottomY + verticalDropHeight
+        // Multiple children - branching structure. Keep the branch rail inside the
+        // vertical gap between parent and child so it never overshoots above/through
+        // top-level nodes when compact/full heights differ.
+        const availableGap = Math.max(1, childY - parentBottomY)
+        const branchY = parentBottomY + availableGap * 0.55
+        const curveOffset = Math.max(6, Math.min(18, availableGap * 0.3))
 
         const screenParent = toScreenPoint(parentX, parentBottomY)
         const screenBranch = toScreenPoint(childX, branchY)
@@ -2918,9 +2866,10 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         if (!segmentIntersectsViewport(screenParent, screenBranch, screenChild)) return
 
         const path = `
-          M ${parentX} ${branchY}
-          L ${childX} ${branchY}
-          L ${childX} ${childY}
+          M ${parentX} ${parentBottomY}
+          C ${parentX} ${parentBottomY + curveOffset}, ${parentX} ${branchY}, ${parentX} ${branchY}
+          C ${parentX} ${branchY}, ${childX} ${branchY}, ${childX} ${branchY}
+          C ${childX} ${branchY}, ${childX} ${childY - curveOffset}, ${childX} ${childY}
         `
 
         connections.push(
@@ -2929,26 +2878,16 @@ export const Heimdall: React.FC<HeimdallProps> = ({
             d={path}
             fill='none'
             className={
-              isOnCurrentPath ? 'stroke-indigo-400 dark:stroke-neutral-200' : 'stroke-neutral-400 dark:stroke-gray-500'
+              isOnCurrentPath
+                ? 'stroke-blue-400/80 dark:stroke-orange-300/80'
+                : 'stroke-stone-300/70 dark:stroke-white/10'
             }
-            strokeWidth='2'
+            strokeWidth={isOnCurrentPath ? '2.4' : '1.6'}
           />
         )
 
-        // Add small dot at branch point
-        if (childX !== parentX) {
-          connections.push(
-            <circle
-              key={`${connectionKey}-dot`}
-              cx={childX}
-              cy={branchY}
-              r='3'
-              className={
-                isOnCurrentPath ? 'fill-indigo-400 dark:stroke-neutral-200' : 'fill-gray-600 dark:fill-gray-500'
-              }
-            />
-          )
-        }
+        // Keep the graph minimal: branching is communicated by the softened connector path,
+        // without extra junction dots around the nodes.
       }
     }
 
@@ -2964,47 +2903,13 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         const parentBottomY = parentPos.y + (isParentExpanded ? nodeHeight : circleRadius * 2)
         const branchY = parentBottomY + verticalDropHeight
 
-        const parentNodeIdParsed = parseId(node.id)
-        const isParentOnPath =
-          ((typeof parentNodeIdParsed === 'number' && !isNaN(parentNodeIdParsed)) ||
-            typeof parentNodeIdParsed === 'string') &&
-          currentPathSet.has(parentNodeIdParsed)
-
         // Draw vertical drop and junction for multi-child nodes when visible
         if (node.children.length > 1) {
           const screenParent = toScreenPoint(parentPos.x, parentBottomY)
           const screenBranch = toScreenPoint(parentPos.x, branchY)
           if (segmentIntersectsViewport(screenParent, screenBranch)) {
-            connections.push(
-              <line
-                key={`${node.id}-drop`}
-                x1={parentPos.x}
-                y1={parentBottomY}
-                x2={parentPos.x}
-                y2={branchY}
-                className={
-                  isParentOnPath
-                    ? 'stroke-indigo-400 dark:stroke-neutral-200'
-                    : 'stroke-neutral-400 dark:stroke-gray-500'
-                }
-                strokeWidth='2'
-              />
-            )
-
-            connections.push(
-              <circle
-                key={`${node.id}-junction`}
-                cx={parentPos.x}
-                cy={branchY}
-                r='4'
-                className={
-                  isParentOnPath
-                    ? 'fill-indigo-300 dark:fill-amber-300 stroke-indigo-400 dark:stroke-amber-400'
-                    : 'fill-gray-700 dark:fill-gray-600 stroke-gray-600 dark:stroke-gray-500'
-                }
-                strokeWidth='2'
-              />
-            )
+            // No standalone drop or junction marker in the minimal tree style.
+            // Child connector paths carry the branch shape without extra visual noise.
           }
         }
 
@@ -3200,21 +3105,121 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     const targetConversationId = conversationId ?? currentConversationId
     const targetConversationKey = targetConversationId != null ? String(targetConversationId) : null
 
-    const resolveVisibleAnchorNodeId = (messageId: MessageId | string | number | null | undefined): string | null => {
-      if (messageId == null) return null
+    const parentToChildren = new Map<string, Message[]>()
+    for (const message of messageById.values()) {
+      const parentId = message.parent_id == null ? null : String(message.parent_id)
+      if (parentId == null) continue
+      const children = parentToChildren.get(parentId) || []
+      children.push(message)
+      parentToChildren.set(parentId, children)
+    }
 
-      let cursorId: string | null = String(messageId)
+    parentToChildren.forEach(children => {
+      children.sort((a, b) => {
+        const aTime = new Date(a.created_at || 0).getTime()
+        const bTime = new Date(b.created_at || 0).getTime()
+        if (aTime !== bTime) return aTime - bTime
+        return String(a.id).localeCompare(String(b.id))
+      })
+    })
+
+    const buildPathToRoot = (messageId: MessageId | string | number | null | undefined): string[] => {
+      if (messageId == null) return []
+
+      const path: string[] = []
       const visited = new Set<string>()
+      let cursorId: string | null = String(messageId)
 
       while (cursorId && !visited.has(cursorId)) {
         visited.add(cursorId)
+        const message = messageById.get(cursorId)
+        if (!message) break
+        path.unshift(cursorId)
+        cursorId = message.parent_id == null ? null : String(message.parent_id)
+      }
 
-        if (heimdallNodeIdSet.has(cursorId)) {
-          return cursorId
+      return path
+    }
+
+    const resolveDeepestVisiblePathNode = (path: string[]): string | null => {
+      for (let index = path.length - 1; index >= 0; index -= 1) {
+        const id = path[index]
+        if (heimdallNodeIdSet.has(id)) return id
+      }
+      return null
+    }
+
+    const resolveVisibleAnchorNodeId = (messageId: MessageId | string | number | null | undefined): string | null => {
+      return resolveDeepestVisiblePathNode(buildPathToRoot(messageId))
+    }
+
+    const resolveDeepestVisibleDescendant = (rootId: MessageId | string | number | null | undefined): string | null => {
+      if (rootId == null) return null
+
+      const rootKey = String(rootId)
+      let best: { id: string; depth: number; createdAt: number } | null = null
+      const visited = new Set<string>()
+      const stack: Array<{ id: string; depth: number }> = [{ id: rootKey, depth: 0 }]
+
+      while (stack.length > 0) {
+        const item = stack.pop()!
+        if (visited.has(item.id)) continue
+        visited.add(item.id)
+
+        const message = messageById.get(item.id)
+        if (!message) continue
+
+        if (heimdallNodeIdSet.has(item.id)) {
+          const createdAt = new Date(message.created_at || 0).getTime()
+          if (!best || item.depth > best.depth || (item.depth === best.depth && createdAt >= best.createdAt)) {
+            best = { id: item.id, depth: item.depth, createdAt }
+          }
         }
 
-        const parentId = messageById.get(cursorId)?.parent_id
-        cursorId = parentId == null ? null : String(parentId)
+        const children = parentToChildren.get(item.id) || []
+        for (let index = children.length - 1; index >= 0; index -= 1) {
+          stack.push({ id: String(children[index].id), depth: item.depth + 1 })
+        }
+      }
+
+      return best?.id ?? null
+    }
+
+    const resolveStreamBranchNodeId = (stream: (typeof streamingRoot.byId)[string]): string | null => {
+      const branchIdentityId =
+        stream.triggerUserMessageId ??
+        stream.lineage.originMessageId ??
+        stream.currentBranchAnchorMessageId ??
+        stream.lineage.rootMessageId ??
+        stream.messageId ??
+        stream.streamingMessageId ??
+        null
+      const branchIdentityKey = branchIdentityId == null ? null : String(branchIdentityId)
+
+      const currentAnchorCandidates = [
+        stream.liveMessageId,
+        stream.streamingMessageId,
+        stream.currentBranchAnchorMessageId,
+        stream.lastCompletedMessageId,
+        stream.finalMessageId,
+        stream.messageId,
+        stream.branchAnchorMessageId,
+        stream.lineage.originMessageId,
+        stream.lineage.rootMessageId,
+        stream.triggerUserMessageId,
+      ]
+
+      for (const candidate of currentAnchorCandidates) {
+        const path = buildPathToRoot(candidate)
+        if (path.length === 0) continue
+        if (branchIdentityKey != null && !path.includes(branchIdentityKey)) continue
+
+        const visibleNodeId = resolveDeepestVisiblePathNode(path)
+        if (visibleNodeId) return visibleNodeId
+      }
+
+      if (branchIdentityId != null) {
+        return resolveDeepestVisibleDescendant(branchIdentityId) ?? resolveVisibleAnchorNodeId(branchIdentityId)
       }
 
       return null
@@ -3232,13 +3237,17 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         }
       }
 
-      const anchorMessageId =
-        stream.streamingMessageId ?? stream.messageId ?? stream.lineage.originMessageId ?? stream.lineage.rootMessageId
-      const anchorNodeId = resolveVisibleAnchorNodeId(anchorMessageId)
+      const anchorNodeId = resolveStreamBranchNodeId(stream)
       if (!anchorNodeId) continue
 
       const branchKey = String(
-        stream.lineage.rootMessageId ?? stream.lineage.originMessageId ?? stream.messageId ?? stream.streamingMessageId ?? streamId
+        stream.triggerUserMessageId ??
+          stream.lineage.originMessageId ??
+          stream.currentBranchAnchorMessageId ??
+          stream.lineage.rootMessageId ??
+          stream.messageId ??
+          stream.streamingMessageId ??
+          streamId
       )
       const nextItem = {
         streamId,
@@ -3290,6 +3299,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       const showSubagentBadge = subagentCount > 0 && node.sender === 'user'
       const activeBranchIndicators = activeBranchIndicatorsByNodeId.get(String(node.id)) || []
       const hasActiveBranchIndicator = activeBranchIndicators.length > 0
+      const nodeOutlineStroke = effectiveNodeColors?.stroke
 
       if (isExpanded) {
         // Render full node
@@ -3309,44 +3319,40 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                 }`}
               />
             )} */}
-            {/* Selection highlight */}
-            {isNodeSelected && (
+            {/* Selected/current highlight: the only visible node outline in the minimal style. */}
+            {(isNodeSelected || isVisible) && (
               <rect
                 width={nodeWidth + 12}
                 height={nodeHeight + 12}
                 x={-6}
                 y={-6}
-                rx='14'
+                rx={HEIMDALL_NODE_RADIUS + 6}
                 fill='none'
-                stroke='currentColor'
-                strokeWidth='3'
-                className={`animate-pulse-slow transition-colors duration-300 ${isVisible ? 'stroke-stone-400 dark:stroke-orange-600' : 'stroke-stone-400 dark:stroke-neutral-200'}`}
+                stroke={nodeOutlineStroke || 'currentColor'}
+                strokeWidth={isNodeSelected ? HEIMDALL_NODE_SELECTED_STROKE_WIDTH : HEIMDALL_NODE_VISIBLE_STROKE_WIDTH}
+                className={`transition-colors duration-200 ${
+                  nodeOutlineStroke
+                    ? ''
+                    : isNodeSelected
+                      ? 'stroke-blue-500 dark:stroke-orange-300'
+                      : 'stroke-blue-300/80 dark:stroke-orange-400/70'
+                }`}
               />
             )}
             <rect
               data-node-id={node.id}
               width={nodeWidth}
               height={nodeHeight}
-              rx='8'
-              strokeWidth='2'
-              className={`cursor-pointer hover:opacity-90 transition-colors duration-200 ${
-                compactMode && focusedNodeId === node.id ? 'animate-pulse' : ''
-              } ${
-                effectiveNodeColors
-                  ? ''
-                  : node.sender === 'user'
-                    ? `fill-neutral-100 dark:fill-neutral-900 ${isVisible ? 'stroke-emerald-400 dark:stroke-orange-500' : 'stroke-neutral-300 dark:stroke-neutral-800'}`
-                    : node.sender === 'ex_agent'
-                      ? `fill-slate-50 dark:fill-yBlack-900 ${isVisible ? 'stroke-emerald-400 dark:stroke-orange-600' : 'stroke-orange-600 dark:stroke-orange-600'}`
-                      : `fill-slate-100 dark:fill-neutral-900 ${isVisible ? 'stroke-emerald-400 dark:stroke-orange-500' : 'stroke-neutral-200 dark:stroke-neutral-800'}`
+              rx={HEIMDALL_NODE_RADIUS}
+              strokeWidth='0'
+              className={`cursor-pointer transition-all duration-200 hover:opacity-95 ${
+                effectiveNodeColors ? '' : getHeimdallNodeFallbackFillClass(node.sender, isVisible, isDarkMode)
               }`}
               style={{
-                filter:
-                  compactMode && focusedNodeId === node.id ? `drop-shadow(0 0 10px rgba(59, 130, 246, 0.5))` : 'none',
+                stroke: 'transparent',
                 ...(effectiveNodeColors
                   ? {
                       fill: effectiveNodeColors.fill,
-                      stroke: effectiveNodeColors.stroke,
                     }
                   : {}),
               }}
@@ -3395,7 +3401,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
             /> */}
             <foreignObject width={nodeWidth} height={nodeHeight} style={{ pointerEvents: 'none', userSelect: 'none' }}>
               <div
-                className='relative p-3 text-stone-800 dark:text-stone-300 text-sm h-full flex items-center'
+                className={`relative h-full flex items-center px-4 py-3 text-sm leading-5 ${getHeimdallNodeTextClass(node.sender, isVisible)}`}
                 style={heatmapNodeColors ? { color: heatmapNodeColors.text } : undefined}
               >
                 {(() => {
@@ -3466,7 +3472,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
               const badge = getNoteBadgeMetrics(message?.note)
               const pillColors = getNotePillColors(message?.note_color)
               const badgeX = nodeWidth - badge.width - 8
-              const badgeY = nodeHeight - 8
+              const badgeY = nodeHeight - badge.height + 10
               return (
                 <g
                   transform={`translate(${badgeX}, ${badgeY})`}
@@ -3480,16 +3486,16 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                   <rect
                     width={badge.width}
                     height={badge.height}
-                    rx='9'
+                    rx={HEIMDALL_NOTE_PILL_RADIUS}
                     style={{ fill: pillColors.fill }}
                     stroke={pillColors.stroke}
                     strokeWidth='1'
                   />
                   <text
                     x={8}
-                    y={badge.lines.length > 1 ? 12 : badge.height / 2 + 4}
+                    y={(badge.height - (badge.lines.length - 1) * 11) / 2 + 5}
                     textAnchor='start'
-                    className='text-[10px] font-semibold'
+                    className={`text-[10px] ${badge.isHeadingTitle ? 'font-bold' : 'font-semibold'}`}
                     style={{ fill: pillColors.text }}
                   >
                     {badge.lines.map((line, index) => (
@@ -3570,16 +3576,22 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                 className='stroke-cyan-400 dark:stroke-amber-300'
               />
             )} */}
-            {/* Selection highlight for compact mode */}
-            {isNodeSelected && (
+            {/* Selected/current highlight: the only visible node outline in compact mode. */}
+            {(isNodeSelected || isVisible) && (
               <circle
                 cx={x}
                 cy={y + circleRadius}
-                r={circleRadius + 10}
+                r={circleRadius + 7}
                 fill='none'
-                stroke='currentColor'
-                strokeWidth='3'
-                className='animate-pulse stroke-blue-500 dark:stroke-stone-400'
+                stroke={nodeOutlineStroke || 'currentColor'}
+                strokeWidth={isNodeSelected ? HEIMDALL_NODE_SELECTED_STROKE_WIDTH : HEIMDALL_NODE_VISIBLE_STROKE_WIDTH}
+                className={`transition-colors duration-200 ${
+                  nodeOutlineStroke
+                    ? ''
+                    : isNodeSelected
+                      ? 'stroke-blue-500 dark:stroke-orange-300'
+                      : 'stroke-blue-300/80 dark:stroke-orange-400/70'
+                }`}
               />
             )}
             <circle
@@ -3587,25 +3599,18 @@ export const Heimdall: React.FC<HeimdallProps> = ({
               cx={x}
               cy={y + circleRadius}
               r={circleRadius}
-              className={`cursor-pointer transition-transform duration-150 ${
-                effectiveNodeColors
-                  ? ''
-                  : `${isVisible ? ' fill-rose-300 dark:fill-yPurple-500' : 'fill-slate-100 stroke-neutral-200 dark:fill-neutral-800 dark:stroke-neutral-900'} ${
-                      node.sender === 'user'
-                        ? 'fill-slate-50 stroke-vtestb-100 dark:fill-yBlack-900 dark:stroke-neutral-900'
-                        : node.sender === 'ex_agent'
-                          ? 'fill-orange-50 stroke-orange-600'
-                          : 'fill-indigo-50 stroke-yPurple-500'
-                    }`
-              } `}
+              strokeWidth='0'
+              className={`cursor-pointer transition-all duration-150 ${
+                effectiveNodeColors ? '' : getHeimdallNodeFallbackFillClass(node.sender, isVisible, isDarkMode)
+              }`}
               style={{
-                transform: selectedNode?.id === node.id ? 'scale(1.1)' : 'scale(1)',
+                transform:
+                  selectedNode?.id === node.id ? `scale(${HEIMDALL_COMPACT_NODE_HOVER_SCALE})` : 'scale(1)',
                 transformOrigin: `${x}px ${y + circleRadius}px`,
-                filter: selectedNode?.id === node.id ? `drop-shadow(0 4px 10px rgba(0,0,0,${isDarkMode ? '0.22' : '0.08'}))` : 'none',
+                stroke: 'transparent',
                 ...(effectiveNodeColors
                   ? {
                       fill: effectiveNodeColors.fill,
-                      stroke: effectiveNodeColors.stroke,
                     }
                   : {}),
               }}
@@ -3654,7 +3659,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
               const badge = getNoteBadgeMetrics(message?.note)
               const pillColors = getNotePillColors(message?.note_color)
               const badgeX = x + circleRadius + 6
-              const badgeY = y + circleRadius + 4
+              const badgeY = y + circleRadius + 8
               return (
                 <g
                   transform={`translate(${badgeX}, ${badgeY})`}
@@ -3668,16 +3673,16 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                   <rect
                     width={badge.width}
                     height={badge.height}
-                    rx='9'
+                    rx={HEIMDALL_NOTE_PILL_RADIUS}
                     style={{ fill: pillColors.fill }}
                     stroke={pillColors.stroke}
                     strokeWidth='1'
                   />
                   <text
                     x={8}
-                    y={badge.lines.length > 1 ? 12 : badge.height / 2 + 4}
+                    y={(badge.height - (badge.lines.length - 1) * 11) / 2 + 5}
                     textAnchor='start'
-                    className='text-[10px] font-semibold'
+                    className={`text-[10px] ${badge.isHeadingTitle ? 'font-bold' : 'font-semibold'}`}
                     style={{ fill: pillColors.text }}
                   >
                     {badge.lines.map((line, index) => (
@@ -4020,18 +4025,18 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           onClick={handleSearchClose}
         >
           <div
-            className='bg-transparent mica border border-stone-200 dark:border-neutral-700 rounded-2xl shadow-2xl flex flex-col max-h-[85vh] w-[95%] sm:w-[90%] max-w-6xl'
+            className='bg-white/65 dark:bg-neutral-950/65 backdrop-blur-3xl rounded-2xl shadow-xl flex flex-col max-h-[85vh] w-[95%] sm:w-[90%] max-w-6xl'
             onClick={e => e.stopPropagation()}
             data-heimdall-wheel-exempt='true'
           >
-            <div className='flex items-center justify-between px-5 py-4 border-b border-stone-200 dark:border-neutral-800 shrink-0'>
+            <div className='flex items-center justify-between px-5 py-4 shrink-0'>
               <div>
                 <h3 className='text-base font-semibold text-stone-800 dark:text-stone-100'>Search Messages</h3>
                 <p className='text-xs text-stone-500 dark:text-stone-400'>Search across this conversation.</p>
               </div>
               <button
                 onClick={handleSearchClose}
-                className='p-1.5 hover:bg-stone-200 dark:hover:bg-neutral-800 rounded-full transition-colors'
+                className='p-1.5 hover:bg-black/5 dark:hover:bg-white/10 rounded-full transition-colors'
                 aria-label='Close search'
               >
                 <svg className='w-5 h-5 text-stone-500' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
@@ -4039,7 +4044,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                 </svg>
               </button>
             </div>
-            <div className='px-5 py-4 border-b border-stone-200 dark:border-neutral-800'>
+            <div className='px-5 pb-4'>
               <TextField
                 placeholder='Search for words or phrases'
                 value={searchQuery}
@@ -4065,7 +4070,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                 }}
                 size='small'
                 autoFocus
-                className='bg-amber-50 dark:bg-neutral-700'
+                className='bg-white/55 dark:bg-white/10'
               />
               <div className='mt-2 text-xs text-stone-500 dark:text-stone-400'>
                 {searchQuery.trim()
@@ -4081,7 +4086,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                 <div className='text-sm text-stone-500 dark:text-stone-400'>No matches found.</div>
               )}
               {searchQuery.trim() && filteredResults.length > 0 && (
-                <div className='grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3'>
+                <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3'>
                   {filteredResults.map((item, idx) => {
                     const messageText = (item.plain || item.content || '').trim() || '(empty message)'
                     return (
@@ -4090,8 +4095,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                         type='button'
                         onClick={() => handleSelectSearchResult(item)}
                         onMouseEnter={() => setSearchHoverIndex(idx)}
-                        className={`text-left rounded-xl border border-stone-200 dark:border-neutral-800 bg-white/90 dark:bg-neutral-900/60 p-3 shadow-sm hover:shadow-md transition-all ${
-                          idx === searchHoverIndex ? 'ring-2 ring-amber-300/80 dark:ring-amber-400/60' : ''
+                        className={`flex flex-col justify-start text-left rounded-xl bg-white/55 dark:bg-white/10 p-3 min-h-[320px] shadow-sm hover:bg-white/75 dark:hover:bg-white/15 transition-all ${
+                          idx === searchHoverIndex ? 'ring-2 ring-amber-300/70 dark:ring-amber-400/50' : ''
                         }`}
                       >
                         <div className='flex items-center justify-between text-[11px] uppercase tracking-wide text-stone-500 dark:text-stone-400'>
@@ -4126,7 +4131,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
                   {conversationTransferMode === 'move' ? 'Move to Existing Chat' : 'Copy to Existing Chat'}
                 </h3>
                 <p className='text-xs text-stone-500 dark:text-stone-400'>
-                  Choose a chat. Messages will be inserted as a new top-level chain{conversationTransferMode === 'move' ? ' and removed from this chat.' : '.'}
+                  Choose a chat. Messages will be inserted preserving the selected branch structure{conversationTransferMode === 'move' ? ' and removed from this chat.' : '.'}
                 </p>
               </div>
               <button

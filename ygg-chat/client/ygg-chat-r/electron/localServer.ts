@@ -29,6 +29,7 @@ import {
 import { listManagedHooks, setManagedHookEnabled } from './hooks/hookManager.js'
 import { runHookRequest } from './hooks/hookRunner.js'
 import { registerLocalOperationsRoutes } from './localOperations.js'
+import { localAnalyticsWorkerClient } from './localAnalyticsWorkerClient.js'
 import { createToolsStatements, initializeToolsSchema, pruneOldTools, registerToolsRoutes } from './localToolsRoutes.js'
 import { mcpManager } from './mcp/mcpManager.js'
 import { registerMcpRoutes } from './mcp/mcpRoutes.js'
@@ -50,8 +51,6 @@ import { editFile, multiEdit } from './tools/editFile.js'
 import { execute as executeFetchChats, executeFetchNotes } from './tools/fetchChats.js'
 import { execute as executeInternalLink } from './tools/internalLink.js'
 import { globSearch } from './tools/glob.js'
-import { executeHermesAgent, getHermesSession, setHermesSession } from './tools/hermesAgent.js'
-import { resolveHermesExecutionPlan } from './tools/hermesExecutionPlanner.js'
 import htmlRenderer from './tools/htmlRenderer.js'
 import { execute as executeMcpManagerTool } from './tools/mcpManagerTool.js'
 import { JobFilter, JobOptions, toolOrchestrator } from './tools/orchestrator/index.js'
@@ -142,61 +141,6 @@ const MAX_UPLOAD_ENTRIES = 5000
 const MAX_UPLOAD_UNPACKED_BYTES = 500 * 1024 * 1024
 const REMOTE_API_BASE = 'https://webdrasil-production.up.railway.app/api'
 const DEFAULT_PRESERVE_RESOURCE_DIRS = ['resources', 'resource']
-const HERMES_PERMISSION_RESPONSE_TIMEOUT_MS = 55_000
-
-type HermesPermissionDecision = 'allow_once' | 'allow_always' | 'deny'
-
-type PendingHermesPermissionRequest = {
-  conversationId: string
-  createdAt: number
-  resolve: (decision: HermesPermissionDecision) => void
-}
-
-const pendingHermesPermissionRequests = new Map<string, PendingHermesPermissionRequest>()
-
-function normalizeHermesPermissionToolCall(rawRequest: any): { id: string; name: string; arguments: Record<string, any> } {
-  const rawToolCall =
-    rawRequest?.toolCall && typeof rawRequest.toolCall === 'object'
-      ? rawRequest.toolCall
-      : rawRequest?.tool_call && typeof rawRequest.tool_call === 'object'
-        ? rawRequest.tool_call
-        : {}
-
-  const toolCallId =
-    typeof rawToolCall.id === 'string' && rawToolCall.id.trim().length > 0
-      ? rawToolCall.id
-      : typeof rawToolCall.toolCallId === 'string' && rawToolCall.toolCallId.trim().length > 0
-        ? rawToolCall.toolCallId
-        : typeof rawToolCall.tool_call_id === 'string' && rawToolCall.tool_call_id.trim().length > 0
-          ? rawToolCall.tool_call_id
-          : uuidv4()
-
-  const toolName =
-    typeof rawToolCall.title === 'string' && rawToolCall.title.trim().length > 0
-      ? rawToolCall.title
-      : typeof rawToolCall.name === 'string' && rawToolCall.name.trim().length > 0
-        ? rawToolCall.name
-        : typeof rawToolCall.kind === 'string' && rawToolCall.kind.trim().length > 0
-          ? rawToolCall.kind
-          : 'hermes_permission'
-
-  const toolArgs: Record<string, any> =
-    rawToolCall.rawInput && typeof rawToolCall.rawInput === 'object'
-      ? rawToolCall.rawInput
-      : rawToolCall.raw_input && typeof rawToolCall.raw_input === 'object'
-        ? rawToolCall.raw_input
-        : {}
-
-  if (typeof rawRequest?.description === 'string' && !('description' in toolArgs)) {
-    toolArgs.description = rawRequest.description
-  }
-
-  return {
-    id: toolCallId,
-    name: toolName,
-    arguments: toolArgs,
-  }
-}
 
 function buildRemoteApiUrl(pathname: string): string {
   if (pathname.startsWith('/')) {
@@ -443,6 +387,14 @@ type BuiltInToolHandler = (
 
 // Registry for built-in tools (initialized in setupServer)
 const builtInTools: Map<string, BuiltInToolHandler> = new Map()
+
+let searchNotesForToolRegistry:
+  | ((params: { userId: string; query: string; projectId?: string; limit: number }) => Array<Record<string, any>>)
+  | null = null
+let searchTopLevelUserMessagesForToolRegistry:
+  | ((params: { userId: string; query: string; projectId?: string; limit: number }) => Array<Record<string, any>>)
+  | null = null
+
 const utilityToolRuntimeHost = new UtilityToolRuntimeHost()
 let utilityRuntimeAvailable = false
 
@@ -898,11 +850,12 @@ function initializeBuiltInToolRegistry() {
         return getter.all(userId, likeQuery, normalizedLikeQuery, limit)
       },
       searchTopLevelMessages: ({ userId, projectId, query, limit }) => {
-        if (typeof searchTopLevelUserMessages !== 'function') return []
-        return searchTopLevelUserMessages({ userId, projectId, query, limit })
+        if (!searchTopLevelUserMessagesForToolRegistry) return []
+        return searchTopLevelUserMessagesForToolRegistry({ userId, projectId, query, limit })
       },
       searchNotes: ({ userId, projectId, query, limit }) => {
-        return searchNotes({ userId, query, projectId, limit })
+        if (!searchNotesForToolRegistry) return []
+        return searchNotesForToolRegistry({ userId, query, projectId, limit })
       },
       listMessagesByConversationId: conversationId => {
         const getter = statements?.getMessagesByConversationId
@@ -951,11 +904,12 @@ function initializeBuiltInToolRegistry() {
         return getter.all(userId, likeQuery, normalizedLikeQuery, limit)
       },
       searchTopLevelMessages: ({ userId, projectId, query, limit }) => {
-        if (typeof searchTopLevelUserMessages !== 'function') return []
-        return searchTopLevelUserMessages({ userId, projectId, query, limit })
+        if (!searchTopLevelUserMessagesForToolRegistry) return []
+        return searchTopLevelUserMessagesForToolRegistry({ userId, projectId, query, limit })
       },
       searchNotes: ({ userId, projectId, query, limit }) => {
-        return searchNotes({ userId, query, projectId, limit })
+        if (!searchNotesForToolRegistry) return []
+        return searchNotesForToolRegistry({ userId, query, projectId, limit })
       },
       listMessagesByConversationId: conversationId => {
         const getter = statements?.getMessagesByConversationId
@@ -1011,323 +965,6 @@ function initializeBuiltInToolRegistry() {
   })
 
   console.log(`[LocalServer] Initialized ${builtInTools.size} built-in tools`)
-}
-
-type LocalToolExecutionOptions = {
-  rootPath?: string
-  operationMode?: 'plan' | 'execute'
-  conversationId?: string | null
-  messageId?: string | null
-  parentMessageId?: string | null
-  streamId?: string | null
-  toolCallId?: string | null
-}
-
-type HermesYggMcpToolDefinition = {
-  name: string
-  description?: string
-  inputSchema: Record<string, any>
-  _meta?: Record<string, any>
-}
-
-type HermesYggMcpContentBlock = {
-  type: 'text' | 'image' | 'resource'
-  text?: string
-  data?: string
-  mimeType?: string
-  resource?: {
-    uri: string
-    mimeType?: string
-    text?: string
-  }
-}
-
-const HERMES_YGG_MCP_PROTOCOL_VERSION = '2025-11-25'
-const HERMES_YGG_MCP_SESSION_ID = 'ygg-hermes-tools'
-const HERMES_YGG_EXPOSED_BUILTIN_TOOL_NAMES = new Set([
-  'todo_list',
-  'fetch_notes',
-  'fetch_chats',
-  'internalLink',
-  'read_file',
-  'read_file_continuation',
-  'read_files',
-  'create_file',
-  'edit_file',
-  'multi_edit',
-  'delete_file',
-  'directory',
-  'view_image',
-  'glob',
-  'ripgrep',
-  'brave_search',
-  'browse_web',
-  'bash',
-  'powershell',
-  'html_renderer',
-  'theme_manager',
-  'custom_tool_manager',
-  'mcp_manager',
-  'skill_manager',
-])
-
-const HERMES_YGG_EXPOSED_BUILTIN_TOOLS: HermesYggMcpToolDefinition[] = BUILTIN_TOOL_DEFINITIONS.filter(tool =>
-  HERMES_YGG_EXPOSED_BUILTIN_TOOL_NAMES.has(tool.name)
-).map(tool => ({
-  name: tool.name,
-  description: tool.description,
-  inputSchema: tool.inputSchema,
-}))
-
-function getHermesYggMcpAuthToken(): string | null {
-  const token = process.env.YGG_HERMES_MCP_AUTH_TOKEN?.trim()
-  return token || null
-}
-
-function getHermesYggRequestRootPath(rawHeader: unknown): string | undefined {
-  return typeof rawHeader === 'string' && rawHeader.trim() ? rawHeader.trim() : undefined
-}
-
-async function executeLocalToolByName(
-  toolName: string,
-  args: any,
-  toolOptions: LocalToolExecutionOptions = {}
-): Promise<ToolResult> {
-  const normalizedToolName = typeof toolName === 'string' ? toolName.trim() : toolName
-  const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
-
-  let result: ToolResult
-
-  const builtInHandler = builtInTools.get(normalizedToolName)
-  if (builtInHandler) {
-    if (shouldUseUtilityRuntimeForTool(normalizedToolName)) {
-      try {
-        result = await utilityToolRuntimeHost.executeTool(normalizedToolName, parsedArgs, toolOptions)
-      } catch (utilityError) {
-        if (isUtilityRuntimeFallbackDisabled()) {
-          throw utilityError
-        }
-        console.warn(
-          `[LocalServer] Utility runtime failed for ${normalizedToolName}; falling back to local execution:`,
-          utilityError
-        )
-        result = await builtInHandler(parsedArgs, toolOptions)
-      }
-    } else {
-      result = await builtInHandler(parsedArgs, toolOptions)
-    }
-  } else if (typeof normalizedToolName === 'string' && normalizedToolName.startsWith('mcp__')) {
-    if (!mcpManager) {
-      result = { success: false, error: 'MCP manager not initialized' }
-    } else {
-      try {
-        const mcpResult = await mcpManager.callTool(normalizedToolName, parsedArgs)
-        const textContent = mcpResult.content
-          .filter(c => c.type === 'text')
-          .map(c => c.text)
-          .join('\n')
-        result = {
-          success: !mcpResult.isError,
-          content: mcpResult.content,
-          text: textContent,
-          error: mcpResult.isError ? textContent : undefined,
-        }
-      } catch (mcpError) {
-        console.error('[LocalServer] MCP tool error:', mcpError)
-        result = { success: false, error: mcpError instanceof Error ? mcpError.message : String(mcpError) }
-      }
-    }
-  } else if (customToolRegistry.hasCustomTool(normalizedToolName)) {
-    if (shouldUseUtilityRuntimeForCustomTool(normalizedToolName)) {
-      try {
-        result = await utilityToolRuntimeHost.executeTool(normalizedToolName, parsedArgs, toolOptions)
-      } catch (utilityError) {
-        if (isUtilityRuntimeFallbackDisabled()) {
-          throw utilityError
-        }
-        console.warn(
-          `[LocalServer] Utility runtime failed for custom tool ${normalizedToolName}; falling back to local execution:`,
-          utilityError
-        )
-        result = await customToolRegistry.executeTool(normalizedToolName, parsedArgs, {
-          rootPath: toolOptions.rootPath,
-          operationMode: toolOptions.operationMode,
-          conversationId: toolOptions.conversationId ?? null,
-          messageId: toolOptions.messageId ?? null,
-          streamId: toolOptions.streamId ?? null,
-          cwd: toolOptions.rootPath,
-        })
-      }
-    } else {
-      result = await customToolRegistry.executeTool(normalizedToolName, parsedArgs, {
-        rootPath: toolOptions.rootPath,
-        operationMode: toolOptions.operationMode,
-        conversationId: toolOptions.conversationId ?? null,
-        messageId: toolOptions.messageId ?? null,
-        streamId: toolOptions.streamId ?? null,
-        cwd: toolOptions.rootPath,
-      })
-    }
-  } else {
-    console.warn(`[LocalServer] Unknown tool: ${normalizedToolName}`)
-    result = { success: false, error: `Unknown tool: ${normalizedToolName}` }
-  }
-
-  return result
-}
-
-function toHermesYggMcpToolDefinitionFromMcpTool(tool: any): HermesYggMcpToolDefinition | null {
-  const visibility = tool?._meta?.ui?.visibility
-  if (Array.isArray(visibility) && !visibility.includes('model')) {
-    return null
-  }
-
-  const name = typeof tool?.qualifiedName === 'string' ? tool.qualifiedName : typeof tool?.name === 'string' ? tool.name : null
-  if (!name) return null
-
-  return {
-    name,
-    description: typeof tool?.description === 'string' ? tool.description : undefined,
-    inputSchema:
-      tool?.inputSchema && typeof tool.inputSchema === 'object'
-        ? tool.inputSchema
-        : { type: 'object', properties: {} },
-    _meta: tool?._meta && typeof tool._meta === 'object' ? tool._meta : undefined,
-  }
-}
-
-function listHermesYggMcpTools(): HermesYggMcpToolDefinition[] {
-  const tools: HermesYggMcpToolDefinition[] = [...HERMES_YGG_EXPOSED_BUILTIN_TOOLS]
-
-  try {
-    const customTools = customToolRegistry
-      .getDefinitions()
-      .filter(def => def.enabled)
-      .map(def => ({
-        name: def.name,
-        description: def.description,
-        inputSchema: def.inputSchema,
-      }))
-    tools.push(...customTools)
-  } catch {
-    // Ignore custom-tool discovery failures in MCP listing.
-  }
-
-  try {
-    const mcpTools = mcpManager
-      .getAllTools()
-      .map(toHermesYggMcpToolDefinitionFromMcpTool)
-      .filter((tool): tool is HermesYggMcpToolDefinition => !!tool)
-    tools.push(...mcpTools)
-  } catch {
-    // Ignore upstream MCP listing failures in MCP listing.
-  }
-
-  const deduped = new Map<string, HermesYggMcpToolDefinition>()
-  for (const tool of tools) {
-    if (!tool?.name) continue
-    if (!deduped.has(tool.name)) {
-      deduped.set(tool.name, tool)
-    }
-  }
-
-  return Array.from(deduped.values())
-}
-
-function stringifyHermesYggMcpText(value: unknown): string {
-  if (typeof value === 'string') return value
-  if (value == null) return ''
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return String(value)
-  }
-}
-
-function toHermesYggMcpContent(result: any): HermesYggMcpContentBlock[] {
-  if (Array.isArray(result?.content)) {
-    const contentBlocks = result.content
-      .map((block: any): HermesYggMcpContentBlock | null => {
-        if (!block || typeof block !== 'object') {
-          const text = stringifyHermesYggMcpText(block)
-          return text ? { type: 'text', text } : null
-        }
-
-        if (block.type === 'text' && typeof block.text === 'string') {
-          return { type: 'text', text: block.text }
-        }
-
-        if (block.type === 'image' && typeof block.data === 'string') {
-          return { type: 'image', data: block.data, mimeType: typeof block.mimeType === 'string' ? block.mimeType : undefined }
-        }
-
-        if (block.type === 'resource' && block.resource && typeof block.resource.uri === 'string') {
-          return {
-            type: 'resource',
-            resource: {
-              uri: block.resource.uri,
-              mimeType: typeof block.resource.mimeType === 'string' ? block.resource.mimeType : undefined,
-              text: typeof block.resource.text === 'string' ? block.resource.text : undefined,
-            },
-          }
-        }
-
-        const text = stringifyHermesYggMcpText(block)
-        return text ? { type: 'text', text } : null
-      })
-      .filter((block): block is HermesYggMcpContentBlock => !!block)
-
-    if (contentBlocks.length > 0) {
-      return contentBlocks
-    }
-  }
-
-  const fallbackText =
-    (typeof result?.text === 'string' && result.text) ||
-    (typeof result?.error === 'string' && result.error) ||
-    stringifyHermesYggMcpText(result)
-
-  return [{ type: 'text', text: fallbackText || 'Tool completed with no output.' }]
-}
-
-function toHermesYggMcpToolCallResult(result: any): { content: HermesYggMcpContentBlock[]; isError?: boolean } {
-  return {
-    content: toHermesYggMcpContent(result),
-    isError: result?.success === false || result?.isError === true,
-  }
-}
-
-function setHermesYggMcpResponseHeaders(res: any): void {
-  res.setHeader('mcp-protocol-version', HERMES_YGG_MCP_PROTOCOL_VERSION)
-  res.setHeader('mcp-session-id', HERMES_YGG_MCP_SESSION_ID)
-}
-
-function sendHermesYggMcpJsonResult(res: any, id: unknown, result: any, statusCode = 200): void {
-  setHermesYggMcpResponseHeaders(res)
-  if (id === undefined || id === null) {
-    res.status(202).end()
-    return
-  }
-  res.status(statusCode).json({ jsonrpc: '2.0', id, result })
-}
-
-function sendHermesYggMcpJsonError(
-  res: any,
-  id: unknown,
-  code: number,
-  message: string,
-  statusCode = 200
-): void {
-  setHermesYggMcpResponseHeaders(res)
-  if (id === undefined || id === null) {
-    res.status(statusCode).json({ error: message })
-    return
-  }
-  res.status(statusCode).json({
-    jsonrpc: '2.0',
-    id,
-    error: { code, message },
-  })
 }
 
 function registerCustomToolsWithOrchestrator(): number {
@@ -5871,95 +5508,6 @@ function setupServer() {
     }
   })
 
-  // Ygg-provided MCP endpoint for Hermes ACP sessions
-  app.post('/api/mcp/ygg', async (req, res) => {
-    const id = req.body?.id
-    const method = typeof req.body?.method === 'string' ? req.body.method : undefined
-    const authToken = getHermesYggMcpAuthToken()
-    const authorizationHeader = typeof req.get('authorization') === 'string' ? req.get('authorization') : ''
-
-    if (!authToken || authorizationHeader !== `Bearer ${authToken}`) {
-      sendHermesYggMcpJsonError(res, id, -32001, 'Unauthorized MCP request', 401)
-      return
-    }
-
-    if (!req.body || req.body.jsonrpc !== '2.0' || !method) {
-      sendHermesYggMcpJsonError(res, id, -32600, 'Invalid JSON-RPC request', 400)
-      return
-    }
-
-    if (method === 'notifications/initialized') {
-      sendHermesYggMcpJsonResult(res, id, {})
-      return
-    }
-
-    if (method === 'initialize') {
-      sendHermesYggMcpJsonResult(res, id, {
-        protocolVersion: HERMES_YGG_MCP_PROTOCOL_VERSION,
-        capabilities: {
-          tools: { listChanged: false },
-          resources: {},
-          prompts: {},
-        },
-        serverInfo: {
-          name: 'ygg-chat',
-          title: 'Ygg Chat Local Tools',
-          version: '1.0.0',
-        },
-      })
-      return
-    }
-
-    if (method === 'tools/list') {
-      sendHermesYggMcpJsonResult(res, id, {
-        tools: listHermesYggMcpTools(),
-      })
-      return
-    }
-
-    if (method === 'resources/list') {
-      sendHermesYggMcpJsonResult(res, id, { resources: [] })
-      return
-    }
-
-    if (method === 'prompts/list') {
-      sendHermesYggMcpJsonResult(res, id, { prompts: [] })
-      return
-    }
-
-    if (method === 'tools/call') {
-      const toolName = req.body?.params?.name
-      if (!toolName || typeof toolName !== 'string') {
-        sendHermesYggMcpJsonError(res, id, -32602, 'tools/call requires a string params.name', 400)
-        return
-      }
-
-      try {
-        const toolResult = await executeLocalToolByName(toolName, req.body?.params?.arguments ?? {}, {
-          rootPath: getHermesYggRequestRootPath(req.get('x-ygg-hermes-cwd')),
-          operationMode: 'execute',
-          conversationId:
-            typeof req.get('x-ygg-hermes-conversation-id') === 'string' && req.get('x-ygg-hermes-conversation-id')!.trim()
-              ? req.get('x-ygg-hermes-conversation-id')!.trim()
-              : null,
-          messageId: null,
-          streamId: null,
-        })
-
-        sendHermesYggMcpJsonResult(res, id, toHermesYggMcpToolCallResult(toolResult))
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        sendHermesYggMcpJsonResult(res, id, {
-          content: [{ type: 'text', text: message }],
-          isError: true,
-        })
-      }
-      return
-    }
-
-    sendHermesYggMcpJsonError(res, id, -32601, `Unsupported MCP method: ${method}`, 404)
-  })
-
   // Custom Tools API Endpoints
 
   // GET /api/custom-tools - List all custom tool definitions
@@ -6719,6 +6267,26 @@ function setupServer() {
   })
 
   // Local analytics dashboard endpoint
+  // Keep this route before the legacy synchronous implementation below so the
+  // expensive better-sqlite3 scans/aggregations run in a worker thread instead
+  // of blocking the Electron/local server event loop while LoggingPage loads.
+  app.get('/api/local/analytics/dashboard', async (req, res) => {
+    try {
+      if (!currentDbPath) {
+        res.status(503).json({ error: 'Failed to get local analytics dashboard', message: 'Local database is not initialized' })
+        return
+      }
+
+      const dashboard = await localAnalyticsWorkerClient.run(currentDbPath, req.query as Record<string, unknown>)
+      res.json(dashboard)
+    } catch (error) {
+      console.error('[LocalServer] Error getting local analytics dashboard:', error)
+      const message = error instanceof Error ? error.message : String(error)
+      res.status(500).json({ error: 'Failed to get local analytics dashboard', message })
+    }
+  })
+
+  // Legacy synchronous implementation retained as a fallback if route order changes.
   app.get('/api/local/analytics/dashboard', (req, res) => {
     try {
       const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max)
@@ -9201,6 +8769,9 @@ function setupServer() {
       })
   }
 
+  searchNotesForToolRegistry = searchNotes
+  searchTopLevelUserMessagesForToolRegistry = searchTopLevelUserMessages
+
   // GET /api/local/conversations/search?userId=xxx&q=term&limit=20&projectId=xxx
   app.get('/api/local/conversations/search', (req, res) => {
     try {
@@ -9790,11 +9361,13 @@ function setupServer() {
       const { id: conversationId } = req.params
       const { messages } = req.body as {
         messages: Array<{
-          role: 'user' | 'assistant'
+          source_id?: string
+          parent_source_id?: string | null
+          role: 'user' | 'assistant' | 'system' | 'ex_agent' | 'tool'
           content: string
           thinking_block?: string
           model_name?: string
-          tool_calls?: string
+          tool_calls?: string | any
           note?: string
           note_color?: string | null
           content_blocks?: any
@@ -9818,15 +9391,53 @@ function setupServer() {
       const createdMessages: any[] = []
       let lastMessageId: string | null = null
       const now = new Date().toISOString()
+      const sourceIdToNewId = new Map<string, string>()
+      const hasStructuredParents = messages.some(msg => msg.source_id != null || msg.parent_source_id !== undefined)
 
-      // Insert messages sequentially, maintaining parent-child relationships (linear chain)
-      for (const msg of messages) {
-        const messageId = uuidv4()
+      messages.forEach((msg, index) => {
+        const sourceKey = msg.source_id != null ? String(msg.source_id) : `__legacy_${index}`
+        sourceIdToNewId.set(sourceKey, uuidv4())
+      })
+
+      const entries = messages.map((msg, index) => ({ msg, index }))
+      const orderedEntries: typeof entries = []
+
+      if (hasStructuredParents) {
+        const entryBySourceKey = new Map(entries.map(entry => [entry.msg.source_id != null ? String(entry.msg.source_id) : `__legacy_${entry.index}`, entry]))
+        const visitedEntries = new Set<string>()
+
+        const visitEntry = (entry: (typeof entries)[number]) => {
+          const sourceKey = entry.msg.source_id != null ? String(entry.msg.source_id) : `__legacy_${entry.index}`
+          if (visitedEntries.has(sourceKey)) return
+
+          const parentEntry = entry.msg.parent_source_id != null ? entryBySourceKey.get(String(entry.msg.parent_source_id)) : null
+          if (parentEntry) visitEntry(parentEntry)
+
+          visitedEntries.add(sourceKey)
+          orderedEntries.push(entry)
+        }
+
+        entries.forEach(visitEntry)
+      } else {
+        orderedEntries.push(...entries)
+      }
+
+      // Insert messages sequentially. Structured Heimdall clone payloads preserve
+      // selected parent/child relationships; legacy payloads keep the old linear
+      // chain behavior for backward compatibility.
+      for (const { msg, index } of orderedEntries) {
+        const sourceKey = msg.source_id != null ? String(msg.source_id) : `__legacy_${index}`
+        const messageId = sourceIdToNewId.get(sourceKey) || uuidv4()
+        const parentId = hasStructuredParents
+          ? msg.parent_source_id != null
+            ? sourceIdToNewId.get(String(msg.parent_source_id)) || null
+            : null
+          : lastMessageId
 
         statements.upsertMessage.run(
           messageId,
           conversationId,
-          lastMessageId, // Parent is the previous message in the chain
+          parentId,
           '[]', // children_ids starts empty (trigger will update parent's children_ids)
           msg.role,
           msg.content,
@@ -9854,7 +9465,7 @@ function setupServer() {
         const createdMessage = {
           id: messageId,
           conversation_id: conversationId,
-          parent_id: lastMessageId,
+          parent_id: parentId,
           children_ids: [],
           role: msg.role,
           content: msg.content,
@@ -10023,450 +9634,6 @@ function setupServer() {
       return { ...block, index }
     })
   }
-
-  // GET /api/agents/hermes-session/:conversationId - Get Hermes session info
-  app.get('/api/agents/hermes-session/:conversationId', (req, res) => {
-    try {
-      const { conversationId } = req.params
-      const conversation = statements.getConversationById.get(conversationId) as any
-
-      if (!conversation) {
-        res.json({ hasSession: false })
-        return
-      }
-
-      const cwd = conversation.cwd || process.cwd()
-      const sessionId = getHermesSession(conversationId, cwd)
-
-      if (sessionId) {
-        res.json({
-          hasSession: true,
-          sessionId,
-          cwd,
-        })
-        return
-      }
-
-      const lastHermesMessage = db!
-        .prepare(
-          `
-          SELECT ex_agent_session_id, created_at
-          FROM messages
-          WHERE conversation_id = ?
-            AND ex_agent_session_id IS NOT NULL
-            AND ex_agent_session_id != ''
-            AND (
-              role = 'assistant'
-              OR (role = 'ex_agent' AND ex_agent_type = 'hermes_agent')
-            )
-          ORDER BY created_at DESC
-          LIMIT 1
-        `
-        )
-        .get(conversationId) as any
-
-      if (lastHermesMessage?.ex_agent_session_id) {
-        setHermesSession(conversationId, cwd, lastHermesMessage.ex_agent_session_id)
-      }
-
-      res.json({
-        hasSession: !!lastHermesMessage?.ex_agent_session_id,
-        sessionId: lastHermesMessage?.ex_agent_session_id,
-        lastMessageAt: lastHermesMessage?.created_at,
-        cwd,
-      })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error getting Hermes session:', error)
-      res.status(500).json({ error: 'Failed to get Hermes session' })
-    }
-  })
-
-  // POST /api/agents/hermes-permission-response/:requestId - Resolve a pending Hermes ACP permission request
-  app.post('/api/agents/hermes-permission-response/:requestId', (req, res) => {
-    const { requestId } = req.params
-    const decisionRaw = typeof req.body?.decision === 'string' ? req.body.decision.trim().toLowerCase() : ''
-    const decision: HermesPermissionDecision =
-      decisionRaw === 'allow_always' ? 'allow_always' : decisionRaw === 'deny' ? 'deny' : 'allow_once'
-
-    const pending = pendingHermesPermissionRequests.get(requestId)
-    if (!pending) {
-      res.status(404).json({ error: 'Hermes permission request not found or already resolved' })
-      return
-    }
-
-    pendingHermesPermissionRequests.delete(requestId)
-    pending.resolve(decision)
-    res.json({ ok: true })
-  })
-
-  // POST /api/agents/hermes-messages/:conversationId - Send message to Hermes ACP backend
-  app.post('/api/agents/hermes-messages/:conversationId', async (req, res) => {
-    const { conversationId } = req.params
-    const {
-      message,
-      cwd: requestedCwd,
-      resume,
-      parentId: requestedParentId,
-      sessionId: providedSessionId,
-      forkSession,
-      model,
-      maxIterations,
-    } = req.body as {
-      message: string
-      cwd?: string
-      resume?: boolean
-      parentId?: string | null
-      sessionId?: string
-      forkSession?: boolean
-      model?: string
-      maxIterations?: number
-    }
-
-    if (!message) {
-      res.status(400).json({ error: 'Message content required' })
-      return
-    }
-
-    const conversation = statements.getConversationById.get(conversationId) as any
-    const cwd = requestedCwd || conversation?.cwd || process.cwd()
-
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-    })
-
-    const requestAbortController = new AbortController()
-
-    try {
-      const lastMessage = statements.getLastMessageByConversationId.get(conversationId) as any
-      const parentId = requestedParentId !== undefined ? requestedParentId : lastMessage?.id || null
-
-      const userMsgId = uuidv4()
-      const now = new Date().toISOString()
-      statements.upsertMessage.run(
-        userMsgId,
-        conversationId,
-        parentId,
-        '[]',
-        'user',
-        message,
-        null,
-        null,
-        null,
-        null,
-        'user-input',
-        null,
-        null,
-        null,
-        null,
-        null,
-        now
-      )
-
-      res.write(
-        `data: ${JSON.stringify({ type: 'user_message', message: { id: userMsgId, role: 'user', content: message } })}\n\n`
-      )
-
-      const findSessionIdFromAncestorChain = (startMessageId: string | null | undefined): string | undefined => {
-        if (!startMessageId) return undefined
-
-        let current = statements.getMessageById.get(startMessageId) as any
-        while (current) {
-          if (
-            typeof current.ex_agent_session_id === 'string' &&
-            current.ex_agent_session_id.trim().length > 0 &&
-            (current.role === 'assistant' || (current.role === 'ex_agent' && current.ex_agent_type === 'hermes_agent'))
-          ) {
-            return current.ex_agent_session_id
-          }
-          if (!current.parent_id) break
-          current = statements.getMessageById.get(current.parent_id)
-        }
-
-        return undefined
-      }
-
-      const lineageSessionId = findSessionIdFromAncestorChain(parentId)
-      const executionPlan = resolveHermesExecutionPlan({
-        providedSessionId,
-        lineageSessionId,
-        conversationSessionId: getHermesSession(conversationId, cwd),
-        forkSession,
-        resume,
-      })
-      let sessionId = executionPlan.sourceSessionId
-
-      let contentBlocks: any[] = []
-      let textParts: string[] = []
-      let reasoningParts: string[] = []
-      let currentSessionId: string | null = sessionId || null
-      let hasPersistedFinalAssistant = false
-      let sawHermesContentDelta = false
-
-      const onStream = (data: any) => {
-        try {
-          res.write(`data: ${JSON.stringify(data)}\n\n`)
-        } catch (error) {
-          console.error('[LocalServer] Error writing Hermes stream data:', error)
-        }
-      }
-
-      const onStreamingChunk = async (chunk: any) => {
-        try {
-          // Only forward true token deltas here.
-          // Tool lifecycle is streamed via messageType events (tool_start/tool_result).
-          if (chunk.type !== 'content_delta' && chunk.type !== 'thinking_delta') {
-            return
-          }
-
-          if (chunk.type === 'content_delta' && typeof chunk.delta === 'string' && chunk.delta.length > 0) {
-            sawHermesContentDelta = true
-          }
-
-          if (chunk.type === 'thinking_delta' && typeof chunk.delta === 'string' && chunk.delta.length > 0) {
-            reasoningParts.push(chunk.delta)
-          }
-
-          res.write(
-            `data: ${JSON.stringify({
-              type: 'chunk',
-              part: chunk.contentType === 'thinking' ? 'reasoning' : 'text',
-              delta: chunk.delta || '',
-              chunkType: chunk.type,
-            })}\n\n`
-          )
-        } catch (error) {
-          console.error('[LocalServer] Error writing Hermes streaming chunk:', error)
-        }
-      }
-
-      const onResponse = async (response: any) => {
-        onStream(response)
-
-        if (response.sessionId) {
-          currentSessionId = response.sessionId
-          setHermesSession(conversationId, cwd, response.sessionId)
-        }
-
-        const event = response.event || {}
-
-        if (response.messageType === 'assistant_message' || response.messageType === 'final') {
-          const assistantText =
-            (typeof event.content === 'string' && event.content) || (typeof event.text === 'string' && event.text) || ''
-
-          if (assistantText) {
-            const isDuplicateFinalText =
-              response.messageType === 'final' &&
-              textParts.length > 0 &&
-              textParts[textParts.length - 1] === assistantText
-
-            if (!isDuplicateFinalText) {
-              contentBlocks.push({ type: 'text', text: assistantText })
-              textParts.push(assistantText)
-              if (!sawHermesContentDelta) {
-                res.write(
-                  `data: ${JSON.stringify({
-                    type: 'chunk',
-                    part: 'text',
-                    delta: assistantText,
-                    chunkType: response.messageType,
-                  })}\n\n`
-                )
-              }
-            }
-          }
-        }
-
-        if (response.messageType === 'tool_start') {
-          const toolId = event.tool_call_id || event.toolCallId || uuidv4()
-          const toolName = event.name || event.tool_name || 'tool'
-          contentBlocks.push({
-            type: 'tool_use',
-            id: toolId,
-            name: toolName,
-            input: event.arguments || event.args || {},
-          })
-        }
-
-        if (response.messageType === 'tool_result') {
-          const toolCallId = event.tool_call_id || event.toolCallId || null
-          const toolName = event.name || event.tool_name || 'tool'
-          const toolContentRaw = event.content ?? event.result ?? ''
-
-          contentBlocks.push({
-            type: 'tool_result',
-            tool_use_id: toolCallId,
-            tool_name: toolName,
-            content: toolContentRaw,
-            is_error: event.ok === false,
-          })
-        }
-
-        if (response.messageType === 'error') {
-          const errorMessage = response.error?.message || event.message || 'Hermes ACP error'
-          if (errorMessage) {
-            contentBlocks.push({ type: 'text', text: `[Hermes Error] ${errorMessage}` })
-            textParts.push(`[Hermes Error] ${errorMessage}`)
-          }
-        }
-
-        if (
-          response.messageType === 'final' ||
-          response.messageType === 'conversation_end' ||
-          response.messageType === 'error'
-        ) {
-          if (!hasPersistedFinalAssistant && contentBlocks.length > 0) {
-            if (!currentSessionId) {
-              currentSessionId = sessionId || `hermes-${conversationId}`
-              setHermesSession(conversationId, cwd, currentSessionId)
-            }
-
-            const hermesMsgId = uuidv4()
-            const textContent = textParts.join('\n\n').trim()
-            const thinkingContent = reasoningParts.join('').trim()
-
-            if (thinkingContent && !contentBlocks.some(block => block?.type === 'thinking')) {
-              contentBlocks = [{ type: 'thinking', thinking: thinkingContent }, ...contentBlocks]
-            }
-
-            statements.upsertMessage.run(
-              hermesMsgId,
-              conversationId,
-              userMsgId,
-              '[]',
-              'assistant',
-              textContent || '[Hermes response]',
-              null,
-              null,
-              null,
-              null,
-              model || 'hermes-bridge',
-              response.messageType === 'error' ? response.error?.message || event.message || 'Hermes error' : null,
-              null,
-              currentSessionId,
-              null,
-              JSON.stringify(normalizeContentBlocksForStorage(contentBlocks)),
-              new Date().toISOString()
-            )
-
-            res.write(
-              `data: ${JSON.stringify({
-                type: 'complete',
-                sessionId: currentSessionId,
-                messageId: hermesMsgId,
-                messageCount: contentBlocks.length,
-              })}\n\n`
-            )
-
-            hasPersistedFinalAssistant = true
-          }
-
-          contentBlocks = []
-          textParts = []
-          reasoningParts = []
-        }
-      }
-
-      const onPermissionRequest = async (permissionRequest: any): Promise<HermesPermissionDecision> => {
-        if (requestAbortController.signal.aborted || res.writableEnded) {
-          return 'deny'
-        }
-
-        const requestId = uuidv4()
-        const toolCall = normalizeHermesPermissionToolCall(permissionRequest)
-
-        res.write(
-          `data: ${JSON.stringify({
-            type: 'permission_request',
-            requestId,
-            sessionId: permissionRequest?.sessionId ?? null,
-            toolCall,
-            options: Array.isArray(permissionRequest?.options) ? permissionRequest.options : [],
-          })}\n\n`
-        )
-
-        return await new Promise<HermesPermissionDecision>(resolve => {
-          let settled = false
-          let timeoutHandle: ReturnType<typeof setTimeout> | null = null
-
-          const cleanup = () => {
-            if (timeoutHandle) {
-              clearTimeout(timeoutHandle)
-              timeoutHandle = null
-            }
-            requestAbortController.signal.removeEventListener('abort', onAbort)
-            pendingHermesPermissionRequests.delete(requestId)
-          }
-
-          const settle = (decision: HermesPermissionDecision) => {
-            if (settled) return
-            settled = true
-            cleanup()
-            resolve(decision)
-          }
-
-          const onAbort = () => settle('deny')
-
-          pendingHermesPermissionRequests.set(requestId, {
-            conversationId,
-            createdAt: Date.now(),
-            resolve: settle,
-          })
-
-          timeoutHandle = setTimeout(() => settle('deny'), HERMES_PERMISSION_RESPONSE_TIMEOUT_MS)
-          requestAbortController.signal.addEventListener('abort', onAbort, { once: true })
-        })
-      }
-
-      const abortHermesRequest = () => {
-        if (!requestAbortController.signal.aborted && !res.writableEnded) {
-          requestAbortController.abort()
-        }
-      }
-
-      req.once('aborted', abortHermesRequest)
-      res.once('close', abortHermesRequest)
-
-      try {
-        await executeHermesAgent(
-          conversationId,
-          message,
-          cwd,
-          onResponse,
-          onStreamingChunk,
-          sessionId,
-          forkSession,
-          model,
-          maxIterations,
-          requestAbortController.signal,
-          onPermissionRequest
-        )
-      } finally {
-        req.off('aborted', abortHermesRequest)
-        res.off('close', abortHermesRequest)
-      }
-
-      if (cwd && conversation && conversation.cwd !== cwd) {
-        statements.updateConversationCwd.run(cwd, conversationId)
-      }
-    } catch (error) {
-      if (!requestAbortController.signal.aborted && !res.writableEnded) {
-        console.error('[LocalServer] Hermes ACP error:', error)
-        res.write(
-          `data: ${JSON.stringify({
-            type: 'error',
-            error: error instanceof Error ? error.message : 'Unknown Hermes ACP error',
-          })}\n\n`
-        )
-      }
-    }
-
-    if (!requestAbortController.signal.aborted && !res.writableEnded) {
-      res.end()
-    }
-  })
 
   // GET /api/agents/cc-session/:conversationId - Get CC session info
   app.get('/api/agents/cc-session/:conversationId', (req, res) => {
@@ -11426,6 +10593,7 @@ export async function startLocalServer(
 export function stopLocalServer(): Promise<void> {
   return new Promise(resolve => {
     // Shutdown tool orchestrator first
+    localAnalyticsWorkerClient.shutdown()
     toolOrchestrator.shutdown()
     customToolRegistry.shutdown()
     utilityRuntimeAvailable = false

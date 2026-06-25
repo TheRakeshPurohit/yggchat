@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300..700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Geist:ital,wght@0,100..900;1,100..900&family=Ubuntu:ital,wght@0,300;0,400;0,500;0,700;1,300;1,400;1,500;1,700&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
 @import './styles/mica.css';
 @import './styles/acrylic.css';
@@ -85,7 +85,7 @@
 @plugin "@tailwindcss/typography";
 /* Override Tailwind v4 default font stack */
 @theme {
-  --font-sans: 'DM Sans', Inter, system-ui, sans-serif;
+  --font-sans: 'Geist', 'Ubuntu', Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-inter: 'Inter', system-ui, sans-serif;
 }
 
@@ -577,6 +577,8 @@ html {
 .tool-expand-container {
   display: grid;
   grid-template-rows: 0fr;
+  min-width: 0;
+  max-width: 100%;
   transition: grid-template-rows 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
 }
@@ -587,6 +589,9 @@ html {
 
 .tool-expand-content {
   min-height: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   opacity: 0;
   transition: opacity 0.2s ease;
 }
@@ -663,6 +668,29 @@ html {
 }
 
 /* Minimal running-state treatment for chat process/tool labels. */
+@keyframes streaming-pixel-step {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(1px) scale(0.85);
+  }
+
+  25% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  50% {
+    opacity: 0.7;
+    transform: translateY(-1px) scale(0.9);
+  }
+
+  75% {
+    opacity: 0.45;
+    transform: translateY(0) scale(0.85);
+  }
+}
+
 @keyframes tool-name-shimmer {
   0%,
   12% {
@@ -700,11 +728,31 @@ html {
     --tool-shimmer-glint: rgb(245 245 245);
   }
 
+  .streaming-pixel {
+    animation: streaming-pixel-step 1.15s steps(1, end) infinite;
+  }
+
+  .streaming-pixel-delay-1 {
+    animation-delay: 160ms;
+  }
+
+  .streaming-pixel-delay-2 {
+    animation-delay: 320ms;
+  }
+
+  .streaming-pixel-delay-3 {
+    animation-delay: 480ms;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .tool-name-shimmer {
       animation: none;
       color: rgb(115 115 115);
       background-image: none;
+    }
+
+    .streaming-pixel {
+      animation: none;
     }
 
     .dark .tool-name-shimmer {
@@ -763,4 +811,258 @@ html {
     opacity: 1;
     animation: none;
   }
+}
+
+/* Chat Markdown renderer theme variables. These defaults are overridden per ChatMessage
+   by custom theme CSS variables from ThemeManager/themeConfig.ts. */
+.chat-markdown {
+  --chat-md-text: #27272a;
+  --chat-md-muted-text: #64748b;
+  --chat-md-heading-text: #1f2937;
+  --chat-md-link-text: #2563eb;
+  --chat-md-link-hover-text: #1d4ed8;
+  --chat-md-list-marker-text: #60a5fa;
+  --chat-md-hr-border: rgba(100, 116, 139, 0.22);
+  --chat-md-blockquote-bg: rgba(241, 245, 249, 0.9);
+  --chat-md-blockquote-border: #93c5fd;
+  --chat-md-blockquote-text: #334155;
+  --chat-md-table-border: rgba(148, 163, 184, 0.32);
+  --chat-md-table-header-bg: rgba(248, 250, 252, 0.95);
+  --chat-md-table-header-text: #1f2937;
+  --chat-md-table-row-border: rgba(203, 213, 225, 0.42);
+  --chat-md-code-block-bg: #f8fafc;
+  --chat-md-code-block-border: rgba(148, 163, 184, 0.34);
+  --chat-md-code-block-text: #1f2937;
+  --chat-md-code-block-header-bg: rgba(226, 232, 240, 0.72);
+  --chat-md-code-block-header-text: #475569;
+  --chat-md-code-copy-button-bg: rgba(255, 255, 255, 0.88);
+  --chat-md-code-copy-button-border: rgba(148, 163, 184, 0.4);
+  --chat-md-code-copy-button-text: #334155;
+  --chat-md-code-copy-button-hover-bg: rgba(219, 234, 254, 0.85);
+  --chat-md-inline-code-bg: rgba(226, 232, 240, 0.85);
+  --chat-md-inline-code-text: #1d4ed8;
+  --chat-md-inline-code-border: rgba(148, 163, 184, 0.36);
+  --chat-md-math-text: #2563eb;
+  --chat-md-syntax-base: #334155;
+  --chat-md-syntax-comment: #94a3b8;
+  --chat-md-syntax-keyword: #2563eb;
+  --chat-md-syntax-string: #1e40af;
+  --chat-md-syntax-number: #4f46e5;
+  --chat-md-syntax-type: #3b82f6;
+  --chat-md-syntax-function: #0284c7;
+  --chat-md-syntax-variable: #be123c;
+  --chat-md-syntax-operator: #64748b;
+  --chat-md-syntax-punctuation: #475569;
+  --chat-md-syntax-meta: #2563eb;
+  --chat-md-syntax-deletion: #dc2626;
+  --chat-md-syntax-addition: #2563eb;
+  color: var(--chat-md-text);
+}
+
+.dark .chat-markdown {
+  --chat-md-text: #e7e5e4;
+  --chat-md-muted-text: #a8a29e;
+  --chat-md-heading-text: #f5f5f4;
+  --chat-md-link-text: #f59e0b;
+  --chat-md-link-hover-text: #fbbf24;
+  --chat-md-list-marker-text: #d6d3d1;
+  --chat-md-hr-border: rgba(168, 162, 158, 0.22);
+  --chat-md-blockquote-bg: rgba(41, 37, 36, 0.72);
+  --chat-md-blockquote-border: #f59e0b;
+  --chat-md-blockquote-text: #e7e5e4;
+  --chat-md-table-border: rgba(120, 113, 108, 0.42);
+  --chat-md-table-header-bg: rgba(28, 25, 23, 0.86);
+  --chat-md-table-header-text: #f5f5f4;
+  --chat-md-table-row-border: rgba(87, 83, 78, 0.42);
+  --chat-md-code-block-bg: #171312;
+  --chat-md-code-block-border: rgba(120, 113, 108, 0.42);
+  --chat-md-code-block-text: #f5f5f4;
+  --chat-md-code-block-header-bg: rgba(41, 37, 36, 0.76);
+  --chat-md-code-block-header-text: #d6d3d1;
+  --chat-md-code-copy-button-bg: rgba(68, 64, 60, 0.72);
+  --chat-md-code-copy-button-border: rgba(168, 162, 158, 0.24);
+  --chat-md-code-copy-button-text: #f5f5f4;
+  --chat-md-code-copy-button-hover-bg: rgba(120, 53, 15, 0.34);
+  --chat-md-inline-code-bg: rgba(68, 64, 60, 0.72);
+  --chat-md-inline-code-text: #fbbf24;
+  --chat-md-inline-code-border: rgba(168, 162, 158, 0.24);
+  --chat-md-math-text: #f59e0b;
+  --chat-md-syntax-base: #e7e5e4;
+  --chat-md-syntax-comment: #78716c;
+  --chat-md-syntax-keyword: #f59e0b;
+  --chat-md-syntax-string: #86efac;
+  --chat-md-syntax-number: #c4b5fd;
+  --chat-md-syntax-type: #fdba74;
+  --chat-md-syntax-function: #93c5fd;
+  --chat-md-syntax-variable: #fda4af;
+  --chat-md-syntax-operator: #d6d3d1;
+  --chat-md-syntax-punctuation: #a8a29e;
+  --chat-md-syntax-meta: #fbbf24;
+  --chat-md-syntax-deletion: #f87171;
+  --chat-md-syntax-addition: #86efac;
+}
+
+.chat-markdown :where(p, li, td) {
+  color: var(--chat-md-text);
+}
+
+.chat-markdown :where(h1, h2, h3, h4, h5, h6, strong) {
+  color: var(--chat-md-heading-text);
+}
+
+.chat-markdown :where(a) {
+  color: var(--chat-md-link-text);
+  text-decoration-color: color-mix(in srgb, var(--chat-md-link-text) 45%, transparent);
+}
+
+.chat-markdown :where(a:hover) {
+  color: var(--chat-md-link-hover-text);
+  text-decoration-color: var(--chat-md-link-hover-text);
+}
+
+.chat-markdown :where(ul > li::marker, ol > li::marker) {
+  color: var(--chat-md-list-marker-text);
+}
+
+.chat-markdown :where(hr) {
+  border-color: var(--chat-md-hr-border);
+}
+
+.chat-markdown :where(blockquote) {
+  color: var(--chat-md-blockquote-text);
+  background: var(--chat-md-blockquote-bg);
+  border-inline-start-color: var(--chat-md-blockquote-border);
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+}
+
+.chat-markdown :where(blockquote p) {
+  color: inherit;
+}
+
+.chat-markdown :where(table) {
+  border-color: var(--chat-md-table-border);
+}
+
+.chat-markdown :where(thead) {
+  background: var(--chat-md-table-header-bg);
+  color: var(--chat-md-table-header-text);
+  border-color: var(--chat-md-table-border);
+}
+
+.chat-markdown :where(th) {
+  color: var(--chat-md-table-header-text);
+  border-color: var(--chat-md-table-border);
+}
+
+.chat-markdown :where(td) {
+  border-color: var(--chat-md-table-row-border);
+}
+
+.chat-markdown :where(.katex) {
+  color: var(--chat-md-math-text);
+}
+
+.chat-markdown-inline-code,
+.chat-markdown :not(pre) > code {
+  background: var(--chat-md-inline-code-bg) !important;
+  color: var(--chat-md-inline-code-text) !important;
+  border: 1px solid var(--chat-md-inline-code-border);
+}
+
+.chat-markdown-code-block {
+  background: var(--chat-md-code-block-bg);
+  border-color: var(--chat-md-code-block-border);
+  color: var(--chat-md-code-block-text);
+}
+
+.chat-markdown-code-header {
+  background: var(--chat-md-code-block-header-bg);
+  border-bottom: 1px solid var(--chat-md-code-block-border);
+  color: var(--chat-md-code-block-header-text);
+}
+
+.chat-markdown-code-copy-button {
+  background: var(--chat-md-code-copy-button-bg) !important;
+  border-color: var(--chat-md-code-copy-button-border) !important;
+  color: var(--chat-md-code-copy-button-text) !important;
+}
+
+.chat-markdown-code-copy-button:hover {
+  background: var(--chat-md-code-copy-button-hover-bg) !important;
+}
+
+.chat-markdown pre,
+.chat-markdown pre code,
+.chat-markdown pre .hljs {
+  color: var(--chat-md-code-block-text);
+}
+
+.chat-markdown .hljs {
+  color: var(--chat-md-syntax-base);
+}
+
+.chat-markdown .hljs-comment,
+.chat-markdown .hljs-quote {
+  color: var(--chat-md-syntax-comment);
+  font-style: italic;
+}
+
+.chat-markdown .hljs-keyword,
+.chat-markdown .hljs-operator {
+  color: var(--chat-md-syntax-keyword);
+}
+
+.chat-markdown .hljs-string,
+.chat-markdown .hljs-doctag,
+.chat-markdown .hljs-addition {
+  color: var(--chat-md-syntax-string);
+}
+
+.chat-markdown .hljs-number,
+.chat-markdown .hljs-literal,
+.chat-markdown .hljs-built_in,
+.chat-markdown .hljs-bullet {
+  color: var(--chat-md-syntax-number);
+}
+
+.chat-markdown .hljs-type,
+.chat-markdown .hljs-class .hljs-title {
+  color: var(--chat-md-syntax-type);
+}
+
+.chat-markdown .hljs-title,
+.chat-markdown .hljs-section,
+.chat-markdown .hljs-name,
+.chat-markdown .hljs-selector-tag,
+.chat-markdown .hljs-tag .hljs-attribute {
+  color: var(--chat-md-syntax-function);
+}
+
+.chat-markdown .hljs-variable,
+.chat-markdown .hljs-template-variable,
+.chat-markdown .hljs-attr,
+.chat-markdown .hljs-symbol,
+.chat-markdown .hljs-builtin-name,
+.chat-markdown .hljs-link,
+.chat-markdown .hljs-selector-id,
+.chat-markdown .hljs-selector-class {
+  color: var(--chat-md-syntax-variable);
+}
+
+.chat-markdown .hljs-subst,
+.chat-markdown .hljs-punctuation {
+  color: var(--chat-md-syntax-punctuation);
+}
+
+.chat-markdown .hljs-meta {
+  color: var(--chat-md-syntax-meta);
+}
+
+.chat-markdown .hljs-deletion {
+  color: var(--chat-md-syntax-deletion);
+}
+
+.chat-markdown .hljs-addition {
+  color: var(--chat-md-syntax-addition);
 }

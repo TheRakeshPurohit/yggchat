@@ -21,6 +21,40 @@ const isElectronEnvironment = environment === 'electron' || (typeof __IS_ELECTRO
 const normalizeProviderSlug = (providerName: string | null | undefined): string =>
   (providerName || '').toLowerCase().replace(/\s+/g, '')
 
+const normalizeOpenAIChatGPTModelId = (modelName: string | null | undefined): string | null => {
+  const raw = typeof modelName === 'string' ? modelName.trim() : ''
+  if (!raw) return null
+
+  const stripped = raw.replace(/^(openai|openaichatgpt)\//i, '')
+  const slug = stripped.toLowerCase().replace(/\s+/g, '-')
+
+  if (slug.includes('gpt-5.5-pro')) return 'gpt-5.5-pro'
+  if (slug.includes('gpt-5.5')) return 'gpt-5.5'
+  if (slug.includes('gpt-5.4-mini')) return 'gpt-5.4-mini'
+  if (slug.includes('gpt-5.4-pro')) return 'gpt-5.4-pro'
+  if (slug.includes('gpt-5.4')) return 'gpt-5.4'
+  if (slug.includes('gpt-5.3-codex')) return 'gpt-5.3-codex'
+
+  // Retired/stale ChatGPT selections should not leak display names to the backend.
+  if (slug.includes('gpt-5.2') || slug.includes('gpt-5.1') || slug.includes('gpt-5-codex') || slug.includes('codex-mini-latest')) {
+    return 'gpt-5.3-codex'
+  }
+
+  if (slug.includes('gpt-5')) return 'gpt-5.5'
+  if (slug.includes('gpt-4o')) return 'gpt-5.4-mini'
+
+  return stripped || null
+}
+
+const normalizeSubagentModelForProvider = (
+  modelName: string | null | undefined,
+  providerName: string | null | undefined
+): string | null => {
+  const raw = typeof modelName === 'string' ? modelName.trim() : ''
+  if (!raw) return null
+  return resolveInheritedSubagentProvider(providerName) === 'openaichatgpt' ? normalizeOpenAIChatGPTModelId(raw) : raw
+}
+
 export interface SubagentRuntimeContext {
   dispatch: any
   getState: () => RootState
@@ -96,7 +130,9 @@ type ModelsCacheEntry = {
 const resolveModelFromCache = (queryClient: QueryClient | null | undefined, providerName: string | null | undefined): string | null => {
   if (!queryClient || !providerName) return null
   const modelsData = queryClient.getQueryData<ModelsCacheEntry>(['models', providerName])
-  return modelsData?.selected?.name || modelsData?.default?.name || null
+  const selected = modelsData?.selected
+  const defaultModel = modelsData?.default
+  return selected?.id || selected?.name || defaultModel?.id || defaultModel?.name || null
 }
 
 const resolveSubagentDefaults = (
@@ -110,13 +146,16 @@ const resolveSubagentDefaults = (
   const configuredModel = settings.defaultModel?.trim() || null
   const providerNameForResolution = configuredProvider || callerProviderName || null
 
+  const resolvedProvider = resolveInheritedSubagentProvider(providerNameForResolution)
+  const rawModel =
+    normalizedRequestedModel ||
+    configuredModel ||
+    resolveModelFromCache(queryClient, providerNameForResolution) ||
+    DEFAULT_SUBAGENT_MODEL
+
   return {
-    model:
-      normalizedRequestedModel ||
-      configuredModel ||
-      resolveModelFromCache(queryClient, providerNameForResolution) ||
-      DEFAULT_SUBAGENT_MODEL,
-    provider: resolveInheritedSubagentProvider(providerNameForResolution),
+    model: normalizeSubagentModelForProvider(rawModel, providerNameForResolution) || rawModel,
+    provider: resolvedProvider,
   }
 }
 

@@ -37,4 +37,20 @@ describe('sanitizeToolResultContentForModel', () => {
 
     expect(result).toBe('Plan "stringified-plan" was displayed to the user in the chat view.')
   })
+
+  it('uses plan_md create modelContent without requiring echoed plan content', () => {
+    const result = sanitizeToolResultContentForModel(
+      {
+        name: 'created-plan',
+        created: true,
+        path: '/tmp/.ygg/plans/created-plan.md',
+        message: 'Created plan "created-plan".',
+        modelContent: 'Created plan "created-plan". Do not repeat the plan unless the user asks.',
+      },
+      'plan_md'
+    )
+
+    expect(result).toBe('Created plan "created-plan". Do not repeat the plan unless the user asks.')
+  })
 })
+

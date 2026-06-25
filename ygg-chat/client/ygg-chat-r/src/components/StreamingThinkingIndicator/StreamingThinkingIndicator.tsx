@@ -19,12 +19,14 @@ type StreamingThinkingIndicatorVariant = 'inline' | 'tab'
 type StreamingThinkingIndicatorProps = {
   variant?: StreamingThinkingIndicatorVariant
   className?: string
+  animatedBorderClassName?: string
   style?: React.CSSProperties
 }
 
 export const StreamingThinkingIndicator = React.memo(function StreamingThinkingIndicator({
   variant = 'inline',
   className = '',
+  animatedBorderClassName = '',
   style,
 }: StreamingThinkingIndicatorProps) {
   const [wordIndex, setWordIndex] = useState(0)
@@ -43,17 +45,28 @@ export const StreamingThinkingIndicator = React.memo(function StreamingThinkingI
 
   const variantClassName =
     variant === 'tab'
-      ? 'rounded-t-xl border border-b-0 border-neutral-300/60 bg-neutral-100/90 px-3 py-1.5 shadow-[0_-8px_24px_-18px_rgba(0,0,0,0.55)] backdrop-blur-xl dark:border-neutral-700/70 dark:bg-neutral-900/90'
+      ? `relative rounded-t-xl border border-b-0 border-neutral-300/60 bg-neutral-100/40 px-2 pb-3.5 pt-1.5 backdrop-blur-xl before:absolute before:inset-x-0 before:-bottom-[5px] before:h-[6px] before:bg-neutral-100/40 after:absolute after:-left-px after:-bottom-[8px] after:h-[9px] after:w-4 after:border-l after:border-neutral-300/60 after:bg-neutral-100/40 dark:border-neutral-700/70 dark:bg-neutral-900/40 dark:before:bg-neutral-900/40 dark:after:border-neutral-700/70 dark:after:bg-neutral-900/40 ${animatedBorderClassName}`
       : 'rounded-md px-1 py-0.5'
 
   return (
     <div
-      className={`inline-flex items-center gap-2 text-[0.75em] leading-none text-neutral-500 dark:text-neutral-400 ${variantClassName} ${className}`.trim()}
+      className={`inline-flex items-center gap-2 text-[0.75em] leading-[1.2] text-neutral-500 dark:text-neutral-400 ${variantClassName} ${className}`.trim()}
       style={style}
       aria-live='polite'
       aria-label='Assistant is working'
     >
-      <span className='tool-name-shimmer min-w-[5.75rem] font-medium leading-none'>
+      {variant === 'tab' && (
+        <span
+          aria-hidden='true'
+          className='relative z-10 grid h-3 w-4 grid-cols-2 grid-rows-2 gap-0.5'
+        >
+          <span className='streaming-pixel h-1.5 w-1.5 rounded-[1px] bg-blue-500/75 shadow-[0_0_6px_rgba(59,130,246,0.55)] dark:bg-orange-500/80 dark:shadow-[0_0_6px_rgba(249,115,22,0.55)]' />
+          <span className='streaming-pixel streaming-pixel-delay-1 h-1.5 w-1.5 rounded-[1px] bg-blue-500/35 dark:bg-orange-500/40' />
+          <span className='streaming-pixel streaming-pixel-delay-2 h-1.5 w-1.5 rounded-[1px] bg-blue-500/35 dark:bg-orange-500/40' />
+          <span className='streaming-pixel streaming-pixel-delay-3 h-1.5 w-1.5 rounded-[1px] bg-blue-500/60 dark:bg-orange-500/65' />
+        </span>
+      )}
+      <span className='tool-name-shimmer relative z-10 min-w-[5.75rem] font-medium leading-[1.2]'>
         {STREAMING_THINKING_WORDS[wordIndex]}
       </span>
     </div>

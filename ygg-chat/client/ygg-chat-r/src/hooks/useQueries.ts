@@ -15,10 +15,19 @@ import type {
   LocalGitStatusFile,
 } from '../../shared/localGit'
 import type { Message, Model } from '../features/chats/chatTypes'
+import {
+  buildConversationBranchDebugData,
+  type BranchDebugData,
+} from '../features/chats/branchDebug'
 import { fetchLmStudioModels } from '../features/chats/LMStudio'
 import { getOpenAIChatGPTModels } from '../features/chats/openaiOAuth'
 import type { Conversation } from '../features/conversations/conversationTypes'
-import { isCommunityMode } from '../config/runtimeMode'
+import { isCloudSessionEnabled, isCommunityMode } from '../config/runtimeMode'
+import {
+  loadLocalUserSystemPrompts,
+  USER_SYSTEM_PROMPTS_STORAGE_CHANGE_EVENT,
+  type UserSystemPromptStorageMode,
+} from '../helpers/userSystemPromptStorage'
 import { api, environment, localApi } from '../utils/api'
 import { getFavoritedModels } from '../utils/favorites'
 import { useAuth } from './useAuth'
@@ -399,7 +408,11 @@ export function useConversationsByProject(projectId: ProjectId | null, enabled: 
  * @param projectId - Project ID to filter by
  * @returns InfiniteQuery result with pages, fetchNextPage, hasNextPage, isFetchingNextPage
  */
-export function useConversationsByProjectInfinite(projectId: ProjectId | null) {
+export function useConversationsByProjectInfinite(
+  projectId: ProjectId | null,
+  options: { enabled?: boolean } = {}
+) {
+  const { enabled = true } = options
   const { accessToken, userId } = useAuth()
   const queryClient = useQueryClient()
 
@@ -476,7 +489,7 @@ export function useConversationsByProjectInfinite(projectId: ProjectId | null) {
     },
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => (lastPage.hasMore ? lastPage.nextCursor : undefined),
-    enabled: !!projectId && !!accessToken,
+    enabled: enabled && !!projectId && !!accessToken,
     staleTime: 5 * 60 * 1000,
     refetchOnMount: true,
     refetchOnReconnect: false,
@@ -718,57 +731,17 @@ export function useLocalTopLevelUserMessages(conversationId: ConversationId | nu
  *
  * Returns: { messages: Message[], tree: ChatNode }
  */
-/**
- * Recursively filter out ex_agent nodes from the message tree, promoting their children
- */
-function filterExAgentNodes(node: any): any | null {
-  if (!node) return null
-
-  // If this is an ex_agent node, return its filtered children (promote them)
-  if (node.sender === 'ex_agent') {
-    if (node.children && node.children.length > 0) {
-      const filteredChildren = node.children.map(filterExAgentNodes).filter(Boolean)
-      // Return children directly (they'll be merged by parent)
-      return filteredChildren.length === 1
-        ? filteredChildren[0]
-        : { ...node, children: filteredChildren, _promoted: true }
-    }
-    return null
-  }
-
-  // Filter children recursively, flattening promoted nodes
-  if (node.children && node.children.length > 0) {
-    const newChildren: any[] = []
-    for (const child of node.children) {
-      const filtered = filterExAgentNodes(child)
-      if (filtered) {
-        if (filtered._promoted && Array.isArray(filtered.children)) {
-          // Flatten promoted children
-          newChildren.push(...filtered.children)
-        } else {
-          newChildren.push(filtered)
-        }
-      }
-    }
-    return { ...node, children: newChildren }
-  }
-
-  return node
-}
-
-const isPersistentGlobalAgentType = (value: string | null | undefined): boolean =>
-  value === 'persistent_agent' || value === 'persistent_agent_summary'
-
-const shouldFilterExAgentNodes = (messages: Message[] | undefined): boolean => {
-  if (!Array.isArray(messages) || messages.length === 0) return true
-  return !messages.some(message => message.role === 'ex_agent' && isPersistentGlobalAgentType(message.ex_agent_type))
+export interface ConversationMessagesTreeData {
+  messages: Message[]
+  tree: any
+  meta?: { storage_mode: 'local' | 'cloud' }
 }
 
 export function useConversationMessages(conversationId: ConversationId | null, storageMode?: 'local' | 'cloud') {
   const { accessToken } = useAuth()
   const queryClient = useQueryClient()
 
-  const query = useQuery({
+  const query = useQuery<ConversationMessagesTreeData>({
     queryKey: ['conversations', conversationId, 'messages'],
     queryFn: async () => {
       if (!conversationId) throw new Error('Conversation ID is required')
@@ -779,8 +752,7 @@ export function useConversationMessages(conversationId: ConversationId | null, s
           tree: any
           meta?: { storage_mode: 'local' | 'cloud' }
         }>(`/app/conversations/${conversationId}/messages/tree`)
-        const tree = shouldFilterExAgentNodes(result.messages) ? filterExAgentNodes(result.tree) : result.tree
-        return { ...result, tree }
+        return result
       }
 
       // Determine storage mode: use parameter if provided, otherwise check cached conversations
@@ -832,12 +804,9 @@ export function useConversationMessages(conversationId: ConversationId | null, s
               tree: any
               meta?: { storage_mode: 'local' | 'cloud' }
             }>(`/app/conversations/${conversationId}/messages/tree`)
-            // If local API succeeds, return it with ex_agent nodes filtered from tree
+            // If local API succeeds, return the raw tree.
             if (localResult) {
-              const tree = shouldFilterExAgentNodes(localResult.messages)
-                ? filterExAgentNodes(localResult.tree)
-                : localResult.tree
-              return { ...localResult, tree }
+              return localResult
             }
           } catch (err) {
             // Local not found, fall through to cloud
@@ -855,8 +824,7 @@ export function useConversationMessages(conversationId: ConversationId | null, s
           tree: any
           meta?: { storage_mode: 'local' | 'cloud' }
         }>(`/app/conversations/${conversationId}/messages/tree`)
-        const tree = shouldFilterExAgentNodes(result.messages) ? filterExAgentNodes(result.tree) : result.tree
-        return { ...result, tree }
+        return result
       }
 
       // Default to cloud API
@@ -864,8 +832,7 @@ export function useConversationMessages(conversationId: ConversationId | null, s
         `/conversations/${conversationId}/messages/tree`,
         accessToken
       )
-      const tree = shouldFilterExAgentNodes(result.messages) ? filterExAgentNodes(result.tree) : result.tree
-      return { ...result, tree }
+      return result
     },
     enabled: !!conversationId && !!accessToken,
     staleTime: 30000, // 30 seconds - messages only change on user actions (send/edit/branch)
@@ -889,6 +856,32 @@ export function useConversationMessages(conversationId: ConversationId | null, s
   }, [query.data, conversationId, queryClient])
 
   return query
+}
+
+/**
+ * Dev-only branch diagnostics derived from the existing per-conversation messages cache.
+ *
+ * This intentionally uses React Query `select` over ['conversations', conversationId, 'messages']
+ * so it does not duplicate branch state or issue an extra network request. The Chat route owns
+ * fetching that cache; this observer only projects cached messages into a virtual branch table.
+ */
+export function useConversationBranchDebugData(conversationId: ConversationId | null) {
+  const queryClient = useQueryClient()
+
+  return useQuery<ConversationMessagesTreeData, Error, BranchDebugData>({
+    queryKey: ['conversations', conversationId, 'messages'],
+    enabled: false,
+    queryFn: async () => {
+      if (!conversationId) return { messages: [], tree: null }
+      return (
+        queryClient.getQueryData<ConversationMessagesTreeData>(['conversations', conversationId, 'messages']) ?? {
+          messages: [],
+          tree: null,
+        }
+      )
+    },
+    select: data => buildConversationBranchDebugData(data?.messages),
+  })
 }
 
 /**
@@ -2142,6 +2135,7 @@ export interface UserSystemPromptCached {
   is_default: boolean
   created_at: string
   updated_at: string
+  storage_mode?: UserSystemPromptStorageMode
 }
 
 /**
@@ -2155,21 +2149,36 @@ export interface UserSystemPromptCached {
  */
 export function useUserSystemPromptsQuery() {
   const { accessToken, userId } = useAuth()
+  const queryClient = useQueryClient()
 
   const query = useQuery({
     queryKey: ['userSystemPrompts', userId],
     queryFn: async () => {
-      if (!userId || !accessToken) return []
-      if (isElectronCommunityMode()) return []
+      const localPrompts = loadLocalUserSystemPrompts()
+
+      if (!userId || !accessToken || isElectronCommunityMode() || !isCloudSessionEnabled()) {
+        return localPrompts
+      }
+
       const response = await api.get<UserSystemPromptCached[]>('/system-prompts', accessToken)
-      return response || []
+      const cloudPrompts = (response || []).map(prompt => ({ ...prompt, storage_mode: 'cloud' as const }))
+      return [...localPrompts, ...cloudPrompts]
     },
-    enabled: !!userId && !!accessToken && !isElectronCommunityMode(),
+    enabled: true,
     staleTime: 5 * 60 * 1000, // 5 minutes - prompts don't change often
     refetchOnMount: false,
     refetchOnReconnect: false,
     refetchOnWindowFocus: false,
   })
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onLocalPromptsChanged = () => {
+      queryClient.invalidateQueries({ queryKey: ['userSystemPrompts', userId] })
+    }
+    window.addEventListener(USER_SYSTEM_PROMPTS_STORAGE_CHANGE_EVENT, onLocalPromptsChanged)
+    return () => window.removeEventListener(USER_SYSTEM_PROMPTS_STORAGE_CHANGE_EVENT, onLocalPromptsChanged)
+  }, [queryClient, userId])
 
   // Find the default prompt from the cached data
   const defaultPrompt = useMemo(() => {
@@ -2192,8 +2201,10 @@ export const getUserSystemPromptsFromCache = (
   queryClient: QueryClient | null,
   userId: string | null
 ): UserSystemPromptCached[] => {
-  if (!queryClient || !userId) return []
-  return queryClient.getQueryData<UserSystemPromptCached[]>(['userSystemPrompts', userId]) || []
+  const cached = queryClient && userId ? queryClient.getQueryData<UserSystemPromptCached[]>(['userSystemPrompts', userId]) || [] : []
+  const localPrompts = loadLocalUserSystemPrompts()
+  const cachedIds = new Set(cached.map(prompt => prompt.id))
+  return [...cached, ...localPrompts.filter(prompt => !cachedIds.has(prompt.id))]
 }
 
 /**

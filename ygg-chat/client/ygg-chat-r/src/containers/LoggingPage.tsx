@@ -106,7 +106,8 @@ const LoggingPage: React.FC = () => {
   })
 
   const cloudQuery = useCloudLoggingAnalytics(filters, !isCommunityMode && storageView === 'cloud')
-  const localQuery = useLocalLoggingAnalytics(filters, supportsLocal)
+  const localAnalyticsEnabled = supportsLocal && (storageView === 'local' || isCommunityMode)
+  const localQuery = useLocalLoggingAnalytics(filters, localAnalyticsEnabled)
 
   const activeQuery = storageView === 'local' || isCommunityMode ? localQuery : cloudQuery
   const data = activeQuery.data

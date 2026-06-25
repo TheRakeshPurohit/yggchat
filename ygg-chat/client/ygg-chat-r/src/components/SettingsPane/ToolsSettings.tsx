@@ -65,41 +65,7 @@ export const ToolsSettings: React.FC = () => {
     }
   }
 
-  const handleValkyrieToggle = async () => {
-    // Show modal in web mode instead of toggling
-    if (isWebMode) {
-      setShowDesktopModal(true)
-      return
-    }
-
-    const enableAll = !someToolsEnabled // If no tools enabled, enable all; if some/all enabled, disable all
-    const toolsToUpdate = tools.filter(tool => tool.enabled !== enableAll)
-
-    // Mark all tools as updating
-    setUpdatingTools(new Set(toolsToUpdate.map(tool => tool.name)))
-
-    try {
-      // Update all tools in parallel
-      await Promise.all(
-        toolsToUpdate.map(tool =>
-          dispatch(
-            updateToolEnabled({
-              toolName: tool.name,
-              enabled: enableAll,
-            })
-          ).unwrap()
-        )
-      )
-    } catch (error) {
-      console.error('Failed to update tools:', error)
-    } finally {
-      // Clear all updating states
-      setUpdatingTools(new Set())
-    }
-  }
-
   const someToolsEnabled = tools.some(tool => tool.enabled)
-  const isUpdatingAny = updatingTools.size > 0
   const valkyrieActive = someToolsEnabled
 
   const handleOpenCustomToolsFolder = async () => {
@@ -174,59 +140,6 @@ export const ToolsSettings: React.FC = () => {
 
   return (
     <div className='space-y-4 sm:space-y-6 lg:space-y-10 pb-16'>
-      {/* Valkyrie Master Toggle */}
-      <div
-        className={`bg-gradient-to-br ${
-          valkyrieActive
-            ? 'bg-neutral-100 dark:bg-neutral-800 border-neutral-300 dark:border-white/10'
-            : 'bg-neutral-50 dark:bg-neutral-900 border-neutral-200 dark:border-white/5'
-        } rounded-xl sm:rounded-2xl lg:rounded-3xl p-3 px-4 sm:p-2 sm:px-4 lg:p-3 lg:px-6 border transition-all duration-300`}
-      >
-        <div className='flex items-center justify-between gap-3'>
-          <div className='min-w-0'>
-            <h2
-              className={`text-sm sm:text-base lg:text-lg font-medium flex items-center gap-1.5 sm:gap-2 lg:gap-2.5 flex-wrap ${
-                valkyrieActive ? 'text-neutral-800 dark:text-neutral-200' : 'text-neutral-500 dark:text-neutral-500'
-              }`}
-            >
-              Valkyrie Engine
-              {/* <span className='font-mono text-[8px] sm:text-[9px] lg:text-[10px] bg-blue-100 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 px-1.5 sm:px-2 py-0.5 rounded border border-blue-200 dark:border-blue-500/20'>
-                v3.4.0
-              </span> */}
-            </h2>
-            <p
-              className={`text-[11px] sm:text-xs lg:text-[13px] mt-0.5 sm:mt-1 ${
-                valkyrieActive ? 'text-neutral-500 dark:text-neutral-500' : 'text-neutral-400 dark:text-neutral-600'
-              }`}
-            >
-              {valkyrieActive ? 'Core AI tool coordination systems are online.' : 'AI tools are disabled'}
-            </p>
-          </div>
-          <button
-            onClick={handleValkyrieToggle}
-            disabled={isUpdatingAny}
-            className={`w-9 h-9 sm:w-10 sm:h-10 lg:w-12 lg:h-12 rounded-full border flex items-center justify-center transition-all duration-300 flex-shrink-0 ${
-              valkyrieActive
-                ? 'border-blue-300 dark:border-blue-500/30 text-blue-500 bg-blue-50 dark:bg-blue-500/10 hover:shadow-[0_0_20px_rgba(59,130,246,0.3)]'
-                : 'border-neutral-300 dark:border-white/10 text-neutral-400 dark:text-neutral-500 bg-transparent hover:text-blue-500 hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-500/5'
-            }`}
-          >
-            {isUpdatingAny ? (
-              <span className='text-xs sm:text-sm'>...</span>
-            ) : (
-              <svg
-                className='w-4 h-4 sm:w-[18px] sm:h-[18px] lg:w-5 lg:h-5'
-                fill='none'
-                viewBox='0 0 24 24'
-                stroke='currentColor'
-                strokeWidth={2}
-              >
-                <path d='M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10' />
-              </svg>
-            )}
-          </button>
-        </div>
-      </div>
 
       {/* WSL Configuration
       {!isWebMode && (

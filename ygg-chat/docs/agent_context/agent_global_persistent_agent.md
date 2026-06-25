@@ -2,7 +2,7 @@
 
 Last reviewed: 2026-06-16
 <!--
-Defunct, no real purpose, use hermes or openclaw.
+Defunct; retained only as historical context for the persistent background agent.
 -->
 ## Purpose
 

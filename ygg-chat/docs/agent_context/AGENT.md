@@ -16,6 +16,7 @@ Start here, then open the smallest relevant subsystem context file before editin
 - `agent_chat_pipeline.md` - normal send/edit/branch generation flow, providers, tools, and persistence.
 - `agent_chat_streaming_state.md` - Redux multi-stream state, branch-aware selectors, streaming invariants.
 - `agent_chat_container.md` - `Chat.tsx` main screen orchestration, message rendering, composer, routing, and Heimdall integration.
+- `agent_md_renderer.md` - Markdown/text response rendering from `Chat.tsx` into `ChatMessage`, including `content_blocks`, stream events, prose/code styling, and renderer invariants.
 - `agent_heimdall.md` - Heimdall conversation tree rendering, node selection, notes, search, subagent badges, and selected-node actions.
 - `agent_message_storage_shape.md` - per-conversation message schema, `parent_id`/`children_ids` tree shape, normalization, and write/read invariants.
 

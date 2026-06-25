@@ -1,10 +1,17 @@
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { selectCurrentConversationId, selectCurrentPath } from '../../features/chats'
+import type { BranchDebugData, BranchDebugRow } from '../../features/chats/branchDebug'
 import { uiActions, type UiNotification } from '../../features/ui'
 import { useAppDispatch, useAppSelector } from '../../hooks/redux'
-import { useRunningAgentStreams, type AgentStreamListItem } from '../../hooks/useRunningAgentStreams'
-import type { ResearchNoteItem } from '../../hooks/useQueries'
+import {
+  getAgentActivityBadgeClasses,
+  summarizeAgentStreamId,
+  useRunningAgentStreams,
+  type AgentStreamListItem,
+} from '../../hooks/useRunningAgentStreams'
+import { useConversationBranchDebugData, type ResearchNoteItem } from '../../hooks/useQueries'
 
 interface RunningAgentsFloatingButtonProps {
   notes?: ResearchNoteItem[]
@@ -31,6 +38,9 @@ const internalTransition = {
 
 const softTransition = { duration: 0.18, ease: 'easeOut' as const }
 const collapseSoftTransition = { duration: 0.24, ease: 'easeInOut' as const }
+const codexDevLogsEnabled =
+  (typeof __YGG_CODEX_DEV_LOGS__ !== 'undefined' && __YGG_CODEX_DEV_LOGS__) ||
+  (typeof window !== 'undefined' && Boolean(window.electronAPI?.dev?.codexDevLogsEnabled))
 
 const getStreamHref = (stream: AgentStreamListItem): string | null => {
   if (!stream.conversationId) return null
@@ -49,11 +59,249 @@ const getNotificationHref = (notification: UiNotification): string => {
   return `/chat/${projectSegment}/${notification.conversationId}#${notification.messageId}`
 }
 
+interface BranchDebugStreamMatch {
+  stream: AgentStreamListItem
+  matchedMessageId: string
+}
+
+const getBranchStreamMatches = (
+  branch: BranchDebugRow,
+  activeStreams: AgentStreamListItem[],
+  conversationId: string | number | null
+): BranchDebugStreamMatch[] => {
+  const branchMessageIds = new Set(branch.messages.map(message => String(message.id)))
+  const conversationKey = conversationId == null ? null : String(conversationId)
+
+  return activeStreams
+    .filter(stream => {
+      if (!stream.conversationId) return false
+      return conversationKey == null || String(stream.conversationId) === conversationKey
+    })
+    .map(stream => {
+      const candidateIds = [
+        stream.triggerUserMessageId,
+        stream.currentBranchAnchorMessageId,
+        stream.liveMessageId,
+        stream.streamingMessageId,
+        stream.lastCompletedMessageId,
+        stream.finalMessageId,
+        stream.messageId,
+        stream.branchAnchorMessageId,
+        stream.originMessageId,
+        stream.rootMessageId,
+        stream.anchorMessageId,
+      ]
+
+      const matchedMessageId = candidateIds.find(candidate => candidate != null && branchMessageIds.has(String(candidate)))
+      return matchedMessageId ? { stream, matchedMessageId: String(matchedMessageId) } : null
+    })
+    .filter((match): match is BranchDebugStreamMatch => match != null)
+}
+
+const messageRoleTone = (role: string): string => {
+  switch (role) {
+    case 'user':
+      return 'bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-200'
+    case 'assistant':
+      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-200'
+    case 'system':
+      return 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-200'
+    case 'ex_agent':
+      return 'bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-200'
+    case 'tool':
+      return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-500/15 dark:text-cyan-200'
+    default:
+      return 'bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300'
+  }
+}
+
+const BranchDebugModal = ({
+  open,
+  data,
+  conversationId,
+  currentPath,
+  activeStreams,
+  onClose,
+}: {
+  open: boolean
+  data: BranchDebugData | undefined
+  conversationId: string | number | null
+  currentPath: Array<string | number>
+  activeStreams: AgentStreamListItem[]
+  onClose: () => void
+}) => {
+  if (!open) return null
+
+  const branches = data?.branches ?? []
+  const maxDepth = data?.maxDepth ?? 0
+  const columnIndexes = Array.from({ length: maxDepth }, (_, index) => index)
+  const currentPathKey = currentPath.map(id => String(id)).join('>')
+  const conversationKey = conversationId == null ? null : String(conversationId)
+  const conversationActiveStreams = activeStreams.filter(
+    stream => stream.conversationId && (conversationKey == null || String(stream.conversationId) === conversationKey)
+  )
+
+  const isCurrentBranch = (branch: BranchDebugRow) => {
+    if (!currentPathKey) return false
+    return branch.messages.map(message => String(message.id)).join('>') === currentPathKey
+  }
+
+  return (
+    <div className='fixed inset-0 z-[1700] flex items-end justify-center bg-black/35 p-4 backdrop-blur-sm sm:items-center'>
+      <div className='flex max-h-[82vh] w-[min(92rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-3xl border border-neutral-200/80 bg-white text-neutral-900 shadow-2xl dark:border-neutral-700/80 dark:bg-yBlack-900 dark:text-neutral-100'>
+        <div className='flex items-start justify-between gap-4 border-b border-neutral-200/80 px-5 py-4 dark:border-neutral-800'>
+          <div className='min-w-0'>
+            <div className='flex flex-wrap items-center gap-2'>
+              <div className='text-sm font-bold uppercase tracking-[0.18em] text-neutral-500 dark:text-neutral-400'>
+                Branch diagnostics
+              </div>
+              <span className='rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-bold text-amber-700 dark:bg-amber-500/15 dark:text-amber-200'>
+                YGG_CODEX_DEV_LOGS
+              </span>
+            </div>
+            <div className='mt-1 truncate text-xs text-neutral-500 dark:text-neutral-400'>
+              Conversation: {conversationId == null ? 'none selected' : String(conversationId)} · Messages:{' '}
+              {data?.messageCount ?? 0} · Branches: {data?.leafCount ?? branches.length} · Active streams:{' '}
+              {conversationActiveStreams.length}
+            </div>
+          </div>
+          <button
+            type='button'
+            onClick={onClose}
+            className='flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-600 transition hover:bg-neutral-200 hover:text-neutral-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 dark:bg-neutral-800 dark:text-neutral-300 dark:hover:bg-neutral-700'
+            aria-label='Close branch diagnostics'
+          >
+            <i className='bx bx-x text-xl' aria-hidden='true' />
+          </button>
+        </div>
+
+        <div className='min-h-0 flex-1 overflow-auto p-4 thin-scrollbar'>
+          {branches.length === 0 ? (
+            <div className='rounded-2xl bg-neutral-50 px-4 py-8 text-center text-sm text-neutral-500 dark:bg-neutral-900/60 dark:text-neutral-400'>
+              No cached branches for the current conversation. Open a chat with loaded messages first.
+            </div>
+          ) : (
+            <table className='min-w-full border-separate border-spacing-0 text-left text-xs'>
+              <thead className='sticky top-0 z-10 bg-white dark:bg-yBlack-900'>
+                <tr>
+                  <th className='sticky left-0 z-20 min-w-36 border-b border-neutral-200 bg-white px-3 py-2 text-[11px] font-bold uppercase tracking-[0.14em] text-neutral-500 dark:border-neutral-800 dark:bg-yBlack-900 dark:text-neutral-400'>
+                    Branch
+                  </th>
+                  {columnIndexes.map(index => (
+                    <th
+                      key={index}
+                      className='min-w-56 border-b border-neutral-200 px-3 py-2 text-[11px] font-bold uppercase tracking-[0.14em] text-neutral-500 dark:border-neutral-800 dark:text-neutral-400'
+                    >
+                      Message {index + 1}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {branches.map(branch => {
+                  const current = isCurrentBranch(branch)
+                  const streamMatches = getBranchStreamMatches(branch, conversationActiveStreams, conversationId)
+                  const streaming = streamMatches.length > 0
+                  return (
+                    <tr
+                      key={String(branch.leafMessageId)}
+                      className={
+                        streaming
+                          ? 'bg-emerald-50/75 dark:bg-emerald-500/10'
+                          : current
+                            ? 'bg-amber-50/70 dark:bg-amber-500/5'
+                            : ''
+                      }
+                    >
+                      <td className='sticky left-0 z-10 border-b border-neutral-200 bg-inherit px-3 py-3 align-top dark:border-neutral-800'>
+                        <div className='flex items-center gap-2'>
+                          <span className='font-bold text-neutral-900 dark:text-neutral-100'>#{branch.branchIndex}</span>
+                          {current ? (
+                            <span className='rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white'>
+                              current
+                            </span>
+                          ) : null}
+                          {streaming ? (
+                            <span className='rounded-full bg-emerald-500 px-1.5 py-0.5 text-[10px] font-bold text-white'>
+                              streaming
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className='mt-1 text-[11px] text-neutral-500 dark:text-neutral-400'>depth {branch.depth}</div>
+                        <div className='mt-1 max-w-32 truncate font-mono text-[10px] text-neutral-400' title={String(branch.leafMessageId)}>
+                          leaf {String(branch.leafMessageId)}
+                        </div>
+                        {streamMatches.length > 0 ? (
+                          <div className='mt-2 space-y-1'>
+                            {streamMatches.map(match => (
+                              <div
+                                key={match.stream.streamId}
+                                className='rounded-xl border border-emerald-200/70 bg-emerald-50/80 px-2 py-1 dark:border-emerald-500/25 dark:bg-emerald-500/10'
+                                title={`stream ${match.stream.streamId} matched ${match.matchedMessageId}`}
+                              >
+                                <div className='flex flex-wrap items-center gap-1.5'>
+                                  <span className='rounded-full bg-emerald-500 px-1.5 py-0.5 text-[10px] font-bold text-white'>
+                                    {match.stream.status === 'waiting_for_tool' ? 'tool loop' : match.stream.status}
+                                  </span>
+                                  <span className={getAgentActivityBadgeClasses(match.stream.activityKind)}>
+                                    {match.stream.activityLabel}
+                                  </span>
+                                </div>
+                                <div className='mt-1 truncate font-mono text-[10px] text-emerald-700 dark:text-emerald-200'>
+                                  {summarizeAgentStreamId(match.stream.streamId)} · anchor {summarizeAgentStreamId(match.matchedMessageId)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </td>
+                      {columnIndexes.map(index => {
+                        const message = branch.messages[index]
+                        return (
+                          <td key={index} className='border-b border-neutral-200 px-3 py-3 align-top dark:border-neutral-800'>
+                            {message ? (
+                              <div className='rounded-2xl border border-neutral-200/80 bg-neutral-50/80 p-2 dark:border-neutral-800 dark:bg-neutral-950/35'>
+                                <div className='flex items-center gap-2'>
+                                  <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${messageRoleTone(message.role)}`}>
+                                    {message.role}
+                                  </span>
+                                  <span className='truncate font-mono text-[10px] text-neutral-500 dark:text-neutral-400' title={String(message.id)}>
+                                    {String(message.id)}
+                                  </span>
+                                </div>
+                                <div className='mt-1 line-clamp-3 text-[11px] leading-4 text-neutral-700 dark:text-neutral-300' title={message.contentPreview}>
+                                  {message.contentPreview}
+                                </div>
+                                <div className='mt-2 grid gap-1 text-[10px] text-neutral-400'>
+                                  <span className='truncate' title={message.parentId == null ? 'root' : String(message.parentId)}>
+                                    parent: {message.parentId == null ? 'root' : String(message.parentId)}
+                                  </span>
+                                  <span>children: {message.childrenIds.length}</span>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className='text-center text-neutral-300 dark:text-neutral-700'>—</div>
+                            )}
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 const ParentMessageTicker = ({ text, reduceMotion }: { text: string | null | undefined; reduceMotion: boolean | null }) => {
   const trimmed = String(text || '').trim()
   if (!trimmed) return null
 
-  const duration = Math.min(48, Math.max(18, trimmed.length / 4))
+  const duration = 24
 
   if (reduceMotion) {
     return (
@@ -94,7 +342,11 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
   const shouldReduceMotion = useReducedMotion()
   const { activeStreams, streamHistory } = useRunningAgentStreams(notes)
   const notifications = useAppSelector(state => state.ui.notifications)
+  const currentConversationId = useAppSelector(selectCurrentConversationId)
+  const currentPath = useAppSelector(selectCurrentPath)
+  const branchDebugQuery = useConversationBranchDebugData(codexDevLogsEnabled ? currentConversationId : null)
   const [expanded, setExpanded] = useState(false)
+  const [branchDebugOpen, setBranchDebugOpen] = useState(false)
   const [inlineNotification, setInlineNotification] = useState<UiNotification | null>(null)
   const seenNotificationIdsRef = useRef<Set<string>>(new Set())
   const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -166,8 +418,27 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
     setExpanded(false)
   }
 
+  const toggleExpanded = () => {
+    if (inlineNotification) return
+    setExpanded(value => !value)
+  }
+
+  const openBranchDebug = (event: React.MouseEvent) => {
+    event.stopPropagation()
+    setBranchDebugOpen(true)
+  }
+
   return (
-    <motion.div
+    <>
+      <BranchDebugModal
+        open={branchDebugOpen}
+        data={branchDebugQuery.data}
+        conversationId={currentConversationId}
+        currentPath={currentPath}
+        activeStreams={activeStreams}
+        onClose={() => setBranchDebugOpen(false)}
+      />
+      <motion.div
       layout
       transition={shouldReduceMotion ? softTransition : expanded ? springTransition : collapseTransition}
       className={`fixed z-[1500] ${className}`}
@@ -179,7 +450,11 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
         className='overflow-hidden rounded-[28px] border border-neutral-200/80 bg-white/90 text-neutral-800 shadow-[0_18px_55px_rgba(15,23,42,0.18)] backdrop-blur-xl will-change-[width,height,transform] dark:border-neutral-700/70 dark:bg-yBlack-900/90 dark:text-neutral-100'
       >
         <div className='relative'>
-          <motion.div layout className='relative flex w-full items-center justify-between gap-1.5 p-1.5'>
+          <motion.div
+            layout
+            onClick={toggleExpanded}
+            className='relative flex w-full cursor-pointer items-center justify-between gap-1.5 p-1.5 outline-none transition-colors hover:bg-neutral-100/45 dark:hover:bg-neutral-800/35'
+          >
             <AnimatePresence mode='popLayout' initial={false}>
               {inlineNotification ? (
                 <motion.button
@@ -213,7 +488,10 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                   key='agent-compact'
                   type='button'
                   layout
-                  onClick={() => setExpanded(value => !value)}
+                  onClick={event => {
+                    event.stopPropagation()
+                    toggleExpanded()
+                  }}
                   className='group flex min-h-11 items-center gap-2 rounded-full px-3 py-2 text-sm lg:text-base font-semibold outline-none transition-colors hover:bg-neutral-100/75 focus-visible:ring-2 focus-visible:ring-emerald-400/70 dark:hover:bg-neutral-800/70'
                   initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, x: -8, scale: 0.985 }}
                   animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, x: 0, scale: 1 }}
@@ -257,25 +535,68 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
               )}
             </AnimatePresence>
 
-            <button
-              type='button'
-              onClick={event => {
-                event.stopPropagation()
-                onOpenApps()
-              }}
-              className='flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-neutral-200/70 bg-neutral-50/85 text-neutral-700 shadow-sm transition-colors duration-150 hover:bg-white hover:text-neutral-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/70 dark:border-neutral-700/70 dark:bg-neutral-900/80 dark:text-neutral-200 dark:hover:bg-neutral-800'
-              aria-label={appsOpen ? 'Close apps modal' : 'Open apps modal'}
-              title={appsOpen ? 'Close apps' : 'Open apps'}
-            >
-              <motion.i
-                key={appsOpen ? 'apps-close' : 'apps-expand'}
-                className={`bx ${appsOpen ? 'bx-x' : 'bx-expand-alt'} text-lg`}
-                initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.92, rotate: -8 }}
-                animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1, rotate: 0 }}
-                transition={shouldReduceMotion ? softTransition : { duration: 0.14, ease: 'easeOut' }}
-                aria-hidden='true'
-              />
-            </button>
+            <AnimatePresence initial={false} mode='popLayout'>
+              {expanded ? (
+                <motion.div
+                  key='expanded-actions'
+                  layout
+                  className='flex shrink-0 items-center gap-1.5'
+                  initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.98, x: 8 }}
+                  animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1, x: 0 }}
+                  exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.98, x: 8 }}
+                  transition={shouldReduceMotion ? softTransition : internalTransition}
+                >
+                  {codexDevLogsEnabled ? (
+                    <motion.button
+                      key='branch-debug-button'
+                      type='button'
+                      layout
+                      onClick={openBranchDebug}
+                      className='flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-amber-200/80 bg-amber-50/90 text-amber-700 shadow-sm transition-colors duration-150 hover:bg-amber-100 hover:text-amber-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200 dark:hover:bg-amber-500/20'
+                      initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.88, x: 8 }}
+                      animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1, x: 0 }}
+                      exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.88, x: 8 }}
+                      transition={shouldReduceMotion ? softTransition : internalTransition}
+                      aria-label='Open branch diagnostics'
+                      title='Open branch diagnostics'
+                    >
+                      <motion.i
+                        className='bx bx-git-branch text-lg'
+                        initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.92, rotate: -8 }}
+                        animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1, rotate: 0 }}
+                        transition={shouldReduceMotion ? softTransition : { duration: 0.14, ease: 'easeOut' }}
+                        aria-hidden='true'
+                      />
+                    </motion.button>
+                  ) : null}
+                  <motion.button
+                    key='apps-expand-button'
+                  type='button'
+                  layout
+                  onClick={event => {
+                    event.stopPropagation()
+                    onOpenApps()
+                  }}
+                  className='flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-neutral-200/70 bg-neutral-50/85 text-neutral-700 shadow-sm transition-colors duration-150 hover:bg-white hover:text-neutral-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/70 dark:border-neutral-700/70 dark:bg-neutral-900/80 dark:text-neutral-200 dark:hover:bg-neutral-800'
+                  initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.88, x: 8 }}
+                  animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1, x: 0 }}
+                  exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.88, x: 8 }}
+                  transition={shouldReduceMotion ? softTransition : internalTransition}
+                  aria-label={appsOpen ? 'Close apps modal' : 'Open apps modal'}
+                  title={appsOpen ? 'Close apps' : 'Open apps'}
+                >
+                  <motion.i
+                    key={appsOpen ? 'apps-close' : 'apps-expand'}
+                    className={`bx ${appsOpen ? 'bx-x' : 'bx-expand-alt'} text-lg`}
+                    initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.92, rotate: -8 }}
+                    animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1, rotate: 0 }}
+                    transition={shouldReduceMotion ? softTransition : { duration: 0.14, ease: 'easeOut' }}
+                    aria-hidden='true'
+                  />
+                  </motion.button>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
           </motion.div>
 
           <AnimatePresence initial={false} mode='popLayout'>
@@ -445,5 +766,6 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
         </div>
       </motion.div>
     </motion.div>
+    </>
   )
 }

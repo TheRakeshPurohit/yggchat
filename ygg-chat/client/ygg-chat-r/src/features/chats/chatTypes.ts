@@ -116,7 +116,7 @@ export interface StreamChunk {
   }
   // free tier update data
   remaining?: number
-  // Hermes ACP permission request correlation id
+  // tool permission request correlation id
   requestId?: string
   // CC-specific chunk type (from Claude Code SDK streaming events)
   chunkType?:
@@ -182,6 +182,12 @@ export interface StreamState {
   events: StreamEvent[]
   // Legacy/latest completed message id. Kept as a branch-selection anchor.
   messageId: MessageId | null
+  // Stable user message that started this stream/run. Unlike branch anchors, this
+  // must not move when assistant/tool-loop turns complete.
+  triggerUserMessageId: MessageId | null
+  // Best current branch-row anchor for diagnostics/view matching. This can move
+  // from the triggering user message to live/completed assistant messages.
+  currentBranchAnchorMessageId: MessageId | null
   // Explicit message tracking for multi-turn/tool streams.
   branchAnchorMessageId: MessageId | null
   liveMessageId: MessageId | null
@@ -453,21 +459,6 @@ export interface SendCCBranchPayload extends Omit<SendCCMessagePayload, 'parentI
   parentId: MessageId
 }
 
-export interface SendHermesMessagePayload {
-  conversationId: ConversationId
-  message: string
-  cwd?: string
-  resume?: boolean
-  parentId?: MessageId | null
-  sessionId?: string
-  forkSession?: boolean
-  model?: string
-  maxIterations?: number
-}
-
-export interface SendHermesBranchPayload extends SendHermesMessagePayload {
-  parentId: MessageId
-}
 
 export interface ModelSelectionPayload {
   model: Model

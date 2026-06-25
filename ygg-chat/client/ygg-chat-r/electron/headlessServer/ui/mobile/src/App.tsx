@@ -18,6 +18,7 @@ import type {
   MobileMessageTreeNode,
   MobileOperationMode,
   MobileProject,
+  MobileReasoningEffort,
   MobileProviderModelInfo,
   MobileProviderName,
   ToolCallLike,
@@ -47,11 +48,16 @@ const MOBILE_LAST_PROVIDER_STORAGE_KEY = 'mobile:lastProvider'
 const MOBILE_AGENT_TEXT_FONT_SIZE_STORAGE_KEY = 'mobile:agentTextFontSizePx'
 const MOBILE_OPERATION_MODE_STORAGE_KEY = 'mobile:operationMode'
 const MOBILE_INCLUDE_OPERATION_MODE_PROMPTS_STORAGE_KEY = 'mobile:includeOperationModePrompts'
+const MOBILE_THINKING_ENABLED_STORAGE_KEY = 'mobile:thinkingEnabled'
+const MOBILE_REASONING_EFFORT_STORAGE_KEY = 'mobile:reasoningEffort'
 const mobileLastConversationStorageKey = (userId: string) => `mobile:lastConversationId:${userId}`
 const DEFAULT_PROVIDER: MobileProviderName = 'openaichatgpt'
 const DEFAULT_AGENT_TEXT_FONT_SIZE_PX = 14
 const MIN_AGENT_TEXT_FONT_SIZE_PX = 12
 const MAX_AGENT_TEXT_FONT_SIZE_PX = 24
+const DEFAULT_THINKING_ENABLED = true
+const DEFAULT_REASONING_EFFORT: MobileReasoningEffort = 'high'
+const MOBILE_REASONING_EFFORT_OPTIONS: MobileReasoningEffort[] = ['low', 'medium', 'high', 'xhigh']
 
 const readStorageValue = (key: string): string | null => {
   if (typeof window === 'undefined') return null
@@ -89,6 +95,12 @@ const normalizeProviderName = (value: string | null | undefined): MobileProvider
 
 const normalizeOperationMode = (value: string | null | undefined): MobileOperationMode => {
   return value === 'execute' ? 'execute' : 'plan'
+}
+
+const normalizeReasoningEffort = (value: string | null | undefined): MobileReasoningEffort => {
+  return MOBILE_REASONING_EFFORT_OPTIONS.includes(value as MobileReasoningEffort)
+    ? (value as MobileReasoningEffort)
+    : DEFAULT_REASONING_EFFORT
 }
 
 const readBooleanStorageValue = (key: string, fallback: boolean): boolean => {
@@ -333,6 +345,12 @@ export const App: React.FC = () => {
   )
   const [includeOperationModePrompts, setIncludeOperationModePrompts] = useState(() =>
     readBooleanStorageValue(MOBILE_INCLUDE_OPERATION_MODE_PROMPTS_STORAGE_KEY, true)
+  )
+  const [thinkingEnabled, setThinkingEnabled] = useState(() =>
+    readBooleanStorageValue(MOBILE_THINKING_ENABLED_STORAGE_KEY, DEFAULT_THINKING_ENABLED)
+  )
+  const [reasoningEffort, setReasoningEffort] = useState<MobileReasoningEffort>(() =>
+    normalizeReasoningEffort(readStorageValue(MOBILE_REASONING_EFFORT_STORAGE_KEY))
   )
 
   const [users, setUsers] = useState<LocalUserProfile[]>([])
@@ -997,6 +1015,14 @@ export const App: React.FC = () => {
   }, [includeOperationModePrompts])
 
   useEffect(() => {
+    writeStorageValue(MOBILE_THINKING_ENABLED_STORAGE_KEY, String(thinkingEnabled))
+  }, [thinkingEnabled])
+
+  useEffect(() => {
+    writeStorageValue(MOBILE_REASONING_EFFORT_STORAGE_KEY, reasoningEffort)
+  }, [reasoningEffort])
+
+  useEffect(() => {
     const models = providerModels.find(provider => provider.name === selectedProvider)?.models || []
     if (models.length === 0) return
     if (models.includes(modelName)) return
@@ -1347,6 +1373,8 @@ export const App: React.FC = () => {
         operation: streamOperation,
         operationMode,
         includeOperationModePrompt: includeOperationModePrompts,
+        think: thinkingEnabled,
+        reasoningConfig: { effort: reasoningEffort },
         messageId: branchSourceMessage?.id,
         cwd: activeProjectCwd,
         rootPath: activeProjectCwd,
@@ -1386,8 +1414,12 @@ export const App: React.FC = () => {
         onAgentTextFontSizeChange={value => setAgentTextFontSizePx(clampAgentTextFontSize(value))}
         operationMode={operationMode}
         includeOperationModePrompts={includeOperationModePrompts}
+        thinkingEnabled={thinkingEnabled}
+        reasoningEffort={reasoningEffort}
         onOperationModeToggle={() => setOperationMode(previous => (previous === 'plan' ? 'execute' : 'plan'))}
         onIncludeOperationModePromptsChange={setIncludeOperationModePrompts}
+        onThinkingEnabledChange={setThinkingEnabled}
+        onReasoningEffortChange={setReasoningEffort}
         users={users}
         selectedUserId={selectedUserId}
         onProviderChange={setSelectedProvider}

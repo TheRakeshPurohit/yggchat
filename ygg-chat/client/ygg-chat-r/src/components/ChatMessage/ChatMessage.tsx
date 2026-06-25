@@ -28,7 +28,9 @@ import { McpAppIframe } from '../McpAppIframe/McpAppIframe'
 import { TextArea } from '../TextArea/TextArea'
 import {
   type CustomChatTheme,
+  createDefaultCustomChatTheme,
   getCustomChatThemeEnabled,
+  getMarkdownThemeVars,
   getStoredCustomChatTheme,
   getThemeModeColor,
   resolveRoleThemeKey,
@@ -44,8 +46,8 @@ import {
   extractAssistantTextsFromResponsesOutputItems,
   extractHtmlFromToolResult,
   extractReasoningTextsFromResponsesOutputItems,
-  formatToolResultContent,
   formatToolResultSummary,
+  getChatFontSizeOffsetStyle,
   LEGACY_TEXT_MARKDOWN_CLASS,
   MESSAGE_IMAGE_CLASS,
   MESSAGE_IMAGE_WRAPPER_CLASS,
@@ -1236,31 +1238,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
 
     const styles = getRoleStyles()
 
-    const markdownCodeBlockBackgroundColor = customThemeEnabled
-      ? getThemeModeColor(customTheme.colors.markdownCodeBlockBg, isDarkMode)
-      : isDarkMode
-        ? '#171717'
-        : '#f3f4f6'
-    const markdownCodeBlockBorderColor = customThemeEnabled
-      ? getThemeModeColor(customTheme.colors.markdownCodeBlockBorder, isDarkMode)
-      : isDarkMode
-        ? 'rgba(255, 255, 255, 0.08)'
-        : 'rgba(0, 0, 0, 0.08)'
-    const markdownCodeBlockTextColor = customThemeEnabled
-      ? getThemeModeColor(customTheme.colors.markdownCodeBlockText, isDarkMode)
-      : isDarkMode
-        ? '#f3f4f6'
-        : '#111827'
-    const markdownInlineCodeBackgroundColor = customThemeEnabled
-      ? getThemeModeColor(customTheme.colors.markdownInlineCodeBg, isDarkMode)
-      : isDarkMode
-        ? '#262626'
-        : '#e5e7eb'
-    const markdownInlineCodeTextColor = customThemeEnabled
-      ? getThemeModeColor(customTheme.colors.markdownInlineCodeText, isDarkMode)
-      : isDarkMode
-        ? '#f5f5f5'
-        : '#111827'
+    const markdownThemeVars = getMarkdownThemeVars(customThemeEnabled ? customTheme : createDefaultCustomChatTheme(), isDarkMode)
 
     // Custom renderer for block code (<pre>) with a stable copy action and no overlay on top of selectable text
     const PreRenderer: React.FC<any> = ({ children, className, ...props }) => {
@@ -1285,14 +1263,8 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       }
 
       return (
-        <div
-          className='my-3 not-prose overflow-hidden rounded-xl border'
-          style={{
-            backgroundColor: markdownCodeBlockBackgroundColor,
-            borderColor: markdownCodeBlockBorderColor,
-          }}
-        >
-          <div className='flex items-center justify-end px-2' style={{ borderColor: markdownCodeBlockBorderColor }}>
+        <div className='chat-markdown-code-block my-3 not-prose overflow-hidden rounded-xl border'>
+          <div className='chat-markdown-code-header flex items-center justify-end px-2'>
             <Button
               type='button'
               onMouseDown={event => {
@@ -1303,7 +1275,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 event.stopPropagation()
                 void handleCopyCode()
               }}
-              className='shrink-0 py-1 px-2 mt-1 text-slate-900 dark:text-white dark:hover:bg-neutral-700'
+              className='chat-markdown-code-copy-button shrink-0 py-1 px-2 mt-1'
               size='smaller'
               variant='outline2'
             >
@@ -1313,7 +1285,6 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
           <pre
             ref={preRef}
             className={`not-prose thin-scrollbar m-0 overflow-auto bg-transparent px-3 py-2.5 text-[0.85em] leading-[1.5] ring-0 outline-none select-text ${className ?? ''}`}
-            style={{ color: markdownCodeBlockTextColor, backgroundColor: 'transparent' }}
             {...props}
           >
             {children}
@@ -1325,16 +1296,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
     const CodeRenderer: React.FC<any> = ({ inline, className, children, ...props }) => {
       if (inline) {
         return (
-          <code
-            className='inline rounded px-1 py-0.5 whitespace-pre-wrap'
-            style={{
-              backgroundColor: markdownInlineCodeBackgroundColor,
-              color: markdownInlineCodeTextColor,
-              boxDecorationBreak: 'clone',
-              WebkitBoxDecorationBreak: 'clone',
-            }}
-            {...props}
-          >
+          <code className='chat-markdown-inline-code inline rounded px-1 py-0.5 whitespace-pre-wrap' {...props}>
             {children}
           </code>
         )
@@ -1360,7 +1322,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       style?: React.CSSProperties
       id?: string
     }) => (
-      <div key={key} id={id} className={className} style={style}>
+      <div key={key} id={id} className={className} style={{ ...markdownThemeVars, ...style }}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }], rehypeKatex]}
@@ -1769,7 +1731,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 <span className='ml-1'>{buttonLabel}</span>
               </Button>
             </div>
-            <div className='border-l-2 border-neutral-300/50 dark:border-neutral-700/50 pl-4 py-1 font-mono text-[0.6875em] text-neutral-500 dark:text-neutral-500 leading-relaxed'>
+            <div className='border-l-2 border-neutral-300/50 dark:border-neutral-700/50 pl-4 py-1 font-mono text-[0.8125em] text-neutral-500 dark:text-neutral-500 leading-relaxed'>
               {projectIdLabel && (
                 <div>
                   <span className='text-neutral-400 dark:text-neutral-600'>projectId:</span>{' '}
@@ -1800,7 +1762,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 </div>
               )}
               {warnings.length > 0 && (
-                <div className='mt-1 text-[0.625em] text-amber-600 dark:text-amber-400'>{warnings.join(' • ')}</div>
+                <div className='mt-1 text-[1em] text-amber-600 dark:text-amber-400'>{warnings.join(' • ')}</div>
               )}
             </div>
           </div>
@@ -1844,7 +1806,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 >
                   {group.name || 'mcp_app'}
                 </span>
-                <span className='text-[0.625em] uppercase tracking-[0.15em] text-emerald-600 dark:text-emerald-400'>
+                <span className='text-[0.8125em] uppercase tracking-[0.15em] text-emerald-600 dark:text-emerald-400'>
                   MCP App
                 </span>
                 <div className='ml-auto flex items-center gap-2'>
@@ -1853,7 +1815,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                     type='button'
                     onClick={() => handleLoadMcpApp(serverName, reloadKey)}
                     disabled={mcpLoadState[reloadKey]}
-                    className='flex items-center gap-1 rounded border border-neutral-200 dark:border-neutral-700 px-2 py-1 text-[0.625em] uppercase tracking-[0.12em] text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60'
+                    className='flex items-center gap-1 rounded border border-neutral-200 dark:border-neutral-700 px-2 py-1 text-[0.8125em] uppercase tracking-[0.12em] text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60'
                   >
                     <i
                       className={`bx ${mcpLoadState[reloadKey] ? 'bx-loader-circle animate-spin' : 'bx-play-circle'}`}
@@ -1941,15 +1903,127 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         )
       }
 
+      const renderToolJsonValue = (value: unknown): string => {
+        if (typeof value === 'string') return value
+        if (value === null || typeof value === 'undefined') return String(value)
+        if (typeof value === 'object') {
+          try {
+            return JSON.stringify(value)
+          } catch {
+            return String(value)
+          }
+        }
+        return String(value)
+      }
+
+      const parseToolJsonObject = (value: unknown): Record<string, any> | null => {
+        if (!value) return null
+        if (typeof value === 'object' && !Array.isArray(value)) return value as Record<string, any>
+        if (typeof value !== 'string') return null
+        try {
+          const parsed = JSON.parse(value)
+          return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, any>) : null
+        } catch {
+          return null
+        }
+      }
+
+      const renderToolBadge = (
+        label: React.ReactNode,
+        variant: 'neutral' | 'success' | 'error' | 'info' | 'warning' = 'neutral'
+      ) => {
+        const variantClass =
+          variant === 'success'
+            ? 'border-emerald-200/80 dark:border-emerald-900/70 bg-emerald-50/70 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-300'
+            : variant === 'error'
+              ? 'border-red-200/80 dark:border-red-900/70 bg-red-50/70 dark:bg-red-950/20 text-red-600 dark:text-red-300'
+              : variant === 'info'
+                ? 'border-blue-200/80 dark:border-blue-900/70 bg-blue-50/70 dark:bg-blue-950/20 text-blue-600 dark:text-blue-300'
+                : variant === 'warning'
+                  ? 'border-amber-200/80 dark:border-amber-900/70 bg-amber-50/70 dark:bg-amber-950/20 text-amber-700 dark:text-amber-300'
+                  : 'border-neutral-200/80 dark:border-neutral-700/80 text-neutral-500 dark:text-neutral-400'
+
+        return (
+          <span
+            className={`min-w-0 max-w-full break-words rounded-full border px-1.5 py-0.5 text-[0.85em] [overflow-wrap:anywhere] ${variantClass}`}
+          >
+            {label}
+          </span>
+        )
+      }
+
+      const getToolPayloadStatus = (
+        payload: Record<string, any> | null,
+        fallbackIsError?: boolean
+      ): { label: string; variant: 'success' | 'error' | 'neutral' } | null => {
+        if (fallbackIsError) return { label: 'failed', variant: 'error' }
+        if (!payload) return fallbackIsError === false ? { label: 'ok', variant: 'success' } : null
+        if (typeof payload.ok === 'boolean') return { label: payload.ok ? 'ok' : 'failed', variant: payload.ok ? 'success' : 'error' }
+        if (typeof payload.success === 'boolean') {
+          return { label: payload.success ? 'success' : 'failure', variant: payload.success ? 'success' : 'error' }
+        }
+        if (typeof payload.isError === 'boolean') {
+          return { label: payload.isError ? 'failed' : 'ok', variant: payload.isError ? 'error' : 'success' }
+        }
+        return fallbackIsError === false ? { label: 'ok', variant: 'success' } : null
+      }
+
+      const renderToolFieldRows = (record: Record<string, any> | null, fallback?: { key: string; value: unknown }) => {
+        const entries = record ? Object.entries(record) : fallback ? [[fallback.key, fallback.value] as [string, unknown]] : []
+
+        if (entries.length === 0) {
+          return <div className='italic text-neutral-400 dark:text-neutral-600'>No fields</div>
+        }
+
+        return entries.map(([fieldKey, fieldValue]) => (
+          <div key={fieldKey} className='min-w-0 max-w-full break-words whitespace-pre-wrap [overflow-wrap:anywhere]'>
+            <span className='text-neutral-400 dark:text-neutral-600'>{fieldKey}:</span>{' '}
+            <span className='text-neutral-600 dark:text-neutral-400'>{renderToolJsonValue(fieldValue)}</span>
+          </div>
+        ))
+      }
+
+      const renderStructuredToolCard = ({
+        cardKey,
+        index,
+        title,
+        status,
+        children,
+      }: {
+        cardKey: string
+        index?: number
+        title: React.ReactNode
+        status?: { label: string; variant: 'success' | 'error' | 'neutral' } | null
+        children: React.ReactNode
+      }) => (
+        <div
+          key={cardKey}
+          className='min-w-0 max-w-full overflow-hidden rounded-lg border border-neutral-200/80 dark:border-neutral-700/80 bg-white/45 dark:bg-white/[0.03] shadow-sm [overflow-wrap:anywhere]'
+        >
+          <div className='flex min-w-0 flex-wrap items-center gap-1.5 border-b border-neutral-200/70 dark:border-neutral-700/70 bg-neutral-50/80 dark:bg-neutral-900/35 px-2 py-1'>
+            {typeof index === 'number' && (
+              <span className='inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-neutral-200/80 dark:bg-neutral-800 text-[0.7em] font-semibold text-neutral-600 dark:text-neutral-300'>
+                {index + 1}
+              </span>
+            )}
+            <span className='min-w-0 flex-1 basis-0 break-words font-semibold text-neutral-700 dark:text-neutral-200 [overflow-wrap:anywhere]'>
+              {title}
+            </span>
+            {status && <span className='min-w-0 shrink break-words'>{renderToolBadge(status.label, status.variant)}</span>}
+          </div>
+          <div className='min-w-0 max-w-full px-2 py-1 space-y-1 [overflow-wrap:anywhere]'>{children}</div>
+        </div>
+      )
+
       return (
         <div key={toggleKey} className={PROCESS_CARD_WRAPPER_CLASS} style={messageContentStyle}>
           {/* Tool header row */}
-          <div className='flex items-center gap-2 flex-wrap'>
+          <div className='flex min-w-0 max-w-full flex-wrap items-center gap-2 overflow-hidden'>
             <button onClick={() => handleExpandToggle(toggleKey, group)} className={TOOL_HEADER_BUTTON_CLASS}>
               <span className={toolNameClass}>{group.name || 'tool'}</span>
               {!isExpanded && pathContent && (
                 <span
-                  className='text-[0.75em] text-neutral-500 dark:text-neutral-500 max-w-[200px] overflow-hidden whitespace-nowrap'
+                  className='text-[0.8125em] text-neutral-500 dark:text-neutral-500 max-w-[200px] overflow-hidden whitespace-nowrap'
                   style={{ direction: 'rtl', textOverflow: 'ellipsis' }}
                 >
                   {pathContent}
@@ -1969,7 +2043,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 type='button'
                 onClick={() => handleLoadMcpApp(mcpServerName, `${id}-${group.id}-mcp`)}
                 disabled={mcpLoadState[`${id}-${group.id}-mcp`]}
-                className='ml-auto flex items-center gap-1 rounded border border-neutral-200 dark:border-neutral-700 px-2 py-1 text-[0.625em] uppercase tracking-[0.12em] text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60'
+                className='ml-auto flex items-center gap-1 rounded border border-neutral-200 dark:border-neutral-700 px-2 py-1 text-[0.8125em] uppercase tracking-[0.12em] text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-60'
               >
                 <i
                   className={`bx ${
@@ -1991,21 +2065,74 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
             <div className='tool-expand-content'>
               {/* Tool inputs */}
               {!hasHtmlOutput && group.args && Object.keys(group.args).length > 0 && (
-                <div className='border-l-2 border-neutral-300/50 dark:border-neutral-700/50 pl-4 py-1 mb-2 font-mono text-[0.6875em] text-neutral-500 dark:text-neutral-500 leading-relaxed'>
-                  {Object.entries(group.args).map(([argKey, value]) => (
-                    <div key={argKey} className='break-all'>
-                      <span className='text-neutral-400 dark:text-neutral-600'>{argKey}:</span>{' '}
-                      <span className='text-neutral-600 dark:text-neutral-400'>
-                        {typeof value === 'object' ? JSON.stringify(value) : String(value)}
-                      </span>
+                <div className='min-w-0 max-w-full overflow-hidden border-l-2 border-neutral-300/50 dark:border-neutral-700/50 pl-3 py-1 mb-2 font-mono text-[0.8125em] text-neutral-500 dark:text-neutral-500 leading-relaxed [overflow-wrap:anywhere]'>
+                  {normalizedToolCardName === 'multi_call' && Array.isArray(group.args.calls) ? (
+                    <div className='min-w-0 max-w-full break-normal overflow-hidden [overflow-wrap:anywhere]'>
+                      <div className='mb-1 flex min-w-0 max-w-full flex-wrap items-center gap-1.5 overflow-hidden [overflow-wrap:anywhere]'>
+                        <span className='text-neutral-400 dark:text-neutral-600'>calls:</span>
+                        {renderToolBadge(
+                          `${group.args.calls.length} call${group.args.calls.length === 1 ? '' : 's'}`,
+                          'neutral'
+                        )}
+                        {typeof group.args.parallel !== 'undefined' &&
+                          renderToolBadge(`parallel: ${String(group.args.parallel)}`, 'info')}
+                        {typeof group.args.stopOnError !== 'undefined' &&
+                          renderToolBadge(`stopOnError: ${String(group.args.stopOnError)}`, 'warning')}
+                      </div>
+                      <div className='min-w-0 max-w-full space-y-1.5'>
+                        {group.args.calls.map((call: any, callIdx: number) => {
+                          const callRecord = call && typeof call === 'object' ? (call as Record<string, any>) : null
+                          const toolName =
+                            typeof callRecord?.tool === 'string'
+                              ? callRecord.tool
+                              : typeof callRecord?.toolName === 'string'
+                                ? callRecord.toolName
+                                : `call ${callIdx + 1}`
+                          const callArgs =
+                            callRecord?.args && typeof callRecord.args === 'object' && !Array.isArray(callRecord.args)
+                              ? (callRecord.args as Record<string, any>)
+                              : null
+                          const extraFields = callRecord
+                            ? Object.fromEntries(
+                                Object.entries(callRecord).filter(
+                                  ([callKey]) => callKey !== 'tool' && callKey !== 'toolName' && callKey !== 'args'
+                                )
+                              )
+                            : null
+
+                          return renderStructuredToolCard({
+                            cardKey: `input-${callIdx}`,
+                            index: callIdx,
+                            title: toolName,
+                            children: (
+                              <>
+                                {renderToolFieldRows(callArgs, callArgs ? undefined : { key: 'args', value: callRecord?.args ?? null })}
+                                {extraFields && Object.keys(extraFields).length > 0 && renderToolFieldRows(extraFields)}
+                              </>
+                            ),
+                          })
+                        })}
+                      </div>
                     </div>
-                  ))}
+                  ) : (
+                    <div className='min-w-0 max-w-full break-normal overflow-hidden [overflow-wrap:anywhere]'>
+                      <div className='mb-1 flex min-w-0 max-w-full flex-wrap items-center gap-1.5 overflow-hidden [overflow-wrap:anywhere]'>
+                        <span className='text-neutral-400 dark:text-neutral-600'>input:</span>
+                        {renderToolBadge(`${Object.keys(group.args).length} field${Object.keys(group.args).length === 1 ? '' : 's'}`)}
+                      </div>
+                      {renderStructuredToolCard({
+                        cardKey: 'input-args',
+                        title: 'Arguments',
+                        children: renderToolFieldRows(group.args),
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
 
               {/* Tool results */}
               {group.results.length > 0 && (
-                <div className='space-y-2'>
+                <div className='min-w-0 max-w-full space-y-2'>
                   {group.results.map((result, resultIdx) => {
                     const resultKey = `${id}-${group.id}-result-${resultIdx}`
                     const maybeHtml = extractHtmlFromToolResult(result.content)
@@ -2020,19 +2147,109 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                       )
                     }
 
-                    const renderedContent = formatToolResultContent(result.content)
+                    const multiCallOutput = normalizedToolCardName === 'multi_call' ? parseToolJsonObject(result.content) : null
+                    const multiCallResults = Array.isArray(multiCallOutput?.results) ? multiCallOutput.results : null
+
+                    if (multiCallResults) {
+                      return (
+                        <div
+                          key={resultKey}
+                          className={`min-w-0 max-w-full overflow-hidden border-l-2 pl-3 py-1 font-mono text-[0.8125em] leading-relaxed [overflow-wrap:anywhere] ${
+                            result.is_error
+                              ? 'border-red-400/50 dark:border-red-600/50 text-red-600 dark:text-red-400'
+                              : 'border-neutral-300/50 dark:border-neutral-700/50 text-neutral-500 dark:text-neutral-500'
+                          }`}
+                        >
+                          <div className='mb-1 flex min-w-0 max-w-full flex-wrap items-center gap-1.5 overflow-hidden [overflow-wrap:anywhere]'>
+                            <span className='text-neutral-400 dark:text-neutral-600'>output:</span>
+                            {renderToolBadge(
+                              `${multiCallResults.length} result${multiCallResults.length === 1 ? '' : 's'}`,
+                              'neutral'
+                            )}
+                            {typeof multiCallOutput?.parallel !== 'undefined' &&
+                              renderToolBadge(`parallel: ${String(multiCallOutput.parallel)}`, 'info')}
+                            {typeof multiCallOutput?.stopOnError !== 'undefined' &&
+                              renderToolBadge(`stopOnError: ${String(multiCallOutput.stopOnError)}`, 'warning')}
+                          </div>
+                          <div className='min-w-0 max-w-full space-y-1.5'>
+                            {multiCallResults.map((callResult, callResultIdx) => {
+                              const resultRecord =
+                                callResult && typeof callResult === 'object' ? (callResult as Record<string, any>) : null
+                              const nestedToolName =
+                                typeof resultRecord?.tool === 'string'
+                                  ? resultRecord.tool
+                                  : typeof resultRecord?.toolName === 'string'
+                                    ? resultRecord.toolName
+                                    : `result ${callResultIdx + 1}`
+                              const nestedData = resultRecord?.data
+                              const extraFields = resultRecord
+                                ? Object.fromEntries(
+                                    Object.entries(resultRecord).filter(
+                                      ([callKey]) =>
+                                        callKey !== 'tool' && callKey !== 'toolName' && callKey !== 'ok' && callKey !== 'data'
+                                    )
+                                  )
+                                : null
+
+                              return renderStructuredToolCard({
+                                cardKey: `${resultKey}-multi-${callResultIdx}`,
+                                index: callResultIdx,
+                                title: nestedToolName,
+                                status: getToolPayloadStatus(resultRecord),
+                                children: (
+                                  <>
+                                    {typeof nestedData !== 'undefined' &&
+                                      renderToolFieldRows(
+                                        nestedData && typeof nestedData === 'object' && !Array.isArray(nestedData)
+                                          ? (nestedData as Record<string, any>)
+                                          : null,
+                                        { key: 'data', value: nestedData }
+                                      )}
+                                    {extraFields && Object.keys(extraFields).length > 0 && renderToolFieldRows(extraFields)}
+                                  </>
+                                ),
+                              })
+                            })}
+                          </div>
+                          {!result.is_error && (
+                            <span className='text-neutral-400 dark:text-neutral-600 italic mt-1 block text-[1em] tracking-tight'>
+                              completed
+                            </span>
+                          )}
+                        </div>
+                      )
+                    }
+
+                    const outputRecord = parseToolJsonObject(result.content)
+                    const outputStatus = getToolPayloadStatus(outputRecord, result.is_error)
+
                     return (
                       <div
                         key={resultKey}
-                        className={`border-l-2 pl-4 py-1 font-mono text-[0.6875em] leading-relaxed whitespace-pre-wrap break-words ${
+                        className={`min-w-0 max-w-full overflow-hidden border-l-2 pl-3 py-1 font-mono text-[0.8125em] leading-relaxed [overflow-wrap:anywhere] ${
                           result.is_error
                             ? 'border-red-400/50 dark:border-red-600/50 text-red-600 dark:text-red-400'
                             : 'border-neutral-300/50 dark:border-neutral-700/50 text-neutral-500 dark:text-neutral-500'
                         }`}
                       >
-                        {renderedContent}
+                        <div className='mb-1 flex min-w-0 max-w-full flex-wrap items-center gap-1.5 overflow-hidden [overflow-wrap:anywhere]'>
+                          <span className='text-neutral-400 dark:text-neutral-600'>output:</span>
+                          {renderToolBadge(`result ${resultIdx + 1}`)}
+                        </div>
+                        <div className='min-w-0 max-w-full space-y-1.5'>
+                          {renderStructuredToolCard({
+                            cardKey: `${resultKey}-card`,
+                            index: group.results.length > 1 ? resultIdx : undefined,
+                            title: group.results.length > 1 ? `Result ${resultIdx + 1}` : 'Result',
+                            status: outputStatus,
+                            children: renderToolFieldRows(
+                              outputRecord,
+                              outputRecord ? undefined : { key: 'content', value: result.content }
+                            ),
+                          })}
+                        </div>
                         {!result.is_error && (
-                          <span className='text-neutral-400 dark:text-neutral-600 italic mt-1 block text-[0.625em] tracking-tight'>
+                          <span className='text-neutral-400 dark:text-neutral-600 italic mt-1 block text-[1em] tracking-tight'>
                             completed
                           </span>
                         )}
@@ -2049,8 +2266,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
 
     // Style object for message content areas that should scale with fontSizeOffset.
     // Tool/reasoning labels use em-based text sizes so they inherit this offset too.
-    const messageContentStyle: React.CSSProperties | undefined =
-      fontSizeOffset !== 0 ? { fontSize: `calc(1em + ${fontSizeOffset}px)` } : undefined
+    const messageContentStyle = getChatFontSizeOffsetStyle(fontSizeOffset)
     const hasSelection = selectedText.length > 0
 
     const contextHighlightClass = contextMenuOpen ? 'bg-neutral-200/60 dark:bg-orange-900/10' : ''
@@ -2094,9 +2310,9 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
               onClick={() => toggleBlock('reasoning', reasoningId)}
               className='flex items-center gap-2 group/reason hover:opacity-80 transition-opacity cursor-pointer outline-none'
             >
-              <span className='text-[0.75em] leading-none text-neutral-800 dark:text-neutral-500'>Reasoning</span>
+              <span className='text-[0.8125em] leading-none text-neutral-800 dark:text-neutral-500'>Reasoning</span>
               {!isExpanded && reasoningSummary && (
-                <span className='text-[0.75em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
+                <span className='text-[0.8125em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
                   {reasoningSummary}
                 </span>
               )}
@@ -2190,11 +2406,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 onClick={() => toggleBlock('groupRuns', groupKey)}
                 className='flex items-center gap-2 group/run hover:opacity-80 transition-opacity cursor-pointer outline-none'
               >
-                <span className='text-[0.625em] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
+                <span className='text-[0.8125em] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
                   Agent Steps ({processItems.length})
                 </span>
                 {!isExpanded && summaryParts.length > 0 && (
-                  <span className='text-[0.75em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
+                  <span className='text-[0.8125em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
                     {summaryParts.join(' â€¢ ')}
                   </span>
                 )}
@@ -2703,11 +2919,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                   aria-expanded={showThinking}
                   aria-controls={`reasoning-content-${id}`}
                 >
-                  <span className='text-[0.625em] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
+                  <span className='text-[0.8125em] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
                     Reasoning
                   </span>
                   {!showThinking && (
-                    <span className='text-[0.75em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
+                    <span className='text-[0.8125em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[300px]'>
                       {getCollapsedReasoningSummary(thinking)}
                     </span>
                   )}
@@ -2756,6 +2972,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
               width='w-full'
               enableImageAttachments={editMode === 'branch'}
               imageDraftTarget={{ kind: 'branch', messageId: id }}
+              fontSizeOffset={fontSizeOffset}
               onContextMenu={(e: React.MouseEvent<HTMLTextAreaElement>) => {
                 // Always show default browser menu in TextArea, never the custom menu
                 e.stopPropagation()
@@ -3061,6 +3278,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                 width='w-full'
                 minRows={1}
                 maxRows={2}
+                fontSizeOffset={fontSizeOffset}
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault()

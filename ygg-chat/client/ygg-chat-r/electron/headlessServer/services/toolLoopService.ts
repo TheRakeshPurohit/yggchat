@@ -9,6 +9,7 @@ import type {
 import { ProviderRouter, normalizeProviderRoute } from './providerRouter.js'
 import { persistWithFallback, type ToolResultPersistencePolicy } from './toolResultPersistenceService.js'
 import { sanitizeToolResultContentForModel } from '../providers/toolResultSanitizer.js'
+import { formatProviderErrorForAssistant, type FormattedProviderError } from '../providers/providerErrorFormatter.js'
 
 export interface ToolExecutionContext {
   conversationId: string
@@ -65,6 +66,21 @@ export interface ToolLoopRunInput {
 export interface ToolLoopRunResult {
   finalAssistantMessage: any
   turnsUsed: number
+  providerError?: FormattedProviderError
+}
+
+export class ProviderErrorAssistantResponse extends Error {
+  readonly assistantMessage: any
+  readonly providerError: FormattedProviderError
+  readonly turnsUsed: number
+
+  constructor(input: { assistantMessage: any; providerError: FormattedProviderError; turnsUsed: number }) {
+    super(input.providerError.originalMessage)
+    this.name = 'ProviderErrorAssistantResponse'
+    this.assistantMessage = input.assistantMessage
+    this.providerError = input.providerError
+    this.turnsUsed = input.turnsUsed
+  }
 }
 
 const DEFAULT_MAX_TURNS = 400
@@ -260,6 +276,28 @@ export class ToolLoopService {
           `Provider turn ${turn}/${this.maxTurns}`
         )
       } catch (error) {
+        const providerError = formatProviderErrorForAssistant(error, {
+          provider: input.provider,
+          modelName: input.modelName,
+        })
+
+        if (providerError) {
+          const assistantMessage = this.messageRepo.createMessage({
+            conversationId: input.conversationId,
+            parentId: currentParentId,
+            role: 'assistant',
+            content: providerError.message,
+            modelName: input.modelName,
+            contentBlocks: [{ type: 'text', content: providerError.message }],
+          })
+
+          if (!streamedTextDuringTurn) {
+            emit({ type: 'chunk', part: 'text', delta: providerError.message })
+          }
+          emit({ type: 'assistant_message_persisted', message: assistantMessage })
+          throw new ProviderErrorAssistantResponse({ assistantMessage, providerError, turnsUsed: turn })
+        }
+
         const message = error instanceof Error ? error.message : String(error)
         emit({ type: 'error', error: `Continuation generation failed on turn ${turn}/${this.maxTurns}: ${message}` })
         throw error

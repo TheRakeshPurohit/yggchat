@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { OpenAiChatgptProvider } from '../openaiChatgptProvider.js'
+import { OpenAiChatgptProvider, normalizeOpenAIChatGPTModel } from '../openaiChatgptProvider.js'
 
 function createSseStream(events: any[]) {
   const encoder = new TextEncoder()
@@ -15,6 +15,13 @@ function createSseStream(events: any[]) {
 }
 
 describe('OpenAiChatgptProvider', () => {
+  it('normalizes ChatGPT display labels to backend model IDs', () => {
+    expect(normalizeOpenAIChatGPTModel('GPT-5.4 Mini')).toBe('gpt-5.4-mini')
+    expect(normalizeOpenAIChatGPTModel('openaichatgpt/GPT-5.4 Mini')).toBe('gpt-5.4-mini')
+    expect(normalizeOpenAIChatGPTModel('GPT-5.4 Pro')).toBe('gpt-5.4-pro')
+    expect(normalizeOpenAIChatGPTModel('GPT-5.3 Codex')).toBe('gpt-5.3-codex')
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
     delete process.env.OPENAI_CHATGPT_ACCESS_TOKEN
@@ -437,6 +444,52 @@ describe('OpenAiChatgptProvider', () => {
         userContent: 'hello',
       })
     ).rejects.toThrow('Provider stopped early')
+  })
+
+  it('retries ChatGPT HTTP 429 setup failures three times before surfacing the final usage-limit error', async () => {
+    vi.useFakeTimers()
+    process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC00In19.sig'
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorBody = '{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_at":1782168563}}'
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => ({
+      ok: false,
+      status: 429,
+      statusText: 'Too Many Requests',
+      headers: new Headers({ 'content-type': 'application/json' }),
+      body: new ReadableStream<Uint8Array>({ start(controller) { controller.close() } }),
+      text: async () => errorBody,
+    }) as any)
+
+    const provider = new OpenAiChatgptProvider()
+    const promise = expect(
+      provider.generate({
+        modelName: 'gpt-5.4-mini',
+        history: [],
+        userContent: 'hello',
+      })
+    ).rejects.toThrow('usage_limit_reached')
+
+    await vi.runAllTimersAsync()
+    await promise
+
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[headless-stream-resilience] pre-first-byte retry event',
+      expect.objectContaining({
+        endpoint: '/backend-api/codex/responses',
+        maxRetries: 3,
+        failureClass: 'retryable_status',
+        status: 429,
+      })
+    )
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[Codex HTTP] non-OK response',
+      expect.objectContaining({
+        status: 429,
+        bodyPreview: expect.stringContaining('usage_limit_reached'),
+      })
+    )
   })
 
   it('retries ChatGPT HTTP stream setup three times before succeeding', async () => {

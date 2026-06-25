@@ -70,9 +70,11 @@ Each `StreamState` contains:
 - `originMessageId`
 - `branchId`
 
-Two fields are especially important now:
+Four fields are especially important now:
 - `conversationId`: prevents cross-conversation bleed
-- `lineage.rootMessageId`: associates a stream with the branch root / parent message it belongs to
+- `triggerUserMessageId`: stable user message that started the stream/run
+- `currentBranchAnchorMessageId`: moving best branch-row/view anchor for the stream
+- `lineage.rootMessageId`: legacy branch root / parent association retained for compatibility
 
 ---
 
@@ -106,7 +108,7 @@ This is used by shared send flows so a branch send can still be treated as a bra
 Implemented examples include:
 - `sendMessage(...)` → usually `streamType: 'primary'`
 - `editMessageWithBranching(...)` → `streamType: 'branch'`
-- Hermes/Claude Code style sends also start streams and attach `conversationId`
+- Claude Code style sends also start streams and attach `conversationId`
 
 Typical payloads now include `conversationId` and often `lineage`.
 

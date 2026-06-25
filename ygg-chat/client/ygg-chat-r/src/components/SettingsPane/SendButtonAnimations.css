@@ -4,7 +4,7 @@
   width: 36px;
   height: 36px;
   background-color: var(--send-btn-bg, #ffffff);
-  border-radius: 10px;
+  border-radius: 9999px;
   display: flex;
   align-items: center;
   justify-content: center;

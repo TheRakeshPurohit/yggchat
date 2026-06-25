@@ -10,6 +10,7 @@ import { type DirectoryFileEntry, useDirectoryFileSearch, useDirectoryFiles } fr
 import type { RootState } from '../../store/store'
 import { readLocalMentionFile } from '../../utils/readLocalMentionFile'
 import { rankFileMatches } from '../../../shared/fileMatchRanking'
+import { CHAT_NORMAL_TEXT_SIZE_CLASS, getChatFontSizeOffsetStyle } from '../ChatMessage/chatMessageShared'
 
 type textAreaState = 'default' | 'error' | 'disabled'
 type textAreaWidth = 'w-1/6' | 'w-1/4' | 'w-1/2' | 'w-3/4' | 'w-3/5' | 'w-5/6' | 'w-full' | 'max-w-3xl'
@@ -34,6 +35,7 @@ interface TextAreaProps {
   fallbackFileSearchRoot?: string | null
   enableImageAttachments?: boolean
   imageDraftTarget?: ImageDraftTarget
+  fontSizeOffset?: number
 }
 
 const allowedMentionChar = /[A-Za-z0-9._\/\-]/
@@ -106,6 +108,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
   fallbackFileSearchRoot = null,
   enableImageAttachments = false,
   imageDraftTarget = { kind: 'composer' },
+  fontSizeOffset = 0,
   ...rest
 }) => {
   const dispatch = useDispatch()
@@ -539,7 +542,13 @@ export const TextArea: React.FC<TextAreaProps> = ({
     }
   }, [showFileList])
 
-  const baseStyles = `${width} resize-none px-4 py-3 rounded-xl transition-all duration-200 overflow-hidden border-1 border-neutral-300 dark:border-neutral-600 bg-neutral-50 dark:bg-neutral-900 text-[16px] sm:text-[14px] md:text-[14px] lg:text-[13px] 2xl:text-[14px] `
+  const textareaStyle = fillAvailableHeight
+    ? getChatFontSizeOffsetStyle(fontSizeOffset)
+    : {
+        minHeight: `${minRows * 24 + 16}px`,
+        ...getChatFontSizeOffsetStyle(fontSizeOffset),
+      }
+  const baseStyles = `${width} resize-none px-4 py-3 rounded-xl transition-all duration-200 overflow-hidden border-1 border-neutral-300 dark:border-neutral-600 bg-neutral-50 dark:bg-neutral-900 ${CHAT_NORMAL_TEXT_SIZE_CLASS} `
   const labelClasses = state === 'disabled' ? 'opacity-40' : ''
   // focus:border-gray-500 focus:ring-2 focus:ring-gray-500 focus:ring-opacity-50 dark:focus:ring-2 dark:focus:ring-secondary-600
   const stateStyles = {
@@ -578,13 +587,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
           aria-invalid={state === 'error'}
           aria-describedby={state === 'error' && errorMessage ? errorId : undefined}
           autoFocus={autoFocus}
-          style={
-            fillAvailableHeight
-              ? undefined
-              : {
-                  minHeight: `${minRows * 24 + 16}px`,
-                }
-          }
+          style={textareaStyle}
           {...rest}
         />
 
@@ -649,10 +652,19 @@ export const TextArea: React.FC<TextAreaProps> = ({
           {visibleImageDrafts.map((img, idx) => (
             <div
               key={idx}
-              className='w-16 h-16 rounded-md overflow-hidden border border-gray-600 bg-neutral-800'
+              className='relative w-16 h-16 rounded-md overflow-hidden border border-gray-600 bg-neutral-800 group'
               title={img.name}
             >
               <img src={img.dataUrl} alt={img.name || `image-${idx}`} className='w-full h-full object-cover' />
+              <button
+                type='button'
+                onClick={() => dispatch(chatSliceActions.imageDraftRemoved({ index: idx, target: imageDraftTarget }))}
+                className='absolute top-0 right-0 w-5 h-5 bg-red-400 hover:bg-red-700 text-white rounded-bl-md opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-xs font-bold'
+                aria-label='Remove image'
+                title='Remove image'
+              >
+                ×
+              </button>
             </div>
           ))}
         </div>

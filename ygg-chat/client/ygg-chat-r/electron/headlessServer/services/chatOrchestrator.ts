@@ -7,7 +7,7 @@ import type { ProviderTokenStore } from '../providers/tokenStore.js'
 import { BranchOrchestrator, type ResolvedExecution } from './branchOrchestrator.js'
 import { buildHeadlessSystemPrompt } from './headlessSystemPrompt.js'
 import { ProviderRouter } from './providerRouter.js'
-import { ToolLoopService, type ToolExecutor } from './toolLoopService.js'
+import { ProviderErrorAssistantResponse, ToolLoopService, type ToolExecutor, type ToolLoopRunResult } from './toolLoopService.js'
 
 interface ChatOrchestratorDeps {
   db: any
@@ -144,7 +144,9 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
     const conversationContext = request.conversationContext ?? conversation?.conversation_context ?? null
     const projectContext = request.projectContext ?? project?.context ?? null
 
-    const toolLoopResult = await this.toolLoopService.run(
+    let toolLoopResult: ToolLoopRunResult
+    try {
+      toolLoopResult = await this.toolLoopService.run(
       {
         provider: request.provider,
         operation: request.operation,
@@ -176,8 +178,29 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
         operationMode: request.operationMode ?? 'execute',
         toolTimeoutMs: request.toolTimeoutMs,
       },
-      emit
-    )
+        emit
+      )
+    } catch (error) {
+      if (error instanceof ProviderErrorAssistantResponse) {
+        this.streamingRunRepo.finish(trackedStreamId, {
+          status: 'error',
+          endReason: 'provider_error',
+          assistantMessageId: error.assistantMessage?.id ?? null,
+          finalMessageId: error.assistantMessage?.id ?? null,
+          error: error.providerError.originalMessage,
+          metadata: {
+            provider: error.providerError.provider,
+            retryExhausted: error.providerError.retryExhausted,
+            status: error.providerError.status,
+            errorType: error.providerError.errorType,
+            resetAt: error.providerError.resetAt,
+          },
+        })
+        emit({ type: 'complete', message: error.assistantMessage, providerError: true })
+        return
+      }
+      throw error
+    }
 
     this.streamingRunRepo.finish(trackedStreamId, {
       status: 'completed',

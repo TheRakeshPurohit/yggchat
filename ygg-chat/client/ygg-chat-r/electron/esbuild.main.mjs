@@ -63,6 +63,26 @@ await esbuild.build({
 
 console.log('✅ toolRuntimeUtility.ts bundled to toolRuntimeUtility.mjs')
 
+// Bundle local analytics worker so expensive SQLite dashboard queries run off the main thread
+await esbuild.build({
+  entryPoints: [path.join(__dirname, 'localAnalyticsWorker.ts')],
+  bundle: true,
+  platform: 'node',
+  target: 'node20',
+  outfile: path.join(__dirname, 'localAnalyticsWorker.mjs'),
+  format: 'esm',
+  external: [
+    'better-sqlite3',
+  ],
+  banner: {
+    js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);"
+  },
+  sourcemap: true,
+  resolveExtensions: ['.ts', '.js', '.mjs', '.json'],
+})
+
+console.log('✅ localAnalyticsWorker.ts bundled to localAnalyticsWorker.mjs')
+
 // Bundle mobile headless UI (React) for LAN access
 await esbuild.build({
   entryPoints: [path.join(__dirname, 'headlessServer', 'ui', 'mobile', 'src', 'main.tsx')],

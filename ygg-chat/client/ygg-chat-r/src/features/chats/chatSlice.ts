@@ -490,6 +490,7 @@ export const chatSlice = createSlice({
         stream.events = []
         stream.error = null
         stream.messageId = null
+        stream.currentBranchAnchorMessageId = stream.triggerUserMessageId ?? stream.lineage.originMessageId ?? stream.lineage.rootMessageId ?? null
         stream.liveMessageId = null
         stream.lastCompletedMessageId = null
         stream.finalMessageId = null
@@ -503,6 +504,9 @@ export const chatSlice = createSlice({
         stream.error = null
         stream.liveMessageId = chunk.messageId || null
         stream.streamingMessageId = chunk.messageId || null
+        if (chunk.messageId) {
+          stream.currentBranchAnchorMessageId = chunk.messageId
+        }
         // Keep messageId/lastCompletedMessageId as branch anchors. Chat.tsx uses
         // liveMessageId/streamingMessageId for duplicate suppression instead.
         // Clear previous turn's transient render buffers for the new live answer.
@@ -616,6 +620,7 @@ export const chatSlice = createSlice({
         stream.lastCompletedMessageId = completedMessageId
         if (completedMessageId) {
           stream.branchAnchorMessageId = completedMessageId
+          stream.currentBranchAnchorMessageId = completedMessageId
         }
         stream.liveMessageId = null
         stream.streamingMessageId = null
@@ -661,6 +666,7 @@ export const chatSlice = createSlice({
         stream.messageId = messageId
         stream.lastCompletedMessageId = messageId
         stream.finalMessageId = messageId
+        stream.currentBranchAnchorMessageId = messageId
         stream.liveMessageId = null
         stream.streamingMessageId = null
 
@@ -721,12 +727,51 @@ export const chatSlice = createSlice({
 
     // Update stream lineage after getting target parent ID
     // This is called when we know the actual parent of the streaming message
-    streamLineageUpdated: (state, action: PayloadAction<{ streamId: string; targetParentId: MessageId }>) => {
-      const { streamId, targetParentId } = action.payload
+    streamLineageUpdated: (
+      state,
+      action: PayloadAction<{
+        streamId: string
+        targetParentId?: MessageId | null
+        originMessageId?: MessageId | null
+        rootMessageId?: MessageId | null
+        branchAnchorMessageId?: MessageId | null
+        triggerUserMessageId?: MessageId | null
+        currentBranchAnchorMessageId?: MessageId | null
+      }>
+    ) => {
+      const {
+        streamId,
+        targetParentId,
+        originMessageId,
+        rootMessageId,
+        branchAnchorMessageId,
+        triggerUserMessageId,
+        currentBranchAnchorMessageId,
+      } = action.payload
       const stream = state.streaming.byId[streamId]
       if (stream) {
-        stream.lineage.rootMessageId = targetParentId
-        stream.branchAnchorMessageId = targetParentId
+        if (originMessageId !== undefined) {
+          stream.lineage.originMessageId = originMessageId ?? undefined
+        }
+        const nextTriggerUserMessageId = triggerUserMessageId !== undefined ? triggerUserMessageId : undefined
+        if (nextTriggerUserMessageId !== undefined) {
+          stream.triggerUserMessageId = nextTriggerUserMessageId ?? null
+        } else if (!stream.triggerUserMessageId && originMessageId !== undefined) {
+          stream.triggerUserMessageId = originMessageId ?? null
+        }
+        const nextRootMessageId = rootMessageId !== undefined ? rootMessageId : targetParentId
+        if (nextRootMessageId !== undefined) {
+          stream.lineage.rootMessageId = nextRootMessageId ?? undefined
+        }
+        const nextBranchAnchorMessageId = branchAnchorMessageId !== undefined ? branchAnchorMessageId : targetParentId
+        if (nextBranchAnchorMessageId !== undefined) {
+          stream.branchAnchorMessageId = nextBranchAnchorMessageId ?? null
+        }
+        const nextCurrentBranchAnchorMessageId =
+          currentBranchAnchorMessageId !== undefined ? currentBranchAnchorMessageId : nextBranchAnchorMessageId
+        if (nextCurrentBranchAnchorMessageId !== undefined) {
+          stream.currentBranchAnchorMessageId = nextCurrentBranchAnchorMessageId ?? null
+        }
       }
     },
 

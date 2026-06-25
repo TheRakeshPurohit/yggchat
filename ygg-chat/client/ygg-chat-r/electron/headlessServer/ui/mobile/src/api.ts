@@ -11,6 +11,7 @@ import type {
   MobileProject,
   MobileOperationMode,
   MobileProviderModelInfo,
+  MobileReasoningEffort,
   MobileProviderName,
 } from './types'
 
@@ -554,6 +555,8 @@ export const mobileApi = {
     operation?: 'send' | 'branch' | 'edit-branch'
     operationMode?: MobileOperationMode
     includeOperationModePrompt?: boolean
+    think?: boolean
+    reasoningConfig?: { effort?: MobileReasoningEffort } | Record<string, unknown>
     messageId?: string | null
     cwd?: string | null
     rootPath?: string | null
@@ -583,6 +586,8 @@ export const mobileApi = {
         parentId: params.parentId ?? null,
         operationMode: params.operationMode || 'execute',
         includeOperationModePrompt: params.includeOperationModePrompt ?? true,
+        think: params.think,
+        reasoningConfig: params.reasoningConfig,
         rootPath: params.rootPath ?? params.cwd ?? null,
         cwd: params.cwd ?? params.rootPath ?? null,
         tools: Array.isArray(params.tools) && params.tools.length > 0 ? params.tools : undefined,

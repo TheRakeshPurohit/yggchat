@@ -432,6 +432,7 @@ const RightBar: React.FC<RightBarProps> = ({
   const [terminalPreferences, setTerminalPreferences] = useState<TerminalDockPreferences>(
     () => initialTerminalDockState.preferences
   )
+  const [isTerminalPreferencesOpen, setIsTerminalPreferencesOpen] = useState(false)
   const [activeDockTabId, setActiveDockTabId] = useState<string | null>(() =>
     initialTerminalDockState.activeTerminalTabId
       ? getTerminalDockTabId(initialTerminalDockState.activeTerminalTabId)
@@ -1161,13 +1162,10 @@ const RightBar: React.FC<RightBarProps> = ({
   }
 
   const beginSidebarResize = useCallback(() => {
-    if (isCollapsed) {
-      dispatch(uiActions.rightBarWidthSet(resolvedRightBarWidth))
-      dispatch(uiActions.rightBarExpanded())
-    }
+    if (isCollapsed) return
 
     setIsResizingSidebar(true)
-  }, [dispatch, isCollapsed, resolvedRightBarWidth])
+  }, [isCollapsed])
 
   const handleSidebarResizeMouseDown = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -2683,7 +2681,7 @@ const RightBar: React.FC<RightBarProps> = ({
       }}
       aria-label='Research Notes'
     >
-      {!isEditorDockOpen && (
+      {!isEditorDockOpen && !isCollapsed && (
         <div
           className='group absolute inset-y-0 left-0 z-30 flex cursor-col-resize select-none items-center justify-center'
           style={{ width: `${RIGHT_BAR_RESIZE_HANDLE_WIDTH_PX}px` }}
@@ -3749,9 +3747,6 @@ const RightBar: React.FC<RightBarProps> = ({
                         {openTerminalTabs.filter(tab => tab.status === 'open' || tab.status === 'launching').length}{' '}
                         running
                       </div>
-                      <div className='mt-1 text-[11px] text-neutral-500 dark:text-neutral-400'>
-                        Launch local shells and reopen them on next app launch.
-                      </div>
                     </div>
                     <button
                       type='button'
@@ -3764,14 +3759,14 @@ const RightBar: React.FC<RightBarProps> = ({
                   </div>
 
                   <div className='mt-2 flex flex-wrap gap-x-3 gap-y-1'>
-                    <button
+                    {/* <button
                       type='button'
                       onClick={() => openNewTerminalDock(currentPath || ccCwd)}
                       disabled={isWeb || !(currentPath || ccCwd)}
                       className='text-[11px] font-medium text-neutral-500 transition-colors hover:text-neutral-800 disabled:opacity-50 dark:text-neutral-400 dark:hover:text-neutral-200'
                     >
                       Current path
-                    </button>
+                    </button> */}
                     {ccCwd && currentPath && currentPath !== ccCwd && (
                       <button
                         type='button'
@@ -3794,54 +3789,69 @@ const RightBar: React.FC<RightBarProps> = ({
                 </div>
 
                 <div className='border-t border-neutral-200/70 px-2 pt-4 dark:border-neutral-800/70'>
-                  <h3 className='text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500 dark:text-neutral-400'>
-                    Preferences
-                  </h3>
-                  <div className='mt-2 divide-y divide-neutral-200/70 dark:divide-neutral-800/70'>
-                    <button
-                      type='button'
-                      onClick={() =>
-                        setTerminalPreferences(current => ({
-                          ...current,
-                          restoreSessionsOnLaunch: !current.restoreSessionsOnLaunch,
-                        }))
-                      }
-                      className='group flex w-full items-start justify-between gap-3 py-1.5 text-left'
-                    >
-                      <div className='min-w-0'>
-                        <div className='text-[11px] font-medium text-neutral-900 dark:text-neutral-100'>
-                          Restore sessions on launch
-                        </div>
-                        <div className='mt-0.5 text-[10px] text-neutral-500 dark:text-neutral-400'>
-                          Reopen saved terminal tabs after restarting Electron.
-                        </div>
-                      </div>
-                      <span className='inline-flex shrink-0 items-center justify-center rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 transition-transform duration-150 group-hover:scale-110 group-focus-visible:scale-110 dark:bg-neutral-800 dark:text-neutral-400'>
-                        {terminalPreferences.restoreSessionsOnLaunch ? 'On' : 'Off'}
-                      </span>
-                    </button>
-                    <button
-                      type='button'
-                      onClick={() =>
-                        setTerminalPreferences(current => ({
-                          ...current,
-                          persistHistory: !current.persistHistory,
-                        }))
-                      }
-                      className='group flex w-full items-start justify-between gap-3 py-1.5 text-left'
-                    >
-                      <div className='min-w-0'>
-                        <div className='text-[11px] font-medium text-neutral-900 dark:text-neutral-100'>
-                          Persist shell history
-                        </div>
-                        <div className='mt-0.5 text-[10px] text-neutral-500 dark:text-neutral-400'>
-                          Save each terminal buffer so restored tabs show previous output.
-                        </div>
-                      </div>
-                      <span className='inline-flex shrink-0 items-center justify-center rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 transition-transform duration-150 group-hover:scale-110 group-focus-visible:scale-110 dark:bg-neutral-800 dark:text-neutral-400'>
-                        {terminalPreferences.persistHistory ? 'On' : 'Off'}
-                      </span>
-                    </button>
+                  <button
+                    type='button'
+                    onClick={() => setIsTerminalPreferencesOpen(value => !value)}
+                    className='flex w-full items-center justify-between gap-2 text-left'
+                    aria-expanded={isTerminalPreferencesOpen}
+                  >
+                    <h3 className='text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500 dark:text-neutral-400'>
+                      Preferences
+                    </h3>
+                    <span className='flex items-center gap-2 text-[10px] text-neutral-500 dark:text-neutral-400'>
+                      {terminalPreferences.restoreSessionsOnLaunch ? 'Restore on' : 'Restore off'} ·{' '}
+                      {terminalPreferences.persistHistory ? 'History on' : 'History off'}
+                      <i
+                        className={`bx bx-chevron-down text-sm transition-transform ${
+                          isTerminalPreferencesOpen ? 'rotate-180' : ''
+                        }`}
+                        aria-hidden='true'
+                      />
+                    </span>
+                  </button>
+                  <div
+                    className={`grid transition-[grid-template-rows,opacity,margin-top] duration-200 ease-in-out ${
+                      isTerminalPreferencesOpen ? 'mt-2 grid-rows-[1fr] opacity-100' : 'mt-0 grid-rows-[0fr] opacity-0'
+                    }`}
+                  >
+                    <div className='min-h-0 overflow-hidden divide-y divide-neutral-200/70 dark:divide-neutral-800/70'>
+                      <button
+                        type='button'
+                        onClick={() =>
+                          setTerminalPreferences(current => ({
+                            ...current,
+                            restoreSessionsOnLaunch: !current.restoreSessionsOnLaunch,
+                          }))
+                        }
+                        className='group flex w-full items-center justify-between gap-3 py-1.5 text-left'
+                        tabIndex={isTerminalPreferencesOpen ? 0 : -1}
+                      >
+                        <span className='min-w-0 text-[11px] font-medium text-neutral-900 dark:text-neutral-100'>
+                          Restore sessions
+                        </span>
+                        <span className='inline-flex shrink-0 items-center justify-center rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 transition-transform duration-150 group-hover:scale-110 group-focus-visible:scale-110 dark:bg-neutral-800 dark:text-neutral-400'>
+                          {terminalPreferences.restoreSessionsOnLaunch ? 'On' : 'Off'}
+                        </span>
+                      </button>
+                      <button
+                        type='button'
+                        onClick={() =>
+                          setTerminalPreferences(current => ({
+                            ...current,
+                            persistHistory: !current.persistHistory,
+                          }))
+                        }
+                        className='group flex w-full items-center justify-between gap-3 py-1.5 text-left'
+                        tabIndex={isTerminalPreferencesOpen ? 0 : -1}
+                      >
+                        <span className='min-w-0 text-[11px] font-medium text-neutral-900 dark:text-neutral-100'>
+                          Persist history
+                        </span>
+                        <span className='inline-flex shrink-0 items-center justify-center rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 transition-transform duration-150 group-hover:scale-110 group-focus-visible:scale-110 dark:bg-neutral-800 dark:text-neutral-400'>
+                          {terminalPreferences.persistHistory ? 'On' : 'Off'}
+                        </span>
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -4151,7 +4161,7 @@ const RightBar: React.FC<RightBarProps> = ({
                       value={localNote}
                       onChange={handleNoteChange}
                       placeholder='Enter research notes for this conversation...'
-                      className='w-full resize-none flex-1'
+                      className='w-full resize-none flex-1 border-0 dark:border-0'
                       minRows={undefined}
                       maxRows={undefined}
                       fillAvailableHeight={true}

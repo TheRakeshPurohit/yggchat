@@ -33,7 +33,7 @@ interface RefreshedTokenPayload {
   accountId: string
 }
 
-function normalizeModel(model: string): string {
+export function normalizeOpenAIChatGPTModel(model: string): string {
   const m = (model || '').toLowerCase().replace(/\s+/g, '-')
 
   if (m.includes('gpt-5.5-pro')) return 'gpt-5.5-pro'
@@ -55,7 +55,7 @@ function normalizeModel(model: string): string {
 }
 
 function shouldUseGPT53StrictTextAssembly(model: string): boolean {
-  return normalizeModel(model) === 'gpt-5.3-codex'
+  return normalizeOpenAIChatGPTModel(model) === 'gpt-5.3-codex'
 }
 
 const GPT53_INTERNAL_PROTOCOL_MARKERS: RegExp[] = [
@@ -693,7 +693,7 @@ function hasImageGenerationIntent(input: ProviderGenerateInput): boolean {
   const imageConfig = input.railwayTurn?.imageConfig
   if (imageConfig && typeof imageConfig === 'object' && Object.keys(imageConfig).length > 0) return true
 
-  const model = normalizeModel(input.modelName).toLowerCase()
+  const model = normalizeOpenAIChatGPTModel(input.modelName).toLowerCase()
   if (model.includes('gpt-image') || model.includes('image')) return true
 
   const text = `${input.userContent || ''}\n${(input.history || [])
@@ -2081,7 +2081,7 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
     logOpenAiChatgpt('info', 'generate start', {
       traceId,
       requestedModel: input.modelName,
-      normalizedModel: normalizeModel(input.modelName),
+      normalizedModel: normalizeOpenAIChatGPTModel(input.modelName),
       userId: input.userId,
       conversationId: input.railwayTurn?.conversationId,
       hasAccessTokenInput: Boolean(input.accessToken),
@@ -2092,7 +2092,7 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
     })
 
     const auth = await this.resolveAuth(input)
-    const model = normalizeModel(input.modelName)
+    const model = normalizeOpenAIChatGPTModel(input.modelName)
     const sessionId = input.railwayTurn?.conversationId?.trim() || traceId
     const requestId = (input.railwayTurn as any)?.runId?.trim?.() || sessionId
     const messages = toCodexMessages(input)

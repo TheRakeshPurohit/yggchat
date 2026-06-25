@@ -1,7 +1,7 @@
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+import { MoreHorizontal } from 'lucide-react'
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Button } from '../Button/button'
 import { getThemeModeColor, useCustomChatTheme, useHtmlDarkMode } from '../ThemeManager/themeConfig'
 
 interface ActionPopoverProps {
@@ -38,6 +38,12 @@ const getPopoverTransformOrigin = (popoverTop: number, button: HTMLButtonElement
   return popoverTop < button.getBoundingClientRect().top ? 'bottom center' : 'top center'
 }
 
+const actionRowClass =
+  'flex flex-wrap items-center justify-center gap-2 rounded-full bg-white/35 p-1.5 backdrop-blur-xl dark:bg-black/20 [&_button]:min-h-10 [&_button]:rounded-full [&_button]:px-3.5 [&_button]:py-2 [&_button]:text-sm [&_button]:transition-all [&_button]:duration-200 [&_button:hover]:-translate-y-0.5 [&_button:active]:translate-y-0 [&_button:active]:scale-95'
+
+const footerClass =
+  'mt-2 min-w-[280px] rounded-[1.75rem] bg-white/45 p-3 text-stone-700 backdrop-blur-xl dark:bg-black/20 dark:text-stone-200 [&_h1]:text-sm [&_h1]:font-semibold [&_h1]:tracking-tight [&_input]:rounded-full [&_input]:border-transparent [&_input]:bg-white/70 [&_input]:backdrop-blur-xl [&_input]:transition [&_input]:focus:ring-2 [&_input]:focus:ring-blue-400/30 dark:[&_input]:bg-yBlack-900/70 dark:[&_input]:focus:ring-orange-400/25 [&_label]:font-medium [&_button]:rounded-full [&_button]:transition-all [&_button:hover]:-translate-y-0.5 [&_button:active]:translate-y-0 [&_button:active]:scale-95'
+
 export const ActionPopover: React.FC<ActionPopoverProps> = ({ children, isActive = false, footer }) => {
   const [open, setOpen] = useState(false)
   const shouldReduceMotion = useReducedMotion()
@@ -47,16 +53,34 @@ export const ActionPopover: React.FC<ActionPopoverProps> = ({ children, isActive
   const [popoverPosition, setPopoverPosition] = useState<PopoverPosition | null>(null)
   const { theme: customTheme, enabled: customThemeEnabled } = useCustomChatTheme()
   const isDarkMode = useHtmlDarkMode()
-  const actionPopoverBorderColor = customThemeEnabled
-    ? getThemeModeColor(customTheme.colors.actionPopoverBorder, isDarkMode)
-    : isDarkMode
-      ? 'rgba(194, 65, 12, 0.4)'
-      : '#dbeafe'
-  const activeButtonBorderColor = customThemeEnabled
-    ? actionPopoverBorderColor
-    : isDarkMode
-      ? 'rgba(194, 65, 12, 0.5)'
-      : '#93c5fd'
+  const popoverSurfaceStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesCardBg, isDarkMode),
+        color: getThemeModeColor(customTheme.colors.toolJobsPrimaryText, isDarkMode),
+      }
+    : undefined
+  const actionRowStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesInnerCardBg, isDarkMode),
+      }
+    : undefined
+  const footerStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesListBg, isDarkMode),
+        color: getThemeModeColor(customTheme.colors.toolJobsPrimaryText, isDarkMode),
+      }
+    : undefined
+  const triggerStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? isActive || open
+      ? {
+          backgroundColor: getThemeModeColor(customTheme.colors.composerToggleActiveBg, isDarkMode),
+          color: getThemeModeColor(customTheme.colors.composerToggleActiveText, isDarkMode),
+        }
+      : {
+          backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesButtonBg, isDarkMode),
+          color: getThemeModeColor(customTheme.colors.settingsCustomThemesButtonText, isDarkMode),
+        }
+    : undefined
 
   // Close on outside click
   useEffect(() => {
@@ -65,6 +89,7 @@ export const ActionPopover: React.FC<ActionPopoverProps> = ({ children, isActive
       const t = e.target as Node
       if (btnRef.current?.contains(t)) return
       if (popoverRef.current?.contains(t)) return
+      if (t instanceof Element && t.closest('[data-ygg-overlay="select-dropdown"]')) return
       setOpen(false)
     }
     document.addEventListener('click', onDocClick)
@@ -195,23 +220,29 @@ export const ActionPopover: React.FC<ActionPopoverProps> = ({ children, isActive
 
   return (
     <div className='relative'>
-      <Button
+      <button
         ref={btnRef}
-        variant='outline2'
-        size='large'
+        type='button'
         onClick={handleToggle}
-        className={isActive ? ' ' : ' '}
-        // style={isActive ? {  } : undefined}
+        className={`group/action-popover relative flex h-9 w-9 items-center justify-center rounded-full bg-white/80 text-stone-700 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-105 hover:bg-white hover:text-stone-950 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-50 dark:bg-yBlack-900/80 dark:text-stone-200 dark:hover:bg-neutral-900 dark:hover:text-white dark:focus-visible:ring-orange-400/70 dark:focus-visible:ring-offset-yBlack-900 ${
+          isActive || open
+            ? 'bg-blue-50 text-blue-700 hover:bg-blue-100 hover:text-blue-800 dark:bg-orange-500/15 dark:text-orange-100 dark:hover:bg-orange-500/25 dark:hover:text-orange-50'
+            : ''
+        }`}
+        style={triggerStyle}
         title='Toggle options'
+        aria-label='Toggle chat options'
         aria-haspopup='true'
         aria-expanded={open}
+        aria-pressed={open}
       >
-        <i
-          className='bx bx-dots-horizontal-rounded text-[20px]'
-          style={{ color: activeButtonBorderColor }}
+        <MoreHorizontal
+          size={18}
+          strokeWidth={2.25}
+          className='transition-transform duration-200 group-hover/action-popover:scale-110'
           aria-hidden='true'
         />
-      </Button>
+      </button>
 
       {popoverPosition &&
         createPortal(
@@ -220,16 +251,22 @@ export const ActionPopover: React.FC<ActionPopoverProps> = ({ children, isActive
               <div
                 ref={popoverRef}
                 key='action-popover-measure'
-                className='fixed z-[1000] rounded-2xl border-2 bg-white/90 p-1 shadow-xl backdrop-blur-md dark:bg-neutral-900/60'
+                className='fixed z-[1000] overflow-visible rounded-[2rem] bg-white/70 p-2 backdrop-blur-2xl dark:bg-yBlack-900/70'
                 style={{
                   top: `${popoverPosition.top}px`,
                   left: `${popoverPosition.left}px`,
-                  borderColor: actionPopoverBorderColor,
+                  ...popoverSurfaceStyle,
                   visibility: 'hidden',
                 }}
               >
-                <div className='flex items-center gap-1 px-1 py-0.5'>{children}</div>
-                {footer && <div className='px-2 pb-2'>{footer}</div>}
+                <div className={actionRowClass} style={actionRowStyle}>
+                  {children}
+                </div>
+                {footer && (
+                  <div className={footerClass} style={footerStyle}>
+                    {footer}
+                  </div>
+                )}
               </div>
             )}
 
@@ -239,15 +276,15 @@ export const ActionPopover: React.FC<ActionPopoverProps> = ({ children, isActive
                   ref={popoverRef}
                   key='action-popover-shell'
                   layout
-                  className='fixed z-[1000] overflow-visible rounded-2xl border-2 bg-white/90 p-1 shadow-xl backdrop-blur-md will-change-[transform,opacity] dark:bg-neutral-900/60'
-                  initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.965 }}
+                  className='fixed z-[1000] overflow-visible rounded-[2rem] bg-white/70 p-2 backdrop-blur-2xl will-change-[transform,opacity] dark:bg-yBlack-900/70'
+                  initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.94 }}
                   animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0, scale: 1 }}
-                  exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.965 }}
+                  exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.94 }}
                   transition={prefersReducedMotion ? collapseSoftTransition : springTransition}
                   style={{
                     top: `${popoverPosition.top}px`,
                     left: `${popoverPosition.left}px`,
-                    borderColor: actionPopoverBorderColor,
+                    ...popoverSurfaceStyle,
                     transformOrigin: getPopoverTransformOrigin(popoverPosition.top, btnRef.current),
                   }}
                 >
@@ -257,8 +294,14 @@ export const ActionPopover: React.FC<ActionPopoverProps> = ({ children, isActive
                     exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.985 }}
                     transition={prefersReducedMotion ? softTransition : internalTransition}
                   >
-                    <div className='flex items-center gap-1 px-1 py-0.5'>{children}</div>
-                    {footer && <div className='px-2 pb-2'>{footer}</div>}
+                    <div className={actionRowClass} style={actionRowStyle}>
+                      {children}
+                    </div>
+                    {footer && (
+                      <div className={footerClass} style={footerStyle}>
+                        {footer}
+                      </div>
+                    )}
                   </motion.div>
                 </motion.div>
               )}

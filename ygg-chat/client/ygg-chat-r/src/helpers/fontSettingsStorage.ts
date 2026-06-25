@@ -6,7 +6,10 @@ const LOCAL_FONT_FAMILY_NAME = 'YggLocalFont'
 
 export const FONT_SETTINGS_STORAGE_KEY = STORAGE_KEY
 export const FONT_SETTINGS_CHANGE_EVENT = 'ygg-font-settings-change'
-export const DEFAULT_APP_FONT_STACK = "'DM Sans', Inter, system-ui, sans-serif"
+export const DEFAULT_GOOGLE_FONT_URL =
+  'https://fonts.googleapis.com/css2?family=Geist:ital,wght@0,100..900;1,100..900&family=Ubuntu:ital,wght@0,300;0,400;0,500;0,700;1,300;1,400;1,500;1,700&display=swap'
+export const DEFAULT_GOOGLE_FONT_FAMILY = 'Geist'
+export const DEFAULT_APP_FONT_STACK = "'Geist', 'Ubuntu', Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
 export const MAX_FONT_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024 // 5MB
 
 export type AppFontSource = 'default' | 'google' | 'local'
@@ -25,9 +28,9 @@ export interface GoogleFontValidationResult {
 }
 
 const DEFAULT_SETTINGS: AppFontSettings = {
-  source: 'default',
-  googleFontUrl: null,
-  googleFontFamily: null,
+  source: 'google',
+  googleFontUrl: DEFAULT_GOOGLE_FONT_URL,
+  googleFontFamily: DEFAULT_GOOGLE_FONT_FAMILY,
 }
 
 const GOOGLE_FONT_CSS_PATHS = new Set(['/css', '/css2'])
@@ -37,7 +40,7 @@ const sanitizeFontFamily = (family: string): string => family.replace(/["']/g, '
 const toFontStack = (family: string): string => {
   const cleaned = sanitizeFontFamily(family)
   if (!cleaned) return DEFAULT_APP_FONT_STACK
-  return `'${cleaned}', Inter, system-ui, sans-serif`
+  return `'${cleaned}', 'Ubuntu', Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`
 }
 
 const removeGoogleFontLink = () => {

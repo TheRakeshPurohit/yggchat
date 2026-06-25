@@ -328,6 +328,7 @@ export const Select: React.FC<SelectProps> = ({
                 ref={listRef}
                 role='listbox'
                 tabIndex={-1}
+                data-ygg-overlay='select-dropdown'
                 layout
                 className={`fixed flex flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white/60 shadow-xl backdrop-blur-md will-change-[transform,opacity] dark:border-0 dark:border-neutral-700 dark:bg-neutral-950/45`}
                 initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: dropdownPosition.bottom ? -8 : 8, scale: 0.965 }}
@@ -398,7 +399,11 @@ export const Select: React.FC<SelectProps> = ({
                           e.stopPropagation()
                           if (!optDisabled) handleSelect(opt.value)
                         }}
-                        onClick={() => !optDisabled && handleSelect(opt.value)}
+                        onClick={e => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          if (!optDisabled) handleSelect(opt.value)
+                        }}
                         className={`flex-1 hover:scale-103 transition-all line-clamp-3 justify-start text-left text-[13px] sm:text-[13px] md:text-[13px] lg:text-[14px] 2xl:text-[14px] 3xl:text-[14px] 4xl:text-[14px] ${isSelected ? 'font-medium' : ''} ${optDisabled ? 'cursor-not-allowed' : 'hover:bg-neutral-200'}`}
                         title={optDisabled ? 'Upgrade to access this model' : undefined}
                       >

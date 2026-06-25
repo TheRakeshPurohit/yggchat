@@ -55,29 +55,53 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
 
   return (
     <div
-      className='fixed inset-0 z-[100] flex items-center justify-center bg-black/50'
+      className='fixed inset-0 z-[100] flex items-center justify-center bg-black/45 px-4 backdrop-blur-sm'
       onClick={onCancel}
       style={overlayBackgroundColor ? { backgroundColor: overlayBackgroundColor } : undefined}
     >
       <div
-        className='w-[90%] max-w-sm rounded-2xl border p-6 shadow-xl'
+        className='w-full max-w-sm rounded-[2rem] border border-white/45 bg-white/80 p-6 backdrop-blur-2xl dark:border-white/10 dark:bg-yBlack-900/80'
         onClick={e => e.stopPropagation()}
         style={{
-          backgroundColor: backgroundColor ?? 'var(--color-white, #ffffff)',
-          borderColor: borderColor ?? 'rgba(0,0,0,0.08)',
+          backgroundColor,
+          borderColor,
         }}
       >
-        <h3 className='mb-6 text-[20px] font-semibold' style={{ color: titleTextColor ?? 'rgb(23 23 23)' }}>
+        <h3 className='mb-2 text-[20px] font-semibold tracking-tight' style={{ color: titleTextColor ?? 'rgb(23 23 23)' }}>
           {title}
         </h3>
-        <p className='mb-4 text-[14px]' style={{ color: bodyTextColor ?? 'rgb(64 64 64)' }}>
+        <p className='mb-5 text-[14px] leading-6' style={{ color: bodyTextColor ?? 'rgb(64 64 64)' }}>
           {description}
         </p>
 
         {showDontAskAgain && onDontAskAgainChange && (
-          <label className='mb-4 flex items-center gap-2 text-sm' style={{ color: checkboxTextColor ?? bodyTextColor ?? 'rgb(64 64 64)' }}>
-            <input type='checkbox' checked={dontAskAgain} onChange={e => onDontAskAgainChange(e.target.checked)} />
-            {dontAskAgainLabel}
+          <label
+            className='mb-5 flex items-center gap-2 rounded-full bg-black/5 px-3 py-2 text-sm backdrop-blur-xl dark:bg-white/5'
+            style={{ color: checkboxTextColor ?? bodyTextColor ?? 'rgb(64 64 64)' }}
+          >
+            <input
+              type='checkbox'
+              checked={dontAskAgain}
+              onChange={e => onDontAskAgainChange(e.target.checked)}
+              className='peer sr-only'
+            />
+            <span
+              aria-hidden='true'
+              className='flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/70 text-white transition-all duration-150 ring-1 ring-black/10 peer-checked:bg-red-600 peer-checked:ring-red-600 peer-focus-visible:ring-2 peer-focus-visible:ring-red-400/50 dark:bg-white/10 dark:ring-white/10'
+            >
+              <svg
+                className='h-3.5 w-3.5 opacity-0 transition-opacity duration-150 peer-checked:opacity-100'
+                viewBox='0 0 20 20'
+                fill='none'
+                stroke='currentColor'
+                strokeWidth={3}
+                strokeLinecap='round'
+                strokeLinejoin='round'
+              >
+                <path d='M5 10.5 8.2 14 15 6' />
+              </svg>
+            </span>
+            <span>{dontAskAgainLabel}</span>
           </label>
         )}
 
@@ -85,10 +109,10 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
           <button
             type='button'
             onClick={onCancel}
-            className='rounded-lg border px-4 py-2 text-sm font-medium transition-all duration-150 hover:opacity-90 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50'
+            className='rounded-full border border-transparent bg-white/60 px-4 py-2 text-sm font-medium backdrop-blur-xl transition-all duration-150 hover:-translate-y-0.5 hover:bg-white/80 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 dark:bg-white/10 dark:hover:bg-white/15'
             style={{
-              backgroundColor: cancelButtonBackgroundColor ?? 'transparent',
-              borderColor: cancelButtonBorderColor ?? 'rgb(212 212 212)',
+              backgroundColor: cancelButtonBackgroundColor,
+              borderColor: cancelButtonBorderColor,
               color: cancelButtonTextColor ?? 'rgb(64 64 64)',
             }}
           >
@@ -97,10 +121,10 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
           <button
             type='button'
             onClick={onConfirm}
-            className='rounded-lg border px-4 py-2 text-sm font-medium transition-all duration-150 hover:opacity-90 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50'
+            className='rounded-full border border-transparent bg-red-600 px-4 py-2 text-sm font-medium text-white transition-all duration-150 hover:-translate-y-0.5 hover:bg-red-500 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50'
             style={{
-              backgroundColor: confirmButtonBackgroundColor ?? 'rgb(220 38 38)',
-              borderColor: confirmButtonBorderColor ?? 'rgb(185 28 28)',
+              backgroundColor: confirmButtonBackgroundColor,
+              borderColor: confirmButtonBorderColor,
               color: confirmButtonTextColor ?? '#ffffff',
             }}
           >

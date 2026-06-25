@@ -2,7 +2,6 @@ import Conf from 'conf'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell, Tray, webContents } from 'electron'
 import autoUpdaterPkg from 'electron-updater'
 import fs from 'fs'
-import { randomBytes } from 'crypto'
 import os from 'os'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -55,9 +54,6 @@ const LOCAL_SERVER_ALLOW_EPHEMERAL_PORT = true
 const BROWSER_SETTINGS_STORAGE_KEY = 'ygg_browser_settings'
 const DEFAULT_GUEST_DEVTOOLS_ENABLED = true
 
-if (!process.env.YGG_HERMES_MCP_AUTH_TOKEN?.trim()) {
-  process.env.YGG_HERMES_MCP_AUTH_TOKEN = randomBytes(32).toString('hex')
-}
 
 function isPrivateIpv4(address: string): boolean {
   if (address.startsWith('10.')) return true
@@ -238,7 +234,6 @@ function getClientErrorLogPath(): string {
 }
 
 const TRUTHY_ENV_VALUES = new Set(['1', 'true', 'yes', 'on'])
-const HERMES_RUNTIME_SETTINGS_STORAGE_KEY = 'ygg_hermes_runtime_settings'
 
 function isTruthyEnv(value: string | undefined): boolean {
   if (!value) return false
@@ -416,41 +411,6 @@ function isGuestBrowserDevToolsEnabled(): boolean {
   }
 
   return DEFAULT_GUEST_DEVTOOLS_ENABLED
-}
-
-function applyHermesRuntimeSettingsToEnv(rawSettings: any): void {
-
-  const launchMode =
-    rawSettings?.launchMode === 'native' || rawSettings?.launchMode === 'wsl' || rawSettings?.launchMode === 'auto'
-      ? rawSettings.launchMode
-      : 'auto'
-  const wslDistro = typeof rawSettings?.wslDistro === 'string' ? rawSettings.wslDistro.trim() : ''
-
-  process.env.HERMES_LAUNCH_MODE = launchMode
-
-  if (wslDistro) {
-    process.env.HERMES_WSL_DISTRO = wslDistro
-  } else {
-    delete process.env.HERMES_WSL_DISTRO
-  }
-
-  if (launchMode === 'wsl') {
-    process.env.HERMES_USE_WSL = 'true'
-  } else {
-    delete process.env.HERMES_USE_WSL
-  }
-}
-
-function syncHermesRuntimeSettingsFromStore(): void {
-  try {
-    const storedSettings = getFromStore(HERMES_RUNTIME_SETTINGS_STORAGE_KEY)
-    if (!storedSettings || typeof storedSettings !== 'object') {
-      return
-    }
-    applyHermesRuntimeSettingsToEnv(storedSettings)
-  } catch (error) {
-    console.error('[Electron] Failed to sync Hermes runtime settings from storage:', error)
-  }
 }
 
 function syncLmStudioBaseUrlFromStore(): void {
@@ -897,7 +857,6 @@ function handleOAuthCallback(url: string) {
 app.whenReady().then(async () => {
   try {
     await initializeStore()
-    syncHermesRuntimeSettingsFromStore()
     syncLmStudioBaseUrlFromStore()
     process.env.YGG_APP_USER_DATA = app.getPath('userData')
     const managedHooksDirectory = await ensureManagedHooksInitialized()
@@ -1072,9 +1031,6 @@ ipcMain.handle('storage:set', async (_event, key: string, value: any) => {
     if (value === null || value === undefined) {
       // Delete key if value is null/undefined
       const success = deleteFromStore(key)
-      if (key === HERMES_RUNTIME_SETTINGS_STORAGE_KEY) {
-        applyHermesRuntimeSettingsToEnv(null)
-      }
       if (key === 'ygg_provider_settings') {
         syncLmStudioBaseUrlFromStore()
       }
@@ -1082,9 +1038,6 @@ ipcMain.handle('storage:set', async (_event, key: string, value: any) => {
       return { success }
     } else {
       const success = setInStore(key, value)
-      if (key === HERMES_RUNTIME_SETTINGS_STORAGE_KEY) {
-        applyHermesRuntimeSettingsToEnv(value)
-      }
       if (key === 'ygg_provider_settings') {
         syncLmStudioBaseUrlFromStore()
       }
@@ -1108,7 +1061,6 @@ ipcMain.handle('storage:clear', async () => {
 
   try {
     const success = clearStore()
-    applyHermesRuntimeSettingsToEnv(null)
     syncLmStudioBaseUrlFromStore()
     return { success }
   } catch (error) {

@@ -96,8 +96,18 @@ export type HeadlessSseEvent =
       maxTurns: number
       continued?: boolean
     }
-  | { type: 'complete'; message?: MobileMessage }
-  | { type: 'error'; error: string }
+  | { type: 'complete'; message?: MobileMessage; providerError?: boolean }
+  | {
+      type: 'error'
+      error: string
+      provider?: string
+      modelName?: string
+      retryExhausted?: boolean
+      status?: number
+      errorType?: string
+      resetAt?: number
+      assistantMessage?: MobileMessage
+    }
   | Record<string, unknown>
 
 export interface MobileCustomTool {
@@ -120,6 +130,7 @@ export type MobileLocalFileSearchResponse = LocalFileSearchResponse
 
 export type MobileProviderName = 'openaichatgpt' | 'openrouter' | 'lmstudio' | 'zai' | 'bedrock'
 export type MobileOperationMode = 'plan' | 'execute'
+export type MobileReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface MobileProviderModelInfo {
   name: MobileProviderName

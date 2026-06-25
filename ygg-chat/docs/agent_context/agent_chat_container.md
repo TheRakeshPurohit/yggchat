@@ -158,11 +158,6 @@ Normal send flow:
 7. It creates optimistic user state and dispatches `sendMessage()` with explicit `streamId`.
 8. Success relies on SSE/user-message chunks and reducers rather than immediately refetching.
 
-Hermes/local-agent send flow:
-- Enabled via local `hermesMode` when desktop/Electron supports it.
-- Uses `sendHermesMessage()` with `cwd`, model, parent, and nearest Hermes session context.
-- Branching can fork/resume Hermes sessions based on nearest `ex_agent_session_id`.
-
 Slash commands currently include:
 - `/status-openai`
 - `/compactify`
@@ -216,7 +211,6 @@ Mobile layout may render Heimdall differently/conditionally, but most desktop tr
 Important Chat-owned keys/events:
 - `chat:heimdallVisible`
 - `chat:leftWidthPct`
-- `chat:agentMode`
 - `chat:fontSizeOffset`
 - `chat:groupToolReasoningRuns`
 - `chat:virtualRowsV2`
@@ -262,7 +256,7 @@ When adding new persistent UI settings, prefer helper modules in `src/helpers/*S
 
 ### Change composer send behaviour
 
-1. Update normal, retrigger, and Hermes paths deliberately.
+1. Update normal and retrigger paths deliberately.
 2. Preserve file mention replacement and IDE context append.
 3. Preserve auto-compaction guard if send should include compacted context.
 4. Preserve optimistic message clearing on error.

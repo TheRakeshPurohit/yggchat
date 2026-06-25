@@ -68,5 +68,15 @@ export type HeadlessStreamEvent =
   | { type: 'chunk'; part: 'tool_call'; toolCall: any }
   | { type: 'chunk'; part: 'tool_result'; toolResult: any }
   | { type: 'assistant_message_persisted'; message: any }
-  | { type: 'complete'; message: any }
-  | { type: 'error'; error: string }
+  | { type: 'complete'; message: any; providerError?: boolean }
+  | {
+      type: 'error'
+      error: string
+      provider?: string
+      modelName?: string
+      retryExhausted?: boolean
+      status?: number
+      errorType?: string
+      resetAt?: number
+      assistantMessage?: any
+    }

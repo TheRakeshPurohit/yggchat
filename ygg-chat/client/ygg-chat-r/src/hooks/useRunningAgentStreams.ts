@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Message, StreamEvent, StreamState } from '../features/chats/chatTypes'
+import type { Message, StreamEvent, StreamLifecycleStatus, StreamState } from '../features/chats/chatTypes'
 import type { Conversation } from '../features/conversations/conversationTypes'
 import { useAppSelector } from './redux'
 import type { ResearchNoteItem } from './useQueries'
@@ -15,6 +15,16 @@ export type AgentStreamListItem = {
   anchorMessageId: string | null
   hasError: boolean
   createdAt: string
+  status: StreamLifecycleStatus
+  triggerUserMessageId: string | null
+  currentBranchAnchorMessageId: string | null
+  branchAnchorMessageId: string | null
+  liveMessageId: string | null
+  streamingMessageId: string | null
+  lastCompletedMessageId: string | null
+  finalMessageId: string | null
+  messageId: string | null
+  originMessageId: string | null
   rootMessageId: string | null
   parentMessageId: string | null
   parentMessageText: string | null
@@ -107,11 +117,22 @@ const normalizeMessagePreview = (message: Message | null | undefined): string | 
 }
 
 const resolveParentMessage = (messagesById: Map<string, Message>, stream: StreamState): Message | null => {
+  const explicitTriggerMessage = stream.triggerUserMessageId
+    ? messagesById.get(String(stream.triggerUserMessageId))
+    : null
+  if (explicitTriggerMessage?.role === 'user') return explicitTriggerMessage
+
   const candidateIds = [
+    stream.triggerUserMessageId,
     stream.lineage.originMessageId,
-    stream.lineage.rootMessageId,
+    stream.currentBranchAnchorMessageId,
     stream.branchAnchorMessageId,
+    stream.liveMessageId,
+    stream.streamingMessageId,
+    stream.lastCompletedMessageId,
+    stream.finalMessageId,
     stream.messageId,
+    stream.lineage.rootMessageId,
   ]
 
   const visitedIds = new Set<string>()
@@ -170,8 +191,13 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
       const convo = streamConversationId ? conversationsById.get(streamConversationId) : null
       const note = streamConversationId ? notesByConversationId.get(streamConversationId) : null
       const anchorMessageId =
+        stream.liveMessageId ||
         stream.streamingMessageId ||
+        stream.currentBranchAnchorMessageId ||
+        stream.lastCompletedMessageId ||
+        stream.finalMessageId ||
         stream.messageId ||
+        stream.triggerUserMessageId ||
         stream.lineage.originMessageId ||
         stream.lineage.rootMessageId ||
         null
@@ -188,6 +214,16 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
         anchorMessageId: anchorMessageId ? String(anchorMessageId) : null,
         hasError: Boolean(stream.error),
         createdAt: stream.createdAt,
+        status: stream.status,
+        triggerUserMessageId: stream.triggerUserMessageId ? String(stream.triggerUserMessageId) : null,
+        currentBranchAnchorMessageId: stream.currentBranchAnchorMessageId ? String(stream.currentBranchAnchorMessageId) : null,
+        branchAnchorMessageId: stream.branchAnchorMessageId ? String(stream.branchAnchorMessageId) : null,
+        liveMessageId: stream.liveMessageId ? String(stream.liveMessageId) : null,
+        streamingMessageId: stream.streamingMessageId ? String(stream.streamingMessageId) : null,
+        lastCompletedMessageId: stream.lastCompletedMessageId ? String(stream.lastCompletedMessageId) : null,
+        finalMessageId: stream.finalMessageId ? String(stream.finalMessageId) : null,
+        messageId: stream.messageId ? String(stream.messageId) : null,
+        originMessageId: stream.lineage.originMessageId ? String(stream.lineage.originMessageId) : null,
         rootMessageId: stream.lineage.rootMessageId ? String(stream.lineage.rootMessageId) : null,
         parentMessageId: parentMessage?.id ? String(parentMessage.id) : null,
         parentMessageText,
@@ -210,7 +246,7 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
     }
 
     return streams
-      .sort((a, b) => a.stream.createdAt.localeCompare(b.stream.createdAt))
+      .sort((a, b) => b.stream.createdAt.localeCompare(a.stream.createdAt))
       .map((entry, index) => buildAgentStreamListItem(entry.streamId, entry.stream, null, index))
   }, [buildAgentStreamListItem, streamingRoot.activeIds, streamingRoot.byId])
 
@@ -238,8 +274,8 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
         const incomingById = new Map(completedItems.map(item => [item.streamId, item]))
         const merged = [...previous.filter(item => !incomingById.has(item.streamId)), ...completedItems]
         return merged
-          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-          .slice(-40)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+          .slice(0, 40)
           .map((item, index) => ({ ...item, displayName: `agent-${index + 1}` }))
       })
     }

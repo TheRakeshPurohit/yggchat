@@ -208,12 +208,14 @@ export const selectCurrentViewStream = createSelector(
 
         const candidateIds = [
           stream.liveMessageId ?? stream.streamingMessageId,
+          stream.currentBranchAnchorMessageId,
           stream.branchAnchorMessageId,
           stream.lastCompletedMessageId,
           stream.finalMessageId,
           stream.messageId,
-          stream.lineage.rootMessageId,
+          stream.triggerUserMessageId,
           stream.lineage.originMessageId,
+          stream.lineage.rootMessageId,
         ]
 
         for (const candidate of candidateIds) {

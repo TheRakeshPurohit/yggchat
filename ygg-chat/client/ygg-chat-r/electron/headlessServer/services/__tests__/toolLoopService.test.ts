@@ -118,7 +118,9 @@ class FakeProviderRouter {
   async generate(provider: string, input: any): Promise<any> {
     this.calls.push({ provider, input })
     if (this.queuedOutputs.length > 0) {
-      return this.queuedOutputs.shift()
+      const next = this.queuedOutputs.shift()
+      if (next instanceof Error) throw next
+      return next
     }
     return { content: 'default' }
   }
@@ -196,6 +198,46 @@ describeIfSqlite('ToolLoopService', () => {
     expect(providerRouter.calls[1].input.railwayTurn?.previousResponseId).toBeUndefined()
     expect(providerRouter.calls[1].input.history.some((entry: any) => entry.role === 'assistant')).toBe(true)
     expect(providerRouter.calls[1].input.history.some((entry: any) => entry.role === 'tool' && entry.tool_call_id === 'call-1')).toBe(true)
+  })
+
+  it('persists a user-facing assistant response when OpenAI fails after retries', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue(
+      new Error(
+        'ChatGPT backend request failed (429): {"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_at":1782168563}}'
+      )
+    )
+
+    const service = new ToolLoopService({
+      messageRepo,
+      providerRouter: providerRouter as unknown as ProviderRouter,
+      maxTurns: 3,
+    })
+
+    const events: any[] = []
+    await expect(
+      service.run(
+        {
+          provider: 'openaichatgpt',
+          modelName: 'gpt-5.4-mini',
+          conversationId: 'c1',
+          assistantParentId: null,
+          history: [],
+          userContent: 'hello',
+        },
+        event => events.push(event)
+      )
+    ).rejects.toMatchObject({ name: 'ProviderErrorAssistantResponse' })
+
+    const messages = statements.getMessagesByConversationId.all('c1') as any[]
+    const assistant = messages.find((msg: any) => msg.role === 'assistant')
+    expect(assistant.content).toContain('I could not complete the OpenAI ChatGPT (gpt-5.4-mini) response after retrying')
+    expect(assistant.content).toContain('The usage limit has been reached')
+    expect(assistant.content).toContain('HTTP status: 429')
+    expect(assistant.content).toContain('Error type: usage_limit_reached')
+    expect(events.some((evt: any) => evt.type === 'chunk' && evt.part === 'text' && evt.delta.includes('usage limit'))).toBe(true)
+    expect(events.some((evt: any) => evt.type === 'assistant_message_persisted' && evt.message.id === assistant.id)).toBe(true)
+    expect(events.some((evt: any) => evt.type === 'error')).toBe(false)
   })
 
   it('continues loop when all tool executions fail', async () => {

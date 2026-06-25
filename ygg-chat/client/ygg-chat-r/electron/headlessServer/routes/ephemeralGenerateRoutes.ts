@@ -3,7 +3,7 @@ import { normalizeAuthorizationToken, syncOpenRouterTokenFromElectronSession } f
 import { LmStudioProvider } from '../providers/lmStudioProvider.js'
 import { HyperRouterBedrockProvider } from '../providers/hyperRouterBedrockProvider.js'
 import { HyperRouterZaiProvider } from '../providers/hyperRouterZaiProvider.js'
-import { OpenAiChatgptProvider } from '../providers/openaiChatgptProvider.js'
+import { OpenAiChatgptProvider, normalizeOpenAIChatGPTModel } from '../providers/openaiChatgptProvider.js'
 import type { ProviderGenerateOutput, ProviderToolDefinition } from '../providers/openRouterProvider.js'
 import type { ProviderTokenStore } from '../providers/tokenStore.js'
 import { normalizeProviderRoute, type ProviderRoute } from '../services/providerRouter.js'
@@ -98,7 +98,7 @@ function normalizeModelName(rawModelName: any, provider: ProviderRoute): string 
   const raw = typeof rawModelName === 'string' && rawModelName.trim() ? rawModelName.trim() : fallback
 
   if (provider === 'openaichatgpt') {
-    return raw.replace(/^(openai|openaichatgpt)\//i, '') || fallback
+    return normalizeOpenAIChatGPTModel(raw) || fallback
   }
 
   if (provider === 'lmstudio') {

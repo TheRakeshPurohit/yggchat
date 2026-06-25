@@ -216,7 +216,7 @@ Renderer-side fallback `buildTreeFromMessages()` in `chatActions.ts` can build a
 
 ### Normal send
 
-- `Chat.tsx` dispatches `sendMessage` or `sendHermesMessage` with `parent`/`parentId` from the current path.
+- `Chat.tsx` dispatches `sendMessage` with `parent` from the current path.
 - The thunk persists a user message, receives/persists assistant/tool messages, and dispatches stream/reducer events.
 - Reducers update flat message state and may auto-switch `currentPath` when a user branch is created.
 
@@ -225,14 +225,15 @@ Renderer-side fallback `buildTreeFromMessages()` in `chatActions.ts` can build a
 - `Chat.tsx` `submitMessageAsBranch()` computes a branch parent:
   - if editing/branching from an assistant/ex_agent message, branch under that message's parent or from that message depending on action;
   - otherwise use the selected/original parent.
-- It dispatches `editMessageWithBranching` or `sendHermesMessage` with explicit branch context.
+- It dispatches `editMessageWithBranching` with explicit branch context.
 
 ### Bulk insert / copying selected nodes
 
-- `insertBulkMessages` sends an ordered list of simplified message payloads to `/messages/bulk`.
-- Local/headless bulk endpoints initialize `lastMessageId = null`.
-- The first inserted copy is a top-level root (`parent_id = null`); each subsequent copied message becomes a child of the previous inserted copy.
-- This preserves a selected linear chain, but does not preserve arbitrary branching inside the copied selection.
+- `insertBulkMessages` sends message clone payloads to `/messages/bulk`.
+- Heimdall transfer payloads include `source_id` and `parent_source_id` so endpoints can remap selected source relationships to fresh target message IDs.
+- Local/headless bulk endpoints insert structured payloads with `parent_id = newIdBySourceId[parent_source_id]`, preserving the selected branch shape.
+- If a selected message's parent is outside the selection, the copied message is inserted as a top-level root (`parent_id = null`).
+- Payloads without clone parent metadata retain the legacy fallback: first copy is top-level and each subsequent copy becomes a child of the previous inserted copy.
 
 ### Delete
 

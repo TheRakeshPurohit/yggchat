@@ -65,9 +65,26 @@ describe('registerProviderAuthRoutes', () => {
     expect(tokenStore.get('openaichatgpt', 'u1')?.accountId).toBe('acct-1')
     expect(tokenStore.get('openaichatgpt', 'u1')?.accessToken).toBe('token.without.jwt.claim')
 
+    const putBootstrapToken = await postJson(baseUrl, '/api/provider-auth/openai/token', {
+      userId: 'electron-openai-chatgpt',
+      accessToken: 'bootstrap.token.without.jwt.claim',
+      accountId: 'acct-bootstrap',
+      refreshToken: 'ref-bootstrap',
+    })
+    expect(putBootstrapToken.status).toBe(200)
+    expect(tokenStore.get('openaichatgpt', 'electron-openai-chatgpt')?.accountId).toBe('acct-bootstrap')
+
     const delToken = await deleteRequest(baseUrl, '/api/provider-auth/openai/token?userId=u1')
     expect(delToken.status).toBe(200)
     expect(tokenStore.get('openaichatgpt', 'u1')).toBeNull()
+    expect(tokenStore.get('openaichatgpt', 'electron-openai-chatgpt')).not.toBeNull()
+
+    const delBootstrapToken = await deleteRequest(
+      baseUrl,
+      '/api/provider-auth/openai/token?userId=electron-openai-chatgpt'
+    )
+    expect(delBootstrapToken.status).toBe(200)
+    expect(tokenStore.get('openaichatgpt', 'electron-openai-chatgpt')).toBeNull()
   })
 
   it('stores and clears openrouter token records', async () => {

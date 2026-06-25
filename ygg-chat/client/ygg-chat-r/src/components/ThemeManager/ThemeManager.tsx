@@ -3,6 +3,7 @@ import {
   type ChatThemeRoleKey,
   type CustomChatTheme,
   createDefaultCustomChatTheme,
+  getMarkdownThemeVars,
   type HeimdallNodeThemeKey,
   sanitizeCustomTheme,
   saveCustomChatTheme,
@@ -26,6 +27,53 @@ const NODE_LABELS: Record<HeimdallNodeThemeKey, string> = {
 
 const ROLE_KEYS: ChatThemeRoleKey[] = ['user', 'assistant', 'system', 'ex_agent', 'unknown']
 const NODE_KEYS: HeimdallNodeThemeKey[] = ['user', 'assistant', 'ex_agent']
+type ColorPairThemeKey = Exclude<keyof CustomChatTheme['colors'], 'messageRoles' | 'heimdallNodes'>
+
+const MARKDOWN_THEME_FIELDS: Array<{ key: ColorPairThemeKey; label: string }> = [
+  { key: 'markdownText', label: 'Body text' },
+  { key: 'markdownMutedText', label: 'Muted/supporting text' },
+  { key: 'markdownHeadingText', label: 'Headings + strong text' },
+  { key: 'markdownLinkText', label: 'Links' },
+  { key: 'markdownLinkHoverText', label: 'Links hover' },
+  { key: 'markdownListMarkerText', label: 'List markers' },
+  { key: 'markdownHrBorder', label: 'Horizontal rule' },
+  { key: 'markdownBlockquoteBg', label: 'Blockquote background' },
+  { key: 'markdownBlockquoteBorder', label: 'Blockquote border' },
+  { key: 'markdownBlockquoteText', label: 'Blockquote text' },
+  { key: 'markdownTableBorder', label: 'Table border' },
+  { key: 'markdownTableHeaderBg', label: 'Table header background' },
+  { key: 'markdownTableHeaderText', label: 'Table header text' },
+  { key: 'markdownTableRowBorder', label: 'Table row border' },
+  { key: 'markdownInlineCodeBg', label: 'Inline code background' },
+  { key: 'markdownInlineCodeText', label: 'Inline code text' },
+  { key: 'markdownInlineCodeBorder', label: 'Inline code border' },
+  { key: 'markdownCodeBlockBg', label: 'Code block surface background' },
+  { key: 'markdownCodeBlockBorder', label: 'Code block border' },
+  { key: 'markdownCodeBlockText', label: 'Code block plain text' },
+  { key: 'markdownCodeBlockHeaderBg', label: 'Code block header background' },
+  { key: 'markdownCodeBlockHeaderText', label: 'Code block header text' },
+  { key: 'markdownCodeCopyButtonBg', label: 'Code copy button background' },
+  { key: 'markdownCodeCopyButtonBorder', label: 'Code copy button border' },
+  { key: 'markdownCodeCopyButtonText', label: 'Code copy button text' },
+  { key: 'markdownCodeCopyButtonHoverBg', label: 'Code copy button hover background' },
+  { key: 'markdownMathText', label: 'Math text' },
+]
+
+const MARKDOWN_SYNTAX_THEME_FIELDS: Array<{ key: ColorPairThemeKey; label: string }> = [
+  { key: 'markdownSyntaxBase', label: 'Syntax base' },
+  { key: 'markdownSyntaxComment', label: 'Comments' },
+  { key: 'markdownSyntaxKeyword', label: 'Keywords' },
+  { key: 'markdownSyntaxString', label: 'Strings' },
+  { key: 'markdownSyntaxNumber', label: 'Numbers/literals' },
+  { key: 'markdownSyntaxType', label: 'Types/classes' },
+  { key: 'markdownSyntaxFunction', label: 'Functions/titles' },
+  { key: 'markdownSyntaxVariable', label: 'Variables/attrs' },
+  { key: 'markdownSyntaxOperator', label: 'Operators' },
+  { key: 'markdownSyntaxPunctuation', label: 'Punctuation' },
+  { key: 'markdownSyntaxMeta', label: 'Meta/substitution' },
+  { key: 'markdownSyntaxDeletion', label: 'Deleted diff text' },
+  { key: 'markdownSyntaxAddition', label: 'Added diff text' },
+]
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
@@ -220,6 +268,8 @@ export const ThemeManager: React.FC = () => {
   const [status, setStatusState] = useState<{ text: string; tone: 'success' | 'error' } | null>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
   const { theme, enabled } = useCustomChatTheme()
+  const markdownPreviewLightStyle = useMemo(() => getMarkdownThemeVars(theme, false), [theme])
+  const markdownPreviewDarkStyle = useMemo(() => getMarkdownThemeVars(theme, true), [theme])
 
   const setStatus = useCallback((text: string, tone: 'success' | 'error' = 'success') => {
     setStatusState({ text, tone })
@@ -272,152 +322,7 @@ export const ThemeManager: React.FC = () => {
 
   const handleChatSurfaceChange = useCallback(
     (
-      key:
-        | 'heimdallPanelBg'
-        | 'conversationToolbarBg'
-        | 'settingsSolidColorSectionBg'
-        | 'appBackgroundColor'
-        | 'settingsPaneBodyBg'
-        | 'settingsCustomThemesCardBg'
-        | 'settingsCustomThemesCardBorder'
-        | 'settingsCustomThemesAccentBg'
-        | 'settingsCustomThemesAccentText'
-        | 'settingsCustomThemesTitleText'
-        | 'settingsCustomThemesBodyText'
-        | 'settingsCustomThemesCodeBg'
-        | 'settingsCustomThemesCodeText'
-        | 'settingsCustomThemesPanelBorder'
-        | 'settingsCustomThemesInnerCardBg'
-        | 'settingsCustomThemesInnerCardBorder'
-        | 'settingsCustomThemesBadgeBg'
-        | 'settingsCustomThemesBadgeText'
-        | 'settingsCustomThemesButtonBg'
-        | 'settingsCustomThemesButtonBorder'
-        | 'settingsCustomThemesButtonText'
-        | 'settingsCustomThemesEmptyStateBg'
-        | 'settingsCustomThemesEmptyStateBorder'
-        | 'settingsCustomThemesListBg'
-        | 'settingsCustomThemesListBorder'
-        | 'settingsCustomThemesListItemTitleText'
-        | 'settingsCustomThemesListItemMetaText'
-        | 'settingsCustomThemesPrimaryButtonBg'
-        | 'settingsCustomThemesPrimaryButtonText'
-        | 'chatInputAreaBorder'
-        | 'chatProgressBarFill'
-        | 'actionPopoverBorder'
-        | 'sendButtonAnimationColor'
-        | 'streamingAnimationColor'
-        | 'composerToggleActiveBg'
-        | 'composerToggleActiveBorder'
-        | 'composerToggleActiveText'
-        | 'heimdallNotePillBg'
-        | 'heimdallNotePillText'
-        | 'heimdallNotePillBorder'
-        | 'heimdallNodeHoverModalBg'
-        | 'heimdallNodeHoverModalBorder'
-        | 'heimdallNodeHoverModalText'
-        | 'heimdallNodeHoverModalTitleText'
-        | 'heimdallNoteDialogBg'
-        | 'heimdallNoteDialogBorder'
-        | 'heimdallNoteDialogTitleText'
-        | 'heimdallNoteDialogButtonBg'
-        | 'heimdallNoteDialogButtonBorder'
-        | 'heimdallNoteDialogButtonText'
-        | 'heimdallNoteDialogCloseButtonText'
-        | 'ideContextPillBg'
-        | 'ideContextPillBorder'
-        | 'ideContextPillText'
-        | 'ideContextAddButtonBg'
-        | 'ideContextAddButtonBorder'
-        | 'ideContextAddButtonText'
-        | 'ideContextPreviewBg'
-        | 'ideContextPreviewBorder'
-        | 'ideContextPreviewFileText'
-        | 'ideContextPreviewCodeText'
-        | 'ideContextSelectedPillBg'
-        | 'ideContextSelectedPillBorder'
-        | 'ideContextSelectedPillText'
-        | 'ideContextClearButtonBorder'
-        | 'ideContextClearButtonText'
-        | 'ideContextAddedText'
-        | 'toolJobsModalBackdrop'
-        | 'toolJobsModalBg'
-        | 'toolJobsModalBorder'
-        | 'toolJobsPanelBg'
-        | 'toolJobsPanelBorder'
-        | 'toolJobsPrimaryText'
-        | 'toolJobsSecondaryText'
-        | 'toolJobsMutedText'
-        | 'toolJobsCodeBg'
-        | 'toolJobsCodeText'
-        | 'toolJobsErrorBg'
-        | 'toolJobsErrorBorder'
-        | 'toolJobsErrorText'
-        | 'toolJobsLiveBadgeBg'
-        | 'toolJobsLiveBadgeText'
-        | 'toolJobsLiveDot'
-        | 'toolJobsProgressTrack'
-        | 'toolJobsProgressPending'
-        | 'toolJobsProgressRunning'
-        | 'toolJobsProgressCompleted'
-        | 'toolJobsProgressFailed'
-        | 'toolJobsStatusPendingBg'
-        | 'toolJobsStatusPendingText'
-        | 'toolJobsStatusRunningBg'
-        | 'toolJobsStatusRunningText'
-        | 'toolJobsStatusCompletedBg'
-        | 'toolJobsStatusCompletedText'
-        | 'toolJobsStatusFailedBg'
-        | 'toolJobsStatusFailedText'
-        | 'toolJobsStatusCancelledBg'
-        | 'toolJobsStatusCancelledText'
-        | 'toolJobsStatusActiveWorkersBg'
-        | 'toolJobsStatusActiveWorkersText'
-        | 'toolPermissionDialogBg'
-        | 'toolPermissionDialogBorder'
-        | 'toolPermissionDialogTitleText'
-        | 'toolPermissionDialogToolNameText'
-        | 'toolPermissionDialogBadgeBg'
-        | 'toolPermissionDialogBadgeText'
-        | 'toolPermissionDialogCommandBg'
-        | 'toolPermissionDialogCommandLabelText'
-        | 'toolPermissionDialogCommandText'
-        | 'toolPermissionDialogDenyButtonBg'
-        | 'toolPermissionDialogDenyButtonBorder'
-        | 'toolPermissionDialogDenyButtonText'
-        | 'toolPermissionDialogAllowButtonBg'
-        | 'toolPermissionDialogAllowButtonBorder'
-        | 'toolPermissionDialogAllowButtonText'
-        | 'toolPermissionDialogAllowAllButtonBg'
-        | 'toolPermissionDialogAllowAllButtonBorder'
-        | 'toolPermissionDialogAllowAllButtonText'
-        | 'authModalBackdrop'
-        | 'authModalSurfaceBg'
-        | 'authModalTitleText'
-        | 'authModalBodyText'
-        | 'authModalPrimaryButtonBg'
-        | 'authModalPrimaryButtonBorder'
-        | 'authModalPrimaryButtonText'
-        | 'authModalSecondaryButtonBg'
-        | 'authModalSecondaryButtonBorder'
-        | 'authModalSecondaryButtonText'
-        | 'authModalDangerButtonBg'
-        | 'authModalDangerButtonBorder'
-        | 'authModalDangerButtonText'
-        | 'htmlToolsModalSurfaceBg'
-        | 'htmlToolsModalSurfaceBorder'
-        | 'htmlToolsModalPanelMutedBg'
-        | 'htmlToolsModalButtonBg'
-        | 'htmlToolsModalButtonBorder'
-        | 'htmlToolsModalButtonText'
-        | 'htmlToolsModalButtonActiveBg'
-        | 'htmlToolsModalButtonActiveBorder'
-        | 'htmlToolsModalButtonActiveText'
-        | 'markdownCodeBlockBg'
-        | 'markdownCodeBlockBorder'
-        | 'markdownCodeBlockText'
-        | 'markdownInlineCodeBg'
-        | 'markdownInlineCodeText',
+      key: ColorPairThemeKey,
       mode: 'light' | 'dark',
       nextValue: string
     ) => {
@@ -806,33 +711,105 @@ export const ThemeManager: React.FC = () => {
 
           <div className='space-y-3'>
             <h4 className='text-sm font-semibold text-stone-700 dark:text-stone-200'>
-              Markdown code blocks + inline code
+              Markdown renderer theme
             </h4>
-            <PairEditor
-              label='Code block surface background'
-              value={theme.colors.markdownCodeBlockBg}
-              onChange={(mode, value) => handleChatSurfaceChange('markdownCodeBlockBg', mode, value)}
-            />
-            <PairEditor
-              label='Code block border'
-              value={theme.colors.markdownCodeBlockBorder}
-              onChange={(mode, value) => handleChatSurfaceChange('markdownCodeBlockBorder', mode, value)}
-            />
-            <PairEditor
-              label='Code block plain text'
-              value={theme.colors.markdownCodeBlockText}
-              onChange={(mode, value) => handleChatSurfaceChange('markdownCodeBlockText', mode, value)}
-            />
-            <PairEditor
-              label='Inline code background'
-              value={theme.colors.markdownInlineCodeBg}
-              onChange={(mode, value) => handleChatSurfaceChange('markdownInlineCodeBg', mode, value)}
-            />
-            <PairEditor
-              label='Inline code text'
-              value={theme.colors.markdownInlineCodeText}
-              onChange={(mode, value) => handleChatSurfaceChange('markdownInlineCodeText', mode, value)}
-            />
+            <p className='text-xs text-neutral-500 dark:text-neutral-400'>
+              Controls the model response Markdown surface: prose, links, lists, tables, blockquotes, math, inline
+              code, fenced code blocks, copy buttons, and Highlight.js syntax tokens.
+            </p>
+
+            <div className='grid grid-cols-1 gap-3 xl:grid-cols-2'>
+              <div className='chat-markdown rounded-xl border border-neutral-200 bg-white p-4 text-sm dark:border-neutral-700' style={markdownPreviewLightStyle}>
+                <div className='mb-3 text-[11px] font-semibold uppercase tracking-wider' style={{ color: 'var(--chat-md-muted-text)' }}>
+                  Light preview
+                </div>
+                <h3>Markdown heading</h3>
+                <p>
+                  A paragraph with a <a href='#markdown-preview-light'>themed link</a>, <strong>strong text</strong>,
+                  inline <code className='chat-markdown-inline-code'>const value = 42</code>, and math{' '}
+                  <span className='katex'>E = mc²</span>.
+                </p>
+                <blockquote>
+                  <p>Blockquotes, tables, and code blocks now use Markdown-specific theme variables.</p>
+                </blockquote>
+                <ul>
+                  <li>List marker color</li>
+                  <li>Body text color</li>
+                </ul>
+                <div className='chat-markdown-code-block not-prose overflow-hidden rounded-xl border'>
+                  <div className='chat-markdown-code-header flex items-center justify-between px-2 py-1'>
+                    <span className='text-[11px]'>tsx</span>
+                    <button type='button' className='chat-markdown-code-copy-button rounded-md border px-2 py-1 text-[11px]'>
+                      Copy
+                    </button>
+                  </div>
+                  <pre className='m-0 overflow-auto bg-transparent px-3 py-2 text-xs'>
+                    <code className='hljs'>
+                      <span className='hljs-keyword'>const</span> <span className='hljs-title'>render</span> = <span className='hljs-string'>'themed'</span>
+                    </code>
+                  </pre>
+                </div>
+              </div>
+
+              <div className='chat-markdown dark rounded-xl border border-neutral-700 bg-neutral-950 p-4 text-sm' style={markdownPreviewDarkStyle}>
+                <div className='mb-3 text-[11px] font-semibold uppercase tracking-wider' style={{ color: 'var(--chat-md-muted-text)' }}>
+                  Dark preview
+                </div>
+                <h3>Markdown heading</h3>
+                <p>
+                  A paragraph with a <a href='#markdown-preview-dark'>themed link</a>, <strong>strong text</strong>,
+                  inline <code className='chat-markdown-inline-code'>const value = 42</code>, and math{' '}
+                  <span className='katex'>E = mc²</span>.
+                </p>
+                <blockquote>
+                  <p>Blockquotes, tables, and code blocks now use Markdown-specific theme variables.</p>
+                </blockquote>
+                <ul>
+                  <li>List marker color</li>
+                  <li>Body text color</li>
+                </ul>
+                <div className='chat-markdown-code-block not-prose overflow-hidden rounded-xl border'>
+                  <div className='chat-markdown-code-header flex items-center justify-between px-2 py-1'>
+                    <span className='text-[11px]'>tsx</span>
+                    <button type='button' className='chat-markdown-code-copy-button rounded-md border px-2 py-1 text-[11px]'>
+                      Copy
+                    </button>
+                  </div>
+                  <pre className='m-0 overflow-auto bg-transparent px-3 py-2 text-xs'>
+                    <code className='hljs'>
+                      <span className='hljs-keyword'>const</span> <span className='hljs-title'>render</span> = <span className='hljs-string'>'themed'</span>
+                    </code>
+                  </pre>
+                </div>
+              </div>
+            </div>
+
+            <div className='grid grid-cols-1 gap-3 lg:grid-cols-2'>
+              {MARKDOWN_THEME_FIELDS.map(field => (
+                <PairEditor
+                  key={field.key}
+                  label={field.label}
+                  value={theme.colors[field.key]}
+                  onChange={(mode, value) => handleChatSurfaceChange(field.key, mode, value)}
+                />
+              ))}
+            </div>
+
+            <div className='space-y-3'>
+              <h5 className='text-xs font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400'>
+                Syntax highlighting
+              </h5>
+              <div className='grid grid-cols-1 gap-3 lg:grid-cols-2'>
+                {MARKDOWN_SYNTAX_THEME_FIELDS.map(field => (
+                  <PairEditor
+                    key={field.key}
+                    label={field.label}
+                    value={theme.colors[field.key]}
+                    onChange={(mode, value) => handleChatSurfaceChange(field.key, mode, value)}
+                  />
+                ))}
+              </div>
+            </div>
           </div>
 
           <div className='space-y-3'>

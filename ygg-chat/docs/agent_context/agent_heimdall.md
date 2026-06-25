@@ -55,7 +55,7 @@ interface ChatNode {
 Important details:
 - The tree is derived from message `parent_id`/`children_ids` relationships.
 - Multiple top-level roots are wrapped under a synthetic root node with `id: 'root'` and `message: 'Conversation'`.
-- Heimdall usually treats `ex_agent` messages as hidden/rendering-special nodes unless persistent-agent display requires otherwise upstream.
+- Heimdall receives the tree unchanged from `useConversationMessages`; it no longer strips or promotes `ex_agent` nodes as a special case.
 - `filterEmptyMessages` can hide empty/tool-only visual nodes; selection expansion then adds hidden in-between messages back into action inputs.
 
 ## Major Interaction Areas
@@ -88,14 +88,16 @@ Current actions include:
 - **Copy Text**: copies selected node text in selected-node order.
 - **Add/View Note**: shown for a single selected node, opens note editor.
 - **New Chat From Here**: copies selected messages into a newly created conversation via `insertBulkMessages`.
+- **Copy to Existing Chat**: copies selected messages into another conversation via `insertBulkMessages`.
+- **Move to Existing Chat**: copies selected messages into another conversation, then deletes the source selection after successful insert.
 - **Delete Permanently**: deletes selected message IDs with optional confirmation and refreshes the current message tree.
 
-For selected-message copying:
-- Heimdall checks whether selected nodes form one linear branch with `areNodesOnSameBranch()`.
-- If yes, it sorts root-to-leaf with `sortMessagesByBranch()`.
-- If no, it preserves `selectedNodes` order.
+For selected-message copying/moving:
+- Heimdall builds one structured clone payload for all three transfer actions.
+- The payload includes each selected message's source ID and selected parent source ID, so target inserts can remap the copied tree to fresh message IDs.
+- If a selected message's original parent is not selected, that message becomes a top-level root in the target conversation.
 - It copies role, content, thinking, model name, tool calls, notes, note color, and content blocks.
-- `insertBulkMessages` inserts the copied selection as a linear chain, beginning at top level (`parent_id = null` on the first inserted copy).
+- `insertBulkMessages` preserves selected branch structure for structured payloads while retaining legacy linear-chain fallback for old flat payloads.
 
 ### Notes
 
@@ -113,10 +115,8 @@ For selected-message copying:
 
 ### Subagent badges
 
-- Heimdall builds subagent badge data from two sources:
-  1. legacy persisted `ex_agent` subagent sessions in flat messages;
-  2. dedicated subagent runs fetched from local APIs in Electron.
-- Dedicated run data overrides legacy map entries for the same parent when available.
+- Heimdall builds subagent badge data from assistant messages containing `subagent` tool calls and from dedicated subagent runs fetched from local APIs in Electron.
+- Dedicated run data overrides assistant tool-call derived entries for the same parent when available.
 - Badge click opens a modal showing parent task plus subagent call content blocks.
 
 ## Important Invariants

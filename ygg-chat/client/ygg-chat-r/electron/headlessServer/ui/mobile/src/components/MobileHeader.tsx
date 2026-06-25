@@ -1,6 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { LocalUserProfile, MobileCustomTool, MobileOperationMode, MobileProviderName } from '../types'
+import type {
+  LocalUserProfile,
+  MobileCustomTool,
+  MobileOperationMode,
+  MobileProviderName,
+  MobileReasoningEffort,
+} from '../types'
 import { ProfilePicker } from './ProfilePicker'
 import { ToolTogglePanel } from './ToolTogglePanel'
 import { Badge, Button, Input, Select, Textarea } from './ui'
@@ -17,8 +23,12 @@ interface MobileHeaderProps {
   onAgentTextFontSizeChange: (value: number) => void
   operationMode: MobileOperationMode
   includeOperationModePrompts: boolean
+  thinkingEnabled: boolean
+  reasoningEffort: MobileReasoningEffort
   onOperationModeToggle: () => void
   onIncludeOperationModePromptsChange: (enabled: boolean) => void
+  onThinkingEnabledChange: (enabled: boolean) => void
+  onReasoningEffortChange: (value: MobileReasoningEffort) => void
   users: LocalUserProfile[]
   selectedUserId: string | null
   onProviderChange: (value: MobileProviderName) => void
@@ -64,6 +74,15 @@ const PROVIDER_LABELS: Record<MobileProviderName, string> = {
   zai: 'Z.AI / GLM',
 }
 
+const REASONING_EFFORT_LABELS: Record<MobileReasoningEffort, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'X-High',
+}
+
+const REASONING_EFFORT_OPTIONS: MobileReasoningEffort[] = ['low', 'medium', 'high', 'xhigh']
+
 export const MobileHeader: React.FC<MobileHeaderProps> = ({
   providerName,
   providerOptions,
@@ -76,8 +95,12 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
   onAgentTextFontSizeChange,
   operationMode,
   includeOperationModePrompts,
+  thinkingEnabled,
+  reasoningEffort,
   onOperationModeToggle,
   onIncludeOperationModePromptsChange,
+  onThinkingEnabledChange,
+  onReasoningEffortChange,
   users,
   selectedUserId,
   onProviderChange,
@@ -264,6 +287,40 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
                       disabled={selectorsDisabled}
                     />
                     <span>{includeOperationModePrompts ? 'Enabled' : 'Disabled'}</span>
+                  </label>
+                </section>
+
+                <section className='mobile-settings-thinking-options' aria-label='Thinking options'>
+                  <div className='mobile-settings-thinking-options-header'>
+                    <div>
+                      <strong>Thinking options</strong>
+                      <p>Send reasoning preferences to providers/models that support thinking.</p>
+                    </div>
+                    <label className='mobile-settings-toggle-row'>
+                      <input
+                        type='checkbox'
+                        checked={thinkingEnabled}
+                        onChange={event => onThinkingEnabledChange(event.target.checked)}
+                        disabled={selectorsDisabled}
+                      />
+                      <span>{thinkingEnabled ? 'Enabled' : 'Disabled'}</span>
+                    </label>
+                  </div>
+                  <label className='mobile-settings-field mobile-settings-thinking-effort-field'>
+                    <span>Reasoning effort</span>
+                    <Select
+                      value={reasoningEffort}
+                      onChange={event => onReasoningEffortChange(event.target.value as MobileReasoningEffort)}
+                      disabled={selectorsDisabled || !thinkingEnabled}
+                    >
+                      {REASONING_EFFORT_OPTIONS.map(option => (
+                        <option key={option} value={option}>
+                          {option === reasoningEffort
+                            ? `${REASONING_EFFORT_LABELS[option]} (Selected)`
+                            : REASONING_EFFORT_LABELS[option]}
+                        </option>
+                      ))}
+                    </Select>
                   </label>
                 </section>
 

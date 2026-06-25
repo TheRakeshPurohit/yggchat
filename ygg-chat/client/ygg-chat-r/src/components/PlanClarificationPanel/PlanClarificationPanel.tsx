@@ -1,9 +1,11 @@
+import { CircleHelp } from 'lucide-react'
 import React, { useMemo, useState } from 'react'
 import type {
   PlanClarificationAnswer,
   PlanClarificationOption,
   PlanClarificationRequest,
 } from '../../features/chats/planToolTypes'
+import { getThemeModeColor, useCustomChatTheme, useHtmlDarkMode } from '../ThemeManager/themeConfig'
 
 interface PlanClarificationPanelProps {
   request: PlanClarificationRequest
@@ -19,17 +21,66 @@ type SelectionState = Record<
   }
 >
 
+const getOptionId = (option: PlanClarificationOption): string => option.id || option.label
+
 export const PlanClarificationPanel: React.FC<PlanClarificationPanelProps> = ({ request, onSubmit, onCancel }) => {
   const [selectionByQuestionId, setSelectionByQuestionId] = useState<SelectionState>({})
+  const { theme: customTheme, enabled: customThemeEnabled } = useCustomChatTheme()
+  const isDarkMode = useHtmlDarkMode()
 
   const questions = request.questions
+
+  const panelStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesCardBg, isDarkMode),
+        color: getThemeModeColor(customTheme.colors.toolJobsPrimaryText, isDarkMode),
+      }
+    : undefined
+  const innerStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesInnerCardBg, isDarkMode),
+      }
+    : undefined
+  const titleStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { color: getThemeModeColor(customTheme.colors.toolJobsPrimaryText, isDarkMode) }
+    : undefined
+  const mutedTextStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { color: getThemeModeColor(customTheme.colors.toolJobsMutedText, isDarkMode) }
+    : undefined
+  const badgeStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesBadgeBg, isDarkMode),
+        color: getThemeModeColor(customTheme.colors.settingsCustomThemesBadgeText, isDarkMode),
+      }
+    : undefined
+  const selectedOptionStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: getThemeModeColor(customTheme.colors.composerToggleActiveBg, isDarkMode),
+        color: getThemeModeColor(customTheme.colors.composerToggleActiveText, isDarkMode),
+      }
+    : undefined
+  const manualInputStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesListBg, isDarkMode),
+        color: getThemeModeColor(customTheme.colors.toolJobsPrimaryText, isDarkMode),
+      }
+    : undefined
+  const secondaryButtonStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesButtonBg, isDarkMode),
+        color: getThemeModeColor(customTheme.colors.settingsCustomThemesButtonText, isDarkMode),
+      }
+    : undefined
+  const primaryButtonStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? canSubmitStyle(customTheme, isDarkMode)
+    : undefined
 
   const canSubmit = useMemo(() => {
     return questions.every(question => {
       const questionId = question.id || question.question
       const selected = selectionByQuestionId[questionId]
       if (!selected?.optionId) return false
-      const option = question.options?.find(candidate => candidate.id === selected.optionId)
+      const option = question.options?.find(candidate => getOptionId(candidate) === selected.optionId)
       if (option?.manual) return selected.manualText.trim().length > 0
       return Boolean(option)
     })
@@ -39,7 +90,7 @@ export const PlanClarificationPanel: React.FC<PlanClarificationPanelProps> = ({ 
     setSelectionByQuestionId(prev => ({
       ...prev,
       [questionId]: {
-        optionId: option.id || option.label,
+        optionId: getOptionId(option),
         manualText: prev[questionId]?.manualText || '',
       },
     }))
@@ -59,7 +110,7 @@ export const PlanClarificationPanel: React.FC<PlanClarificationPanelProps> = ({ 
     const answers: PlanClarificationAnswer[] = questions.map(question => {
       const questionId = question.id || question.question
       const selected = selectionByQuestionId[questionId]
-      const option = question.options?.find(candidate => candidate.id === selected?.optionId)
+      const option = question.options?.find(candidate => getOptionId(candidate) === selected?.optionId)
       const manual = Boolean(option?.manual)
       const answer = manual ? selected?.manualText.trim() || '' : option?.description || option?.label || ''
       return {
@@ -75,70 +126,102 @@ export const PlanClarificationPanel: React.FC<PlanClarificationPanelProps> = ({ 
   }
 
   return (
-    <div className='mx-1 rounded-[18px] border border-blue-200/80 dark:border-blue-500/25 bg-blue-50/80 dark:bg-blue-950/20 px-3 py-2 backdrop-blur-sm shadow-[0_12px_32px_-18px_rgba(59,130,246,0.55)]'>
+    <div
+      className='mx-1 rounded-[22px] bg-white/45 px-3 py-2.5 backdrop-blur-xl animate-in fade-in slide-in-from-bottom-1 duration-200 dark:bg-black/20'
+      style={panelStyle}
+    >
       <div className='flex items-start justify-between gap-3'>
         <div className='min-w-0'>
           <div className='flex items-center gap-2'>
-            <i className='bx bx-git-branch text-lg text-blue-600 dark:text-blue-300' aria-hidden='true'></i>
-            <h3 className='text-sm font-semibold text-neutral-800 dark:text-neutral-100'>Plan clarification</h3>
+            <span
+              className='flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-500/10 text-blue-600 dark:bg-orange-500/15 dark:text-orange-200'
+              style={selectedOptionStyle}
+              aria-hidden='true'
+            >
+              <CircleHelp size={16} strokeWidth={2.25} />
+            </span>
+            <div className='min-w-0'>
+              <h3 className='text-sm font-semibold tracking-tight text-neutral-800 dark:text-neutral-100' style={titleStyle}>
+                Plan clarification
+              </h3>
+              <p className='mt-0.5 text-[11px] leading-4 text-neutral-500 dark:text-neutral-400' style={mutedTextStyle}>
+                Choose how the plan should continue.
+              </p>
+            </div>
           </div>
-          <p className='mt-0.5 text-[11px] text-neutral-500 dark:text-neutral-400'>
-            The model needs a few choices before it continues the plan.
-          </p>
         </div>
-        <span className='shrink-0 rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-500/15 dark:text-blue-200'>
+        <span
+          className='shrink-0 rounded-full bg-neutral-200/70 px-2 py-0.5 text-[10px] font-medium text-neutral-600 dark:bg-neutral-800/70 dark:text-neutral-300'
+          style={badgeStyle}
+        >
           {questions.length} question{questions.length === 1 ? '' : 's'}
         </span>
       </div>
 
-      <div className='mt-2 max-h-72 space-y-2 overflow-y-auto rounded-2xl bg-white/55 p-1.5 pr-2 thin-scrollbar dark:bg-neutral-950/20'>
+      <div
+        className='mt-2 max-h-72 space-y-2 overflow-y-auto rounded-[18px] bg-white/35 p-1.5 pr-2 thin-scrollbar dark:bg-black/15'
+        style={innerStyle}
+      >
         {questions.map((question, questionIndex) => {
           const questionId = question.id || question.question
           const selected = selectionByQuestionId[questionId]
-          const selectedOption = question.options?.find(option => option.id === selected?.optionId)
+          const selectedOption = question.options?.find(option => getOptionId(option) === selected?.optionId)
           const manualSelected = Boolean(selectedOption?.manual)
 
           return (
-            <div key={questionId} className='rounded-xl px-1.5 py-1 dark:bg-transparent'>
-              <div className='flex items-start gap-2'>
-                <span className='mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white dark:bg-blue-500'>
+            <div key={questionId} className='rounded-2xl px-1.5 py-1.5'>
+              <div className='flex items-start gap-2.5'>
+                <span
+                  className='mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-neutral-200/80 text-[10px] font-semibold text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300'
+                  style={badgeStyle}
+                >
                   {questionIndex + 1}
                 </span>
                 <div className='min-w-0 flex-1'>
-                  <p className='text-sm font-medium text-neutral-800 dark:text-neutral-100'>{question.question}</p>
+                  <p className='text-sm font-medium leading-5 text-neutral-800 dark:text-neutral-100' style={titleStyle}>
+                    {question.question}
+                  </p>
                   {question.description && (
-                    <p className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-400'>{question.description}</p>
+                    <p className='mt-0.5 text-xs leading-4 text-neutral-500 dark:text-neutral-400' style={mutedTextStyle}>
+                      {question.description}
+                    </p>
                   )}
                 </div>
               </div>
 
-              <div className='mt-1.5 space-y-0.5'>
+              <div className='mt-2 space-y-1'>
                 {(question.options || []).map(option => {
-                  const optionId = option.id || option.label
+                  const optionId = getOptionId(option)
                   const checked = selected?.optionId === optionId
                   return (
                     <button
                       key={optionId}
                       type='button'
                       onClick={() => updateSelection(questionId, option)}
-                      className={`w-full rounded-lg px-1.5 py-1 text-left transition-colors ${
+                      className={`w-full rounded-2xl px-2.5 py-2 text-left transition-all duration-200 active:scale-[0.99] ${
                         checked
-                          ? 'bg-blue-100/70 dark:bg-blue-500/15'
-                          : 'bg-transparent hover:bg-blue-50/60 dark:hover:bg-blue-500/10'
+                          ? 'bg-blue-500/10 text-blue-700 dark:bg-orange-500/15 dark:text-orange-100'
+                          : 'bg-transparent text-neutral-700 hover:bg-white/45 dark:text-neutral-200 dark:hover:bg-white/5'
                       }`}
+                      style={checked ? selectedOptionStyle : undefined}
                     >
-                      <div className='flex items-start gap-1.5'>
+                      <div className='flex items-start gap-2'>
                         <span
-                          className={`mt-1 h-2 w-2 shrink-0 rounded-full ${
-                            checked ? 'bg-blue-600 dark:bg-blue-300' : 'bg-neutral-300 dark:bg-neutral-600'
+                          className={`mt-1.5 h-2 w-2 shrink-0 rounded-full transition-colors ${
+                            checked ? 'bg-current' : 'bg-neutral-300 dark:bg-neutral-600'
                           }`}
                         />
                         <span className='min-w-0'>
-                          <span className='block text-[13px] font-medium text-neutral-800 dark:text-neutral-100'>
-                            {option.label}
-                          </span>
+                          <span className='block text-[13px] font-medium leading-4'>{option.label}</span>
                           {option.description && (
-                            <span className='block text-[11px] leading-4 text-neutral-500 dark:text-neutral-400'>
+                            <span
+                              className={`mt-0.5 block text-[11px] leading-4 ${
+                                checked
+                                  ? 'text-current opacity-75'
+                                  : 'text-neutral-500 dark:text-neutral-400'
+                              }`}
+                              style={!checked ? mutedTextStyle : undefined}
+                            >
                               {option.description}
                             </span>
                           )}
@@ -153,8 +236,9 @@ export const PlanClarificationPanel: React.FC<PlanClarificationPanelProps> = ({ 
                 <textarea
                   value={selected?.manualText || ''}
                   onChange={event => updateManualText(questionId, event.target.value)}
-                  placeholder='Tell the model what you want instead...'
-                  className='mt-1.5 min-h-18 w-full resize-y rounded-xl border-0 bg-white/70 px-3 py-2 text-sm text-neutral-800 outline-none transition-colors placeholder:text-neutral-400 focus:bg-white dark:bg-neutral-950/40 dark:text-neutral-100 dark:focus:bg-neutral-950/60'
+                  placeholder='Tell Graviton what to do instead...'
+                  className='mt-2 min-h-18 w-full resize-y rounded-2xl border-0 bg-white/55 px-3 py-2 text-sm text-neutral-800 outline-none backdrop-blur-xl transition-colors placeholder:text-neutral-400 focus:bg-white/75 focus:ring-2 focus:ring-blue-400/30 dark:bg-black/20 dark:text-neutral-100 dark:focus:bg-black/30 dark:focus:ring-orange-400/25'
+                  style={manualInputStyle}
                 />
               )}
             </div>
@@ -162,11 +246,12 @@ export const PlanClarificationPanel: React.FC<PlanClarificationPanelProps> = ({ 
         })}
       </div>
 
-      <div className='mt-2 flex items-center justify-end gap-2'>
+      <div className='mt-2 flex items-center justify-end gap-1.5'>
         <button
           type='button'
           onClick={onCancel}
-          className='rounded-lg px-3 py-1.5 text-xs font-medium text-neutral-500 transition-colors hover:bg-neutral-200/70 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100'
+          className='rounded-full px-3 py-1.5 text-xs font-medium text-neutral-500 transition-all duration-200 hover:bg-white/45 hover:text-neutral-800 active:scale-95 dark:text-neutral-400 dark:hover:bg-white/5 dark:hover:text-neutral-100'
+          style={secondaryButtonStyle}
         >
           Cancel
         </button>
@@ -174,7 +259,8 @@ export const PlanClarificationPanel: React.FC<PlanClarificationPanelProps> = ({ 
           type='button'
           onClick={handleSubmit}
           disabled={!canSubmit}
-          className='rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-neutral-300 disabled:text-neutral-500 dark:disabled:bg-neutral-800 dark:disabled:text-neutral-500'
+          className='rounded-full bg-blue-600 px-3.5 py-1.5 text-xs font-semibold text-white transition-all duration-200 hover:bg-blue-500 active:scale-95 disabled:cursor-not-allowed disabled:bg-neutral-300 disabled:text-neutral-500 dark:disabled:bg-neutral-800 dark:disabled:text-neutral-500'
+          style={canSubmit ? primaryButtonStyle : undefined}
         >
           Submit answers
         </button>
@@ -182,3 +268,8 @@ export const PlanClarificationPanel: React.FC<PlanClarificationPanelProps> = ({ 
     </div>
   )
 }
+
+const canSubmitStyle = (customTheme: ReturnType<typeof useCustomChatTheme>['theme'], isDarkMode: boolean): React.CSSProperties => ({
+  backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesPrimaryButtonBg, isDarkMode),
+  color: getThemeModeColor(customTheme.colors.settingsCustomThemesPrimaryButtonText, isDarkMode),
+})

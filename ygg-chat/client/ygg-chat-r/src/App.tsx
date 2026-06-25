@@ -66,6 +66,7 @@ const RIGHTBAR_HIDDEN_ROUTES = new Set([
   '/faq',
   '/paymentplan',
   '/blog',
+  '/settings',
   '/terms',
   '/refund-policy',
   '/privacy',
@@ -134,7 +135,7 @@ const HtmlToolsShell = ({ enabled }: { enabled: boolean }) => {
           notes={notes}
           onOpenApps={toggleAppsModal}
           appsOpen={registry.isModalOpen}
-          className={isMobile ? 'bottom-32 right-5' : 'bottom-6 right-6'}
+          className={isMobile ? 'bottom-32 right-5' : 'bottom-6 right-14'}
         />
       )}
     </>

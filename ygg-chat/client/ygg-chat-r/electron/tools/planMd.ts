@@ -58,8 +58,9 @@ export interface ReadPlanResult {
 export interface CreatePlanResult {
   name: string
   created: boolean
-  content: string
   path: string
+  message: string
+  modelContent: string
 }
 
 export interface EditPlanResult {
@@ -189,7 +190,15 @@ export async function createPlan(content: string, name?: string, cwd?: string): 
   const planName = name ? normalizeName(name) : await generatePlanName(dir)
   const filePath = path.join(dir, `${planName}${PLAN_FILE_EXTENSION}`)
   await fs.writeFile(filePath, content, { encoding: 'utf8', flag: 'wx' })
-  return { name: planName, created: true, content, path: filePath }
+
+  const message = `Created plan "${planName}".`
+  return {
+    name: planName,
+    created: true,
+    path: filePath,
+    message,
+    modelContent: `${message} Do not repeat the plan unless the user asks.`,
+  }
 }
 
 export async function editPlan(name: string, search: string, replacement: string, cwd?: string): Promise<EditPlanResult> {

@@ -16,6 +16,7 @@ import type { RootState } from '../../store/store'
 import { getThemeModeColor, useCustomChatTheme, useHtmlDarkMode } from '../ThemeManager/themeConfig'
 import { readLocalMentionFile } from '../../utils/readLocalMentionFile'
 import { rankFileMatches } from '../../../shared/fileMatchRanking'
+import { CHAT_NORMAL_TEXT_SIZE_CLASS, getChatFontSizeOffsetStyle } from '../ChatMessage/chatMessageShared'
 
 type textAreaState = 'default' | 'error' | 'disabled'
 // Accept any Tailwind width/max-width class combination (e.g. "w-full max-w-3xl").
@@ -44,6 +45,7 @@ interface TextAreaProps {
   showCharCount?: boolean
   showHelp?: boolean
   outline?: boolean
+  style?: React.CSSProperties
   onProcessMessage?: (processMessage: (message: string) => string) => void
   variant?: 'primary' | 'outline'
   slashCommands?: string[]
@@ -55,6 +57,7 @@ interface TextAreaProps {
   filterSelectedMentionFiles?: boolean
   enableImageAttachments?: boolean
   imageDraftTarget?: ImageDraftTarget
+  fontSizeOffset?: number
 }
 
 const allowedMentionChar = /[A-Za-z0-9._\/\-]/
@@ -151,6 +154,7 @@ export const InputTextArea: React.FC<TextAreaProps> = ({
   showCharCount = false,
   showHelp = true,
   outline = false,
+  style,
   onProcessMessage, // redundant with onChange but included for backward compatibility for now
   variant = 'primary',
   slashCommands,
@@ -162,6 +166,7 @@ export const InputTextArea: React.FC<TextAreaProps> = ({
   filterSelectedMentionFiles = true,
   enableImageAttachments = false,
   imageDraftTarget = { kind: 'composer' },
+  fontSizeOffset = 0,
   ...rest
 }) => {
   const dispatch = useDispatch()
@@ -781,9 +786,13 @@ export const InputTextArea: React.FC<TextAreaProps> = ({
       'rounded-3xl text-neutral-900 dark:text-neutral-300 border border-neutral-300 focus:border-neutral-400 dark:border-neutral-700 outline-none dark:focus:border-neutral-600',
   }
 
+  const textareaStyle = {
+    ...style,
+    ...getChatFontSizeOffsetStyle(fontSizeOffset),
+  }
   const baseStyles = outline
-    ? `${width} px-3 py-2 sm:px-4 sm:py-2 md:px-4 md:py-2 lg:px-4 lg:py-2 2xl:px-4 2xl:py-2 overflow-hidden bg-transparent text-[16px] sm:text-[16px] md:text-[16px] lg:text-[16px] 2xl:text-[16px] ${variantStyles[variant]}`
-    : `${width} px-3 py-1 sm:px-3 sm:py-1 md:px-3 md:py-1 lg:px-3 lg:py-1 2xl:px-3 2xl:py-1 rounded-xl transition-all duration-200 overflow-hidden bg-transparent text-[16px] sm:text-[14px] md:text-[14px] lg:text-[14px] 2xl:text-[16px]`
+    ? `${width} px-3 py-2 sm:px-4 sm:py-2 md:px-4 md:py-2 lg:px-4 lg:py-2 2xl:px-4 2xl:py-2 overflow-hidden bg-transparent ${CHAT_NORMAL_TEXT_SIZE_CLASS} ${variantStyles[variant]}`
+    : `${width} px-3 py-1 sm:px-3 sm:py-1 md:px-3 md:py-1 lg:px-3 lg:py-1 2xl:px-3 2xl:py-1 rounded-xl transition-all duration-200 overflow-hidden bg-transparent ${CHAT_NORMAL_TEXT_SIZE_CLASS}`
   const labelClasses = state === 'disabled' ? 'opacity-40' : ''
 
   const stateStyles = outline
@@ -870,22 +879,69 @@ export const InputTextArea: React.FC<TextAreaProps> = ({
         {showSlashList && filteredSlashCommands.length > 0 && (
           <div
             ref={slashListRef}
-            className='absolute bottom-full left-0 mb-1 w-64 max-h-48 overflow-y-auto
-                       /70 acrylic-light  rounded-xl shadow-lg z-50'
+            className='absolute bottom-full left-0 z-50 mb-2 w-[min(22rem,calc(100vw-2rem))] max-h-72 overflow-y-auto rounded-[24px] bg-white/45 p-2 backdrop-blur-2xl thin-scrollbar dark:bg-neutral-950/45'
           >
-            {filteredSlashCommands.map((command, index) => (
-              <div
-                key={command}
-                className={`px-3 py-2 cursor-pointer text-sm ${
-                  index === selectedSlashIndex
-                    ? 'transparent dark:text-orange-400 text-blue-400'
-                    : 'hover:bg-neutral-100 dark:hover:bg-neutral-700 text-neutral-900 dark:text-neutral-100'
-                }`}
-                onClick={() => handleSlashCommandSelection(command)}
-              >
-                <span className='font-medium'>{command}</span>
+            <div className='px-2 pb-2 pt-1'>
+              <div className='text-[10px] font-semibold uppercase tracking-[0.18em] text-neutral-500 dark:text-neutral-500'>
+                Commands
               </div>
-            ))}
+              <div className='mt-0.5 text-[11px] text-neutral-500/80 dark:text-neutral-400/80'>
+                Pick an action for this message
+              </div>
+            </div>
+            <div className='space-y-1'>
+              {filteredSlashCommands.map((command, index) => {
+                const selected = index === selectedSlashIndex
+                const commandLabel = command.startsWith('/') ? command : `/${command}`
+                const commandDescription = (() => {
+                  const normalized = command.replace(/^\/+/, '').toLowerCase()
+                  if (normalized === 'status-openai') return 'Show Codex usage limits'
+                  if (normalized === 'compactify') return 'Summarize this branch context'
+                  if (normalized.startsWith('bench')) return 'Benchmark chat rendering'
+                  if (normalized.startsWith('theme-demo')) return 'Cycle saved custom themes'
+                  return 'Insert command'
+                })()
+
+                return (
+                  <button
+                    key={command}
+                    type='button'
+                    className={`group/slash flex w-full items-center gap-3 rounded-[18px] px-3 py-2.5 text-left transition-all duration-200 active:scale-[0.99] ${
+                      selected
+                        ? 'bg-blue-500/10 text-blue-700 dark:bg-orange-500/15 dark:text-orange-100'
+                        : 'text-neutral-800 hover:bg-white/70 dark:text-neutral-100 dark:hover:bg-white/10'
+                    }`}
+                    onMouseEnter={() => setSelectedSlashIndex(index)}
+                    onClick={() => handleSlashCommandSelection(command)}
+                  >
+                    <span
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full font-mono text-sm transition-colors ${
+                        selected
+                          ? 'bg-blue-500/15 text-blue-700 dark:bg-orange-400/15 dark:text-orange-100'
+                          : 'bg-neutral-200/70 text-neutral-600 group-hover/slash:bg-neutral-200 dark:bg-white/10 dark:text-neutral-300 dark:group-hover/slash:bg-white/15'
+                      }`}
+                      aria-hidden='true'
+                    >
+                      /
+                    </span>
+                    <span className='min-w-0 flex-1'>
+                      <span className='block truncate text-sm font-semibold'>{commandLabel}</span>
+                      <span className='mt-0.5 block truncate text-[11px] text-neutral-500 dark:text-neutral-400'>
+                        {commandDescription}
+                      </span>
+                    </span>
+                    <span
+                      className={`text-lg leading-none transition-all duration-200 ${
+                        selected ? 'translate-x-0 opacity-100' : '-translate-x-1 opacity-0 group-hover/slash:opacity-60'
+                      }`}
+                      aria-hidden='true'
+                    >
+                      ›
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
           </div>
         )}
 
@@ -1026,6 +1082,7 @@ export const InputTextArea: React.FC<TextAreaProps> = ({
           disabled={state === 'disabled'}
           // maxLength={maxLength}
           className={`${stateStyles[state]} thin-scrollbar resize-none ${dragOver ? 'border-blue-500 ring-2 ring-blue-500' : ''} ${className}`}
+          style={textareaStyle}
           aria-invalid={state === 'error'}
           aria-describedby={state === 'error' && errorMessage ? errorId : undefined}
           autoFocus={autoFocus}
