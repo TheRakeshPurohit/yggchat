@@ -146,6 +146,7 @@ export class CodexResponsesProvider {
       modelName: input.model,
       reader: streamOpen.reader,
       firstRead: streamOpen.firstRead,
+      allowCommentaryFallbackText: input.allowCommentaryFallbackText,
     })
   }
 
@@ -157,6 +158,7 @@ export class CodexResponsesProvider {
       ...(input.signal ? { signal: input.signal } : {}),
       emit: input.emit,
       modelName: input.model,
+      allowCommentaryFallbackText: input.allowCommentaryFallbackText,
     })
   }
 

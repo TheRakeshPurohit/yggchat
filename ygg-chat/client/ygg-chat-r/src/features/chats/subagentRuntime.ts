@@ -14,7 +14,7 @@ import {
 import { getAllTools } from './toolDefinitions'
 import { createStreamingRun, finishStreamingRun } from './streamRunTracking'
 
-const DEFAULT_SUBAGENT_MODEL = 'openai/gpt-5.3-codex'
+const DEFAULT_SUBAGENT_MODEL = 'openai/gpt-5.4-mini'
 const MAX_PARALLEL_SUBAGENTS = 3
 const MAX_SUBAGENT_DEPTH = 2
 const isElectronEnvironment = environment === 'electron' || (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__)

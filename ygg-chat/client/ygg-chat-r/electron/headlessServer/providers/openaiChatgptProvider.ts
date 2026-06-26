@@ -2106,6 +2106,7 @@ export class OpenAiChatgptProvider implements HeadlessProvider {
       runId: requestId,
       signal: input.signal,
       emit,
+      allowCommentaryFallbackText: input.railwayTurn?.allowCommentaryFallbackText === true,
     })
 
     logOpenAiChatgpt('info', 'transport parsed output', {

@@ -28,6 +28,7 @@ type EphemeralGenerateInput = {
   temperature?: number
   responseFormat?: any
   think?: boolean
+  allowCommentaryFallbackText?: boolean
 }
 
 function normalizeTools(raw: any): InferenceToolDefinition[] | undefined {
@@ -135,6 +136,7 @@ function buildEphemeralGenerateInput(body: any): EphemeralGenerateInput {
     temperature: typeof body?.temperature === 'number' ? body.temperature : undefined,
     responseFormat: body?.response_format ?? body?.responseFormat,
     think: Boolean(body?.think),
+    allowCommentaryFallbackText: body?.allowCommentaryFallbackText !== false,
   }
 }
 
@@ -182,6 +184,16 @@ async function runLocalProviderGenerate(
     tools: parsed.tools,
     think: parsed.think,
     temperature: parsed.temperature,
+    railwayTurn:
+      providerName === 'openaichatgpt'
+        ? {
+            conversationId:
+              typeof body?.conversationId === 'string' && body.conversationId.trim()
+                ? body.conversationId.trim()
+                : `ephemeral:${Date.now()}`,
+            allowCommentaryFallbackText: parsed.allowCommentaryFallbackText,
+          }
+        : undefined,
   })
 
   return {

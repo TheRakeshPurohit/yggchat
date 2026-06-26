@@ -82,13 +82,40 @@ describe('registerEphemeralGenerateRoutes', () => {
     expect(payload.error).toContain('OpenAI ChatGPT auth missing')
   })
 
-  it('ephemeral chat normalizes ChatGPT display labels before calling the backend', async () => {
+  it('ephemeral chat normalizes ChatGPT display labels and enables commentary fallback', async () => {
     process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1yb3V0ZSJ9fQ.sig'
     const nativeFetch = globalThis.fetch.bind(globalThis)
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
       const body = JSON.parse(String(init?.body || '{}'))
       expect(body.model).toBe('gpt-5.4-mini')
-      return new Response('data: {"type":"response.output_text.delta","delta":"ok"}\n\ndata: [DONE]\n\n', {
+      const events = [
+        {
+          type: 'response.output_item.added',
+          item: { id: 'msg-commentary', type: 'message', role: 'assistant', phase: 'commentary' },
+        },
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg-commentary',
+          delta: 'VISIBLE_TEXT_OK',
+        },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp-commentary-route',
+            output: [
+              {
+                id: 'msg-commentary',
+                type: 'message',
+                role: 'assistant',
+                phase: 'commentary',
+                content: [],
+              },
+            ],
+          },
+        },
+      ]
+      const bodyText = `${events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`
+      return new Response(bodyText, {
         status: 200,
         headers: { 'content-type': 'text/event-stream' },
       }) as any
@@ -104,6 +131,7 @@ describe('registerEphemeralGenerateRoutes', () => {
     const payload = (await res.json()) as any
     expect(payload.success).toBe(true)
     expect(payload.provider).toBe('openaichatgpt')
+    expect(payload.message?.content).toBe('VISIBLE_TEXT_OK')
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 

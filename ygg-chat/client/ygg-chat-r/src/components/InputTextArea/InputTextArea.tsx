@@ -879,7 +879,7 @@ export const InputTextArea: React.FC<TextAreaProps> = ({
         {showSlashList && filteredSlashCommands.length > 0 && (
           <div
             ref={slashListRef}
-            className='absolute bottom-full left-0 z-50 mb-2 w-[min(22rem,calc(100vw-2rem))] max-h-72 overflow-y-auto rounded-[24px] bg-white/45 p-2 backdrop-blur-2xl thin-scrollbar dark:bg-neutral-950/45'
+            className='absolute bottom-full left-0 z-50 mb-2 max-h-72 w-[min(22rem,calc(100vw-2rem))] overflow-y-auto rounded-[24px] border border-neutral-200/80 bg-white p-2 shadow-2xl shadow-black/20 backdrop-blur-2xl thin-scrollbar dark:border-white/10 dark:bg-neutral-950 dark:shadow-black/50'
           >
             <div className='px-2 pb-2 pt-1'>
               <div className='text-[10px] font-semibold uppercase tracking-[0.18em] text-neutral-500 dark:text-neutral-500'>

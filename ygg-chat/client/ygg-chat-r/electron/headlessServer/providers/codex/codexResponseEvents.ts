@@ -2,6 +2,7 @@ import type { CodexParseResult, CodexResponseParseOptions } from './types.js'
 
 type State = {
   content: string
+  visibleContent: string
   reasoningParts: string[]
   toolCalls: NonNullable<CodexParseResult['toolCalls']>
   generatedImages: NonNullable<CodexParseResult['generatedImages']>
@@ -12,12 +13,14 @@ type State = {
   responseItemsAdded: any[]
   eventCounts: Map<string, number>
   itemPhases: Map<string, string>
+  itemText: Map<string, string>
   options: CodexResponseParseOptions
 }
 
 export function createCodexResponseParseState(options: CodexResponseParseOptions = {}): State {
   return {
     content: '',
+    visibleContent: '',
     reasoningParts: [],
     toolCalls: [],
     generatedImages: [],
@@ -28,6 +31,7 @@ export function createCodexResponseParseState(options: CodexResponseParseOptions
     responseItemsAdded: [],
     eventCounts: new Map(),
     itemPhases: new Map(),
+    itemText: new Map(),
     options,
   }
 }
@@ -69,11 +73,25 @@ export function processCodexResponsePayload(payload: any, state: State, eventHin
   switch (eventType) {
     case 'response.output_text.delta': {
       const delta = String(payload.delta ?? '')
-      state.content += delta
+      const itemId = getPayloadItemId(payload)
+      appendOutputText(state, itemId, delta)
       state.options.onTextDelta?.(delta)
-      const itemId = typeof payload.item_id === 'string' ? payload.item_id : typeof payload.itemId === 'string' ? payload.itemId : ''
       const phase = itemId ? state.itemPhases.get(itemId) : ''
-      if (phase !== 'commentary') state.options.emit?.({ type: 'chunk', part: 'text', delta })
+      if (phase !== 'commentary') {
+        state.visibleContent += delta
+        state.options.emit?.({ type: 'chunk', part: 'text', delta })
+      }
+      break
+    }
+    case 'response.output_text.done': {
+      const text = String(payload.text ?? '')
+      const itemId = getPayloadItemId(payload)
+      const existing = itemId ? state.itemText.get(itemId) || '' : ''
+      if (text && (!existing || !existing.includes(text))) {
+        appendOutputText(state, itemId, text)
+        const phase = itemId ? state.itemPhases.get(itemId) : ''
+        if (phase !== 'commentary') state.visibleContent += text
+      }
       break
     }
     case 'response.reasoning_text.delta':
@@ -92,7 +110,7 @@ export function processCodexResponsePayload(payload: any, state: State, eventHin
       break
     }
     case 'response.output_item.done': {
-      const item = payload.item || payload.output_item || payload
+      const item = enrichMessageItemWithStreamedText(payload.item || payload.output_item || payload, state)
       rememberItemPhase(item, state)
       if (item) state.responseItemsAdded.push(item)
       if (isHostedToolOutputItem(item)) state.outputItems.push(item)
@@ -119,22 +137,45 @@ export function processCodexResponsePayload(payload: any, state: State, eventHin
   }
 }
 
+function getPayloadItemId(payload: any): string {
+  return typeof payload?.item_id === 'string'
+    ? payload.item_id
+    : typeof payload?.itemId === 'string'
+      ? payload.itemId
+      : ''
+}
+
+function appendOutputText(state: State, itemId: string, text: string): void {
+  if (!text) return
+  state.content += text
+  if (itemId) state.itemText.set(itemId, `${state.itemText.get(itemId) || ''}${text}`)
+}
+
 function rememberItemPhase(item: any, state: State): void {
   const id = typeof item?.id === 'string' ? item.id : ''
   const phase = typeof item?.phase === 'string' ? item.phase : ''
   if (id && phase) state.itemPhases.set(id, phase)
 }
 
+function enrichMessageItemWithStreamedText(item: any, state: State): any {
+  if (!item || typeof item !== 'object') return item
+  if (item.type !== 'message' && item.type !== 'output_message') return item
+  const id = typeof item.id === 'string' ? item.id : ''
+  const streamedText = id ? state.itemText.get(id) || '' : ''
+  if (!streamedText || outputTextFromItem(item).trim()) return item
+  return { ...item, content: [{ type: 'output_text', text: streamedText }] }
+}
+
 function captureCompletedResponseMetadata(response: any, state: State): void {
   if (!response || typeof response !== 'object') return
   if (typeof response.id === 'string') state.responseId = response.id
   if (response.usage !== undefined) state.usage = response.usage
-  if (Array.isArray(response.output)) state.outputItems = response.output
+  if (Array.isArray(response.output)) state.outputItems = response.output.map(item => enrichMessageItemWithStreamedText(item, state))
 }
 
 function collectResponseOutput(response: any, state: State): void {
   if (!Array.isArray(response?.output)) return
-  for (const item of response.output) collectOutputItem(item, state)
+  for (const item of response.output) collectOutputItem(enrichMessageItemWithStreamedText(item, state), state)
 }
 
 function collectOutputItem(item: any, state: State): void {
@@ -163,21 +204,41 @@ function collectOutputItem(item: any, state: State): void {
     const text = outputTextFromItem(item)
     if (text && !state.content) {
       state.content += text
-      state.options.emit?.({ type: 'chunk', part: 'text', delta: text })
+      if (item.phase !== 'commentary') {
+        state.visibleContent += text
+        state.options.emit?.({ type: 'chunk', part: 'text', delta: text })
+      }
     }
   }
 }
 
 function selectFinalText(state: State): string {
-  if (!Array.isArray(state.outputItems) || state.outputItems.length === 0) return state.content
-  const messages = state.outputItems
-    .filter(item => item?.type === 'message' || item?.type === 'output_message')
-    .map(item => ({ phase: item.phase, text: outputTextFromItem(item) }))
-    .filter(item => item.text.trim())
-  if (messages.length === 0) return state.content
+  const streamFallback = state.options.allowCommentaryFallbackText ? state.content.trim() : state.visibleContent.trim()
+  const messages = Array.isArray(state.outputItems)
+    ? state.outputItems
+        .filter(item => item?.type === 'message' || item?.type === 'output_message')
+        .map(item => {
+          const id = typeof item.id === 'string' ? item.id : ''
+          const phase = typeof item.phase === 'string' ? item.phase : id ? state.itemPhases.get(id) || '' : ''
+          const itemText = outputTextFromItem(item)
+          const streamedText = id ? state.itemText.get(id) || '' : ''
+          return { phase, text: itemText.trim() ? itemText : streamedText }
+        })
+        .filter(item => item.text.trim())
+    : []
+
   const finalAnswer = [...messages].reverse().find(item => item.phase === 'final_answer')
+  if (finalAnswer?.text.trim()) return finalAnswer.text
+
   const nonCommentary = [...messages].reverse().find(item => item.phase !== 'commentary')
-  return finalAnswer?.text || nonCommentary?.text || messages[messages.length - 1]?.text || state.content
+  if (nonCommentary?.text.trim()) return nonCommentary.text
+
+  if (state.options.allowCommentaryFallbackText) {
+    const commentary = [...messages].reverse().find(item => item.phase === 'commentary')
+    if (commentary?.text.trim()) return commentary.text
+  }
+
+  return streamFallback
 }
 
 function appendReasoning(state: State, value: unknown): void {

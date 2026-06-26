@@ -22,6 +22,95 @@ describe('OpenAiChatgptProvider', () => {
     expect(normalizeOpenAIChatGPTModel('GPT-5.3 Codex')).toBe('gpt-5.3-codex')
   })
 
+  it('does not use commentary-only text as provider content by default', async () => {
+    process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1jb21tZW50YXJ5In19.sig'
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/event-stream' }),
+      body: createSseStream([
+        {
+          type: 'response.output_item.added',
+          item: { id: 'msg-commentary', type: 'message', role: 'assistant', phase: 'commentary' },
+        },
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg-commentary',
+          delta: 'COMMENTARY_ONLY_TEXT',
+        },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp-commentary-default',
+            output: [
+              {
+                id: 'msg-commentary',
+                type: 'message',
+                role: 'assistant',
+                phase: 'commentary',
+                content: [],
+              },
+            ],
+          },
+        },
+      ]),
+      text: async () => '',
+    } as any)
+
+    const provider = new OpenAiChatgptProvider()
+    const result = await provider.generate({ modelName: 'gpt-5.4-mini', history: [], userContent: 'hello' })
+
+    expect(result.content).toBe('')
+  })
+
+  it('uses commentary-only text as provider content when fallback is opted in', async () => {
+    process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1jb21tZW50YXJ5In19.sig'
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/event-stream' }),
+      body: createSseStream([
+        {
+          type: 'response.output_item.added',
+          item: { id: 'msg-commentary', type: 'message', role: 'assistant', phase: 'commentary' },
+        },
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg-commentary',
+          delta: 'VISIBLE_TEXT_OK',
+        },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp-commentary-opt-in',
+            output: [
+              {
+                id: 'msg-commentary',
+                type: 'message',
+                role: 'assistant',
+                phase: 'commentary',
+                content: [],
+              },
+            ],
+          },
+        },
+      ]),
+      text: async () => '',
+    } as any)
+
+    const provider = new OpenAiChatgptProvider()
+    const result = await provider.generate({
+      modelName: 'gpt-5.4-mini',
+      history: [],
+      userContent: 'hello',
+      railwayTurn: { conversationId: 'ephemeral-test', allowCommentaryFallbackText: true },
+    })
+
+    expect(result.content).toBe('VISIBLE_TEXT_OK')
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
     delete process.env.OPENAI_CHATGPT_ACCESS_TOKEN
