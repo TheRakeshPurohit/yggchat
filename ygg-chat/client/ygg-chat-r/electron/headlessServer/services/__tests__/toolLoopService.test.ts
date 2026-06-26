@@ -354,3 +354,103 @@ describeIfSqlite('ToolLoopService model-facing tool result sanitization', () => 
     expect(continuationToolMessage.content).not.toContain('# Long plan')
   })
 })
+
+describeIfSqlite('ToolLoopService plan mode runtime block list', () => {
+  let db: Database.Database
+  let statements: any
+  let messageRepo: MessageRepo
+
+  beforeEach(() => {
+    if (!BetterSqlite3Ctor) {
+      throw new Error('better-sqlite3 is unavailable in this runtime')
+    }
+
+    db = new BetterSqlite3Ctor(':memory:')
+    createSchema(db)
+    statements = createStatements(db)
+
+    const now = new Date().toISOString()
+    statements.upsertConversation.run('c1', null, 'u1', 'Conversation', 'gpt-5.1-codex-mini', null, null, null, null, 'local', now, now)
+
+    messageRepo = new MessageRepo({ db, statements })
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  it('allows bash and powershell execution in plan mode before invoking the executor', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({
+      content: '',
+      toolCalls: [
+        { id: 'call-bash', name: 'bash', arguments: { command: 'pwd', description: 'print working directory' } },
+        { id: 'call-powershell', name: 'powershell', arguments: { command: 'Get-Location', description: 'print working directory' } },
+      ],
+    })
+    providerRouter.enqueue({ content: 'done' })
+
+    const executedToolNames: string[] = []
+    const service = new ToolLoopService({
+      messageRepo,
+      providerRouter: providerRouter as unknown as ProviderRouter,
+      executeTool: async toolCall => {
+        executedToolNames.push(toolCall.name)
+        return `${toolCall.name}-ok`
+      },
+      maxTurns: 3,
+    })
+
+    await service.run(
+      {
+        provider: 'openaichatgpt',
+        modelName: 'gpt-5.1-codex-mini',
+        conversationId: 'c1',
+        assistantParentId: null,
+        history: [],
+        userContent: 'inspect',
+        operationMode: 'plan',
+      },
+      () => {}
+    )
+
+    expect(executedToolNames).toEqual(['bash', 'powershell'])
+  })
+
+  it('blocks mutating tools in plan mode before invoking the executor', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({
+      content: '',
+      toolCalls: [{ id: 'call-edit', name: 'edit_file', arguments: { path: 'README.md' } }],
+    })
+    providerRouter.enqueue({ content: 'recovered' })
+
+    let executorCalled = false
+    const service = new ToolLoopService({
+      messageRepo,
+      providerRouter: providerRouter as unknown as ProviderRouter,
+      executeTool: async () => {
+        executorCalled = true
+        return 'should-not-run'
+      },
+      maxTurns: 3,
+    })
+
+    const events: any[] = []
+    await service.run(
+      {
+        provider: 'openaichatgpt',
+        modelName: 'gpt-5.1-codex-mini',
+        conversationId: 'c1',
+        assistantParentId: null,
+        history: [],
+        userContent: 'edit',
+        operationMode: 'plan',
+      },
+      event => events.push(event)
+    )
+
+    expect(executorCalled).toBe(false)
+    expect(events.some((event: any) => event.type === 'tool_execution' && event.status === 'failed')).toBe(true)
+  })
+})

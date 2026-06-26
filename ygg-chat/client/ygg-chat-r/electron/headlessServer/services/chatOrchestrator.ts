@@ -8,6 +8,7 @@ import { BranchOrchestrator, type ResolvedExecution } from './branchOrchestrator
 import { buildHeadlessSystemPrompt } from './headlessSystemPrompt.js'
 import { ProviderRouter } from './providerRouter.js'
 import { ProviderErrorAssistantResponse, ToolLoopService, type ToolExecutor, type ToolLoopRunResult } from './toolLoopService.js'
+import { filterToolsForOperationMode } from '../../../../../shared/operationModeToolPolicy.js'
 
 interface ChatOrchestratorDeps {
   db: any
@@ -129,12 +130,15 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
 
     const history = this.conversationRepo.listPathToMessage(request.conversationId, resolved.historyLeafId)
 
-    const resolvedTools =
-      Array.isArray(request.tools) && request.tools.length > 0 ? request.tools : this.defaultToolsProvider()
+    const resolvedOperationMode = request.operationMode ?? 'execute'
+    const resolvedTools = filterToolsForOperationMode(
+      Array.isArray(request.tools) && request.tools.length > 0 ? request.tools : this.defaultToolsProvider(),
+      resolvedOperationMode
+    )
 
     const project = conversation?.project_id ? this.projectRepo.getById(conversation.project_id) : null
     const systemPrompt = buildHeadlessSystemPrompt({
-      operationMode: request.operationMode ?? 'execute',
+      operationMode: resolvedOperationMode,
       includeOperationModePrompt: request.includeOperationModePrompt ?? true,
       requestPrompt: request.systemPrompt ?? null,
       projectPrompt: project?.system_prompt ?? null,
@@ -175,7 +179,7 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
         tools: resolvedTools,
         streamId: trackedStreamId,
         rootPath: request.rootPath ?? conversation?.cwd ?? null,
-        operationMode: request.operationMode ?? 'execute',
+        operationMode: resolvedOperationMode,
         toolTimeoutMs: request.toolTimeoutMs,
       },
         emit

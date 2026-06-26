@@ -558,3 +558,65 @@ describeIfSqlite('ChatOrchestrator prompt resolution', () => {
     expect(providerRouter.calls[0].systemPrompt).toBe('You are ChatGPT.')
   })
 })
+
+describeIfSqlite('ChatOrchestrator plan mode tool policy', () => {
+  let db: Database.Database
+  let statements: any
+  let providerRouter: FakeProviderRouter
+  let orchestrator: ChatOrchestrator
+
+  beforeEach(() => {
+    if (!BetterSqlite3Ctor) {
+      throw new Error('better-sqlite3 is unavailable in this runtime')
+    }
+
+    db = new BetterSqlite3Ctor(':memory:')
+    createSchema(db)
+    statements = createStatements(db)
+
+    const now = new Date().toISOString()
+    statements.upsertConversation.run('c-tools', null, 'u1', 'Conversation', 'gpt-5.5', null, null, null, null, 'local', now, now)
+
+    providerRouter = new FakeProviderRouter()
+    orchestrator = new ChatOrchestrator({
+      db,
+      statements,
+      providerRouter: providerRouter as any,
+      defaultToolsProvider: () => [
+        { name: 'bash' },
+        { name: 'powershell' },
+        { name: 'edit_file' },
+        { name: 'read_file' },
+        { name: 'mcp__server__tool' },
+      ],
+    })
+  })
+
+  afterEach(() => {
+    if (db) {
+      db.close()
+    }
+  })
+
+  it('filters default runtime tools for plan mode while keeping bash and powershell', async () => {
+    await orchestrator.runMessage(
+      {
+        operation: 'send',
+        conversationId: 'c-tools',
+        parentId: null,
+        content: 'hello',
+        provider: 'openaichatgpt',
+        modelName: 'gpt-5.5',
+        operationMode: 'plan',
+      },
+      () => {}
+    )
+
+    const toolNames = (providerRouter.calls[0].tools || []).map((tool: any) => tool.name)
+    expect(toolNames).toContain('bash')
+    expect(toolNames).toContain('powershell')
+    expect(toolNames).toContain('read_file')
+    expect(toolNames).not.toContain('edit_file')
+    expect(toolNames).not.toContain('mcp__server__tool')
+  })
+})

@@ -10,6 +10,7 @@ import { ProviderRouter, normalizeProviderRoute } from './providerRouter.js'
 import { persistWithFallback, type ToolResultPersistencePolicy } from './toolResultPersistenceService.js'
 import { sanitizeToolResultContentForModel } from '../providers/toolResultSanitizer.js'
 import { formatProviderErrorForAssistant, type FormattedProviderError } from '../providers/providerErrorFormatter.js'
+import { assertToolAllowedForOperationMode } from '../../../../../shared/operationModeToolPolicy.js'
 
 export interface ToolExecutionContext {
   conversationId: string
@@ -380,12 +381,15 @@ export class ToolLoopService {
         const startedAt = Date.now()
 
         try {
+          const operationMode = input.operationMode ?? 'execute'
+          assertToolAllowedForOperationMode(toolCall, operationMode)
+
           const result = await this.executeTool(toolCall, {
             conversationId: input.conversationId,
             messageId: assistantMessage.id,
             streamId: input.streamId ?? null,
             rootPath: input.rootPath ?? null,
-            operationMode: input.operationMode ?? 'execute',
+            operationMode,
             timeoutMs: input.toolTimeoutMs,
           })
 
