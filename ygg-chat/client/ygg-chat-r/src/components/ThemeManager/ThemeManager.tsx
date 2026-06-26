@@ -365,7 +365,7 @@ export const ThemeManager: React.FC = () => {
   const handleNodeColorChange = useCallback(
     (
       sender: HeimdallNodeThemeKey,
-      key: 'fill' | 'stroke' | 'visibleStroke',
+      key: 'fill' | 'visibleFill' | 'stroke' | 'visibleStroke',
       mode: 'light' | 'dark',
       nextValue: string
     ) => {
@@ -540,6 +540,26 @@ export const ThemeManager: React.FC = () => {
               label='App solid background colors (Settings > Solid Color Background)'
               value={theme.colors.appBackgroundColor}
               onChange={(mode, value) => handleChatSurfaceChange('appBackgroundColor', mode, value)}
+            />
+            <PairEditor
+              label='Thin scrollbar thumb (default/hidden)'
+              value={theme.colors.thinScrollbarThumb}
+              onChange={(mode, value) => handleChatSurfaceChange('thinScrollbarThumb', mode, value)}
+            />
+            <PairEditor
+              label='Thin scrollbar thumb hover'
+              value={theme.colors.thinScrollbarThumbHover}
+              onChange={(mode, value) => handleChatSurfaceChange('thinScrollbarThumbHover', mode, value)}
+            />
+            <PairEditor
+              label='Thin scrollbar track'
+              value={theme.colors.thinScrollbarTrack}
+              onChange={(mode, value) => handleChatSurfaceChange('thinScrollbarTrack', mode, value)}
+            />
+            <PairEditor
+              label='Thin scrollbar inner shadow'
+              value={theme.colors.thinScrollbarShadow}
+              onChange={(mode, value) => handleChatSurfaceChange('thinScrollbarShadow', mode, value)}
             />
             <PairEditor
               label='Settings pane full body background'
@@ -1388,6 +1408,11 @@ export const ThemeManager: React.FC = () => {
                   label='Node fill'
                   value={theme.colors.heimdallNodes[sender].fill}
                   onChange={(mode, value) => handleNodeColorChange(sender, 'fill', mode, value)}
+                />
+                <PairEditor
+                  label='Visible node fill'
+                  value={theme.colors.heimdallNodes[sender].visibleFill}
+                  onChange={(mode, value) => handleNodeColorChange(sender, 'visibleFill', mode, value)}
                 />
                 <PairEditor
                   label='Node stroke'

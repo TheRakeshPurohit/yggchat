@@ -12,6 +12,7 @@ import {
   type AgentStreamListItem,
 } from '../../hooks/useRunningAgentStreams'
 import { useConversationBranchDebugData, type ResearchNoteItem } from '../../hooks/useQueries'
+import { getThemeModeColor, useCustomChatTheme, useHtmlDarkMode } from '../ThemeManager/themeConfig'
 
 interface RunningAgentsFloatingButtonProps {
   notes?: ResearchNoteItem[]
@@ -57,6 +58,21 @@ const formatAgentTime = (value: string | null | undefined): string => {
 const getNotificationHref = (notification: UiNotification): string => {
   const projectSegment = notification.projectId != null ? String(notification.projectId) : 'unknown'
   return `/chat/${projectSegment}/${notification.conversationId}#${notification.messageId}`
+}
+
+const getTranslucentCssColor = (color: string, alpha: number) => {
+  const clampedAlpha = Math.max(0, Math.min(1, alpha))
+  const hexMatch = color.match(/^#([0-9a-fA-F]{6})$/)
+
+  if (hexMatch) {
+    const hex = hexMatch[1]
+    const r = parseInt(hex.slice(0, 2), 16)
+    const g = parseInt(hex.slice(2, 4), 16)
+    const b = parseInt(hex.slice(4, 6), 16)
+    return `rgba(${r}, ${g}, ${b}, ${clampedAlpha})`
+  }
+
+  return `color-mix(in srgb, ${color} ${Math.round(clampedAlpha * 100)}%, transparent)`
 }
 
 interface BranchDebugStreamMatch {
@@ -354,6 +370,151 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
   const hasErroredStream = activeStreams.some(stream => stream.hasError)
   const compactLabel = 'agents'
   const activeCountLabel = activeStreams.length > 1 ? `+${activeStreams.length - 1}` : null
+  const { theme: customTheme, enabled: customThemeEnabled } = useCustomChatTheme()
+  const isDarkMode = useHtmlDarkMode()
+
+  const floatingSurfaceBaseBg = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.settingsCustomThemesCardBg, isDarkMode)
+    : undefined
+  const floatingSurfaceBorder = customThemeEnabled
+    ? getTranslucentCssColor(getThemeModeColor(customTheme.colors.settingsCustomThemesCardBorder, isDarkMode), 0.5)
+    : undefined
+  const floatingSurfaceText = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.toolJobsPrimaryText, isDarkMode)
+    : undefined
+  const floatingSurfaceMutedText = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.toolJobsMutedText, isDarkMode)
+    : undefined
+  const floatingSectionTitleText = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.settingsCustomThemesTitleText, isDarkMode)
+    : undefined
+  const floatingAgentNameText = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.settingsCustomThemesAccentText, isDarkMode)
+    : undefined
+  const floatingAgentHistoryNameText = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.settingsCustomThemesListItemMetaText, isDarkMode)
+    : undefined
+  const floatingAccentBg = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.settingsCustomThemesAccentBg, isDarkMode)
+    : undefined
+  const floatingAccentText = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.settingsCustomThemesAccentText, isDarkMode)
+    : undefined
+  const floatingBadgeBg = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.settingsCustomThemesBadgeBg, isDarkMode)
+    : undefined
+  const floatingBadgeText = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.settingsCustomThemesBadgeText, isDarkMode)
+    : undefined
+  const floatingInnerBg = customThemeEnabled
+    ? getTranslucentCssColor(getThemeModeColor(customTheme.colors.settingsCustomThemesInnerCardBg, isDarkMode), 0.74)
+    : undefined
+  const floatingHoverBg = customThemeEnabled
+    ? getTranslucentCssColor(getThemeModeColor(customTheme.colors.settingsCustomThemesInnerCardBg, isDarkMode), 0.62)
+    : undefined
+  const floatingTintColor = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.settingsCustomThemesPrimaryButtonBg, isDarkMode)
+    : undefined
+  const floatingActiveDotColor = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.toolJobsProgressRunning, isDarkMode)
+    : undefined
+  const floatingIdleDotColor = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.toolJobsProgressPending, isDarkMode)
+    : undefined
+  const floatingErrorDotColor = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.toolJobsProgressFailed, isDarkMode)
+    : undefined
+  const floatingCompletedDotColor = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.toolJobsProgressCompleted, isDarkMode)
+    : undefined
+  const floatingButtonBg = customThemeEnabled
+    ? getTranslucentCssColor(getThemeModeColor(customTheme.colors.settingsCustomThemesButtonBg, isDarkMode), 0.82)
+    : undefined
+  const floatingButtonBorder = customThemeEnabled
+    ? getTranslucentCssColor(getThemeModeColor(customTheme.colors.settingsCustomThemesButtonBorder, isDarkMode), 0.56)
+    : undefined
+  const floatingButtonText = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.settingsCustomThemesButtonText, isDarkMode)
+    : undefined
+  const currentStatusDotColor = hasErroredStream
+    ? floatingErrorDotColor
+    : hasActiveStreams
+      ? floatingActiveDotColor
+      : floatingIdleDotColor
+  const floatingShellStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        background: [
+          floatingTintColor ? `radial-gradient(circle at 16% 0%, ${getTranslucentCssColor(floatingTintColor, 0.18)}, transparent 42%)` : null,
+          floatingAccentBg ? `linear-gradient(135deg, ${getTranslucentCssColor(floatingAccentBg, 0.22)}, transparent 56%)` : null,
+          floatingSurfaceBaseBg ? getTranslucentCssColor(floatingSurfaceBaseBg, 0.78) : null,
+        ]
+          .filter(Boolean)
+          .join(', '),
+        borderColor: floatingSurfaceBorder,
+        color: floatingSurfaceText,
+      }
+    : undefined
+  const floatingTopRowStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? ({ '--running-agents-floating-hover-bg': floatingHoverBg } as React.CSSProperties)
+    : undefined
+  const floatingDividerStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { borderColor: floatingSurfaceBorder }
+    : undefined
+  const floatingMutedTextStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { color: floatingSurfaceMutedText }
+    : undefined
+  const floatingPrimaryTextStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { color: floatingSurfaceText }
+    : undefined
+  const floatingSectionTitleStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { color: floatingSectionTitleText }
+    : undefined
+  const floatingAgentNameStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { color: floatingAgentNameText }
+    : undefined
+  const floatingAgentHistoryNameStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { color: floatingAgentHistoryNameText }
+    : undefined
+  const floatingStatusDotStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { backgroundColor: currentStatusDotColor }
+    : undefined
+  const floatingActiveDotStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { backgroundColor: floatingActiveDotColor }
+    : undefined
+  const floatingCompletedDotStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { backgroundColor: floatingCompletedDotColor }
+    : undefined
+  const floatingErrorDotStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { backgroundColor: floatingErrorDotColor }
+    : undefined
+  const floatingErrorBadgeStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: floatingErrorDotColor ? getTranslucentCssColor(floatingErrorDotColor, 0.14) : undefined,
+        color: floatingErrorDotColor,
+      }
+    : undefined
+  const floatingBadgeStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { backgroundColor: floatingBadgeBg, color: floatingBadgeText }
+    : undefined
+  const floatingAccentBadgeStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { backgroundColor: floatingAccentBg, color: floatingAccentText }
+    : undefined
+  const floatingCardStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { backgroundColor: floatingInnerBg, color: floatingSurfaceMutedText }
+    : undefined
+  const floatingRowStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? ({
+        '--running-agents-row-hover-bg': floatingHoverBg,
+        backgroundColor: floatingInnerBg,
+      } as React.CSSProperties)
+    : undefined
+  const floatingControlButtonStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: floatingButtonBg,
+        borderColor: floatingButtonBorder,
+        color: floatingButtonText,
+      }
+    : undefined
 
   const statusTone = hasErroredStream
     ? 'bg-rose-500'
@@ -447,13 +608,19 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
       <motion.div
         layout
         transition={shouldReduceMotion ? softTransition : expanded ? springTransition : collapseTransition}
-        className='overflow-hidden rounded-[28px] border border-neutral-200/80 bg-white/90 text-neutral-800 shadow-[0_18px_55px_rgba(15,23,42,0.18)] backdrop-blur-xl will-change-[width,height,transform] dark:border-neutral-700/70 dark:bg-yBlack-900/90 dark:text-neutral-100'
+        className='overflow-hidden rounded-[28px] border border-neutral-200/60 bg-white/75 text-neutral-800 shadow-[0_18px_55px_rgba(15,23,42,0.18)] backdrop-blur-2xl will-change-[width,height,transform] dark:border-neutral-700/55 dark:bg-yBlack-900/75 dark:text-neutral-100'
+        style={floatingShellStyle}
       >
         <div className='relative'>
           <motion.div
             layout
             onClick={toggleExpanded}
-            className='relative flex w-full cursor-pointer items-center justify-between gap-1.5 p-1.5 outline-none transition-colors hover:bg-neutral-100/45 dark:hover:bg-neutral-800/35'
+            className={`relative flex w-full cursor-pointer items-center justify-between gap-1.5 p-1.5 outline-none transition-colors ${
+              customThemeEnabled
+                ? 'hover:bg-[var(--running-agents-floating-hover-bg)] dark:hover:bg-[var(--running-agents-floating-hover-bg)]'
+                : 'hover:bg-neutral-100/45 dark:hover:bg-neutral-800/35'
+            }`}
+            style={floatingTopRowStyle}
           >
             <AnimatePresence mode='popLayout' initial={false}>
               {inlineNotification ? (
@@ -462,22 +629,36 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                   type='button'
                   layout
                   onClick={() => navigateToNotification(inlineNotification)}
-                  className='group flex min-h-11 max-w-[min(19rem,calc(100vw-6rem))] items-center gap-2 rounded-full px-3 py-2 text-left outline-none transition-colors hover:bg-neutral-100/75 focus-visible:ring-2 focus-visible:ring-emerald-400/70 dark:hover:bg-neutral-800/70'
+                  className={`group flex min-h-11 max-w-[min(19rem,calc(100vw-6rem))] items-center gap-2 rounded-full px-3 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-emerald-400/70 ${
+                    customThemeEnabled
+                      ? 'hover:bg-[var(--running-agents-floating-hover-bg)] dark:hover:bg-[var(--running-agents-floating-hover-bg)]'
+                      : 'hover:bg-neutral-100/75 dark:hover:bg-neutral-800/70'
+                  }`}
+                  style={floatingTopRowStyle}
                   initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, x: 10, scale: 0.985 }}
                   animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, x: 0, scale: 1 }}
                   exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, x: 8, scale: 0.985 }}
                   transition={shouldReduceMotion ? softTransition : internalTransition}
                   aria-label={inlineNotification.title}
                 >
-                  <span className='relative flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-200'>
+                  <span
+                    className='relative flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-200'
+                    style={floatingAccentBadgeStyle}
+                  >
                     <i className='bx bx-check text-sm lg:text-base' aria-hidden='true' />
                   </span>
                   <span className='min-w-0'>
-                    <span className='block truncate text-xs lg:text-sm font-semibold text-neutral-900 dark:text-neutral-100'>
+                    <span
+                      className='block truncate text-xs lg:text-sm font-semibold text-neutral-900 dark:text-neutral-100'
+                      style={floatingPrimaryTextStyle}
+                    >
                       {inlineNotification.title}
                     </span>
                     {inlineNotification.description ? (
-                      <span className='block truncate text-[10px] lg:text-[11px] font-medium text-neutral-500 dark:text-neutral-400'>
+                      <span
+                        className='block truncate text-[10px] lg:text-[11px] font-medium text-neutral-500 dark:text-neutral-400'
+                        style={floatingMutedTextStyle}
+                      >
                         {inlineNotification.description}
                       </span>
                     ) : null}
@@ -492,7 +673,12 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                     event.stopPropagation()
                     toggleExpanded()
                   }}
-                  className='group flex min-h-11 items-center gap-2 rounded-full px-3 py-2 text-sm lg:text-base font-semibold outline-none transition-colors hover:bg-neutral-100/75 focus-visible:ring-2 focus-visible:ring-emerald-400/70 dark:hover:bg-neutral-800/70'
+                  className={`group flex min-h-11 items-center gap-2 rounded-full px-3 py-2 text-sm lg:text-base font-semibold outline-none transition-colors focus-visible:ring-2 focus-visible:ring-emerald-400/70 ${
+                    customThemeEnabled
+                      ? 'hover:bg-[var(--running-agents-floating-hover-bg)] dark:hover:bg-[var(--running-agents-floating-hover-bg)]'
+                      : 'hover:bg-neutral-100/75 dark:hover:bg-neutral-800/70'
+                  }`}
+                  style={floatingTopRowStyle}
                   initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, x: -8, scale: 0.985 }}
                   animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, x: 0, scale: 1 }}
                   exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, x: -8, scale: 0.985 }}
@@ -502,7 +688,8 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                 >
                   <span className='relative flex h-3.5 w-3.5 items-center justify-center' aria-hidden='true'>
                     <motion.span
-                      className={`relative h-2.5 w-2.5 rounded-full ${statusTone}`}
+                      className={`relative h-2.5 w-2.5 rounded-full ${customThemeEnabled ? '' : statusTone}`}
+                      style={floatingStatusDotStyle}
                       animate={
                         hasActiveStreams && !shouldReduceMotion
                           ? { scale: [1, 1.32, 1], opacity: [1, 0.55, 1] }
@@ -512,7 +699,7 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                     />
                   </span>
 
-                  <motion.span layout className='whitespace-nowrap tracking-[-0.01em]'>
+                  <motion.span layout className='whitespace-nowrap tracking-[-0.01em]' style={floatingPrimaryTextStyle}>
                     {compactLabel}
                   </motion.span>
 
@@ -526,6 +713,7 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                         exit={{ opacity: 0, scale: 0.75, x: -4 }}
                         transition={shouldReduceMotion ? softTransition : internalTransition}
                         className='rounded-full bg-neutral-900/90 px-1.5 py-0.5 text-[10px] lg:text-[11px] font-bold leading-none text-white dark:bg-neutral-100 dark:text-neutral-900'
+                        style={floatingBadgeStyle}
                       >
                         {activeCountLabel}
                       </motion.span>
@@ -578,6 +766,7 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                     onOpenApps()
                   }}
                   className='flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-neutral-200/70 bg-neutral-50/85 text-neutral-700 shadow-sm transition-colors duration-150 hover:bg-white hover:text-neutral-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/70 dark:border-neutral-700/70 dark:bg-neutral-900/80 dark:text-neutral-200 dark:hover:bg-neutral-800'
+                  style={floatingControlButtonStyle}
                   initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.88, x: 8 }}
                   animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1, x: 0 }}
                   exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.88, x: 8 }}
@@ -608,6 +797,7 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                 exit={shouldReduceMotion ? { opacity: 0, height: 0 } : { opacity: 0, height: 0, transition: springTransition }}
                 transition={shouldReduceMotion ? collapseSoftTransition : springTransition}
                 className='w-[min(22rem,calc(100vw-2rem))] overflow-hidden border-t border-neutral-200/70 dark:border-neutral-800/80'
+                style={floatingDividerStyle}
               >
                 <motion.div
                   initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.985 }}
@@ -618,18 +808,31 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                 >
                 <div className='flex items-center justify-between px-2 py-2'>
                   <div className='flex items-center gap-2'>
-                    <div className='text-[11px] lg:text-xs font-semibold uppercase tracking-[0.18em] text-neutral-500 dark:text-neutral-400'>
+                    <div
+                      className='text-[11px] lg:text-xs font-semibold uppercase tracking-[0.18em] text-neutral-500 dark:text-neutral-400'
+                      style={floatingSectionTitleStyle}
+                    >
                       Running agents
                     </div>
-                    <span className='flex items-center gap-1.5 rounded-full bg-neutral-100/80 px-2 py-0.5 text-[10px] lg:text-[11px] font-semibold text-neutral-600 dark:bg-neutral-800/80 dark:text-neutral-300'>
-                      <span className={`h-1.5 w-1.5 rounded-full ${statusTone}`} aria-hidden='true' />
+                    <span
+                      className='flex items-center gap-1.5 rounded-full bg-neutral-100/80 px-2 py-0.5 text-[10px] lg:text-[11px] font-semibold text-neutral-600 dark:bg-neutral-800/80 dark:text-neutral-300'
+                      style={floatingCardStyle}
+                    >
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full ${customThemeEnabled ? '' : statusTone}`}
+                        style={floatingStatusDotStyle}
+                        aria-hidden='true'
+                      />
                       {activeStreams.length}
                     </span>
                   </div>
                 </div>
 
                 {activeStreams.length === 0 ? (
-                  <div className='rounded-2xl bg-neutral-50/80 px-3 py-3 text-xs lg:text-sm text-neutral-500 dark:bg-neutral-900/50 dark:text-neutral-400'>
+                  <div
+                    className='rounded-2xl bg-neutral-50/80 px-3 py-3 text-xs lg:text-sm text-neutral-500 dark:bg-neutral-900/50 dark:text-neutral-400'
+                    style={floatingCardStyle}
+                  >
                     Agents are idle. New running streams will appear here instantly.
                   </div>
                 ) : (
@@ -643,7 +846,12 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                           layout
                           onClick={() => navigateToStream(stream)}
                           disabled={!href}
-                          className='group w-full rounded-2xl bg-neutral-50/80 px-3 py-2.5 text-left transition hover:bg-neutral-100/90 disabled:cursor-default disabled:opacity-60 dark:bg-neutral-900/45 dark:hover:bg-neutral-800/70'
+                          className={`group w-full rounded-2xl bg-neutral-50/80 px-3 py-2.5 text-left transition disabled:cursor-default disabled:opacity-60 ${
+                            customThemeEnabled
+                              ? 'hover:bg-[var(--running-agents-row-hover-bg)] dark:hover:bg-[var(--running-agents-row-hover-bg)]'
+                              : 'hover:bg-neutral-100/90 dark:bg-neutral-900/45 dark:hover:bg-neutral-800/70'
+                          }`}
+                          style={floatingRowStyle}
                           transition={shouldReduceMotion ? softTransition : internalTransition}
                           whileHover={shouldReduceMotion ? undefined : { scale: 1.004 }}
                           whileTap={shouldReduceMotion ? undefined : { scale: 0.996 }}
@@ -651,13 +859,20 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                           <div className='flex items-start justify-between gap-3'>
                             <div className='min-w-0 flex-1'>
                               <div className='flex min-w-0 items-center gap-2'>
-                                <span className='shrink-0 text-[11px] lg:text-xs font-bold text-emerald-600 dark:text-emerald-300'>
+                                <span
+                                  className='shrink-0 text-[11px] lg:text-xs font-bold text-emerald-600 dark:text-emerald-300'
+                                  style={floatingAgentNameStyle}
+                                >
                                   {stream.displayName}
                                 </span>
-                                <span className='shrink-0 text-[10px] lg:text-[11px] font-medium text-neutral-500 dark:text-neutral-400'>
+                                <span className='shrink-0 text-[10px] lg:text-[11px] font-medium text-neutral-500 dark:text-neutral-400'
+                                  style={floatingMutedTextStyle}>
                                   {formatAgentTime(stream.createdAt)}
                                 </span>
-                                <span className='truncate text-[12px] lg:text-sm font-semibold text-neutral-900 dark:text-neutral-100'>
+                                <span
+                                  className='truncate text-[12px] lg:text-sm font-semibold text-neutral-900 dark:text-neutral-100'
+                                  style={floatingPrimaryTextStyle}
+                                >
                                   {stream.conversationTitle || `Conversation ${stream.conversationId || 'Unknown'}`}
                                 </span>
                               </div>
@@ -666,12 +881,16 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                                 <span className='relative flex h-4 w-4 items-center justify-center' aria-label='Agent stream active'>
                                   <motion.span
                                     className='h-2.5 w-2.5 rounded-full bg-emerald-500'
+                                    style={floatingActiveDotStyle}
                                     animate={shouldReduceMotion ? { scale: 1, opacity: 1 } : { scale: [1, 1.35, 1], opacity: [1, 0.55, 1] }}
                                     transition={{ duration: 1.25, repeat: Infinity, ease: 'easeInOut' }}
                                   />
                                 </span>
                                 {stream.hasError ? (
-                                  <span className='rounded-full bg-rose-100 px-2 py-0.5 text-[10px] lg:text-[11px] font-medium text-rose-700 dark:bg-rose-500/15 dark:text-rose-200'>
+                                  <span
+                                    className='rounded-full bg-rose-100 px-2 py-0.5 text-[10px] lg:text-[11px] font-medium text-rose-700 dark:bg-rose-500/15 dark:text-rose-200'
+                                    style={floatingErrorBadgeStyle}
+                                  >
                                     error
                                   </span>
                                 ) : null}
@@ -690,20 +909,26 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                   </div>
                 )}
 
-                <div className='mt-3 border-t border-neutral-200/70 pt-3 dark:border-neutral-800/80'>
+                <div className='mt-3 border-t border-neutral-200/70 pt-3 dark:border-neutral-800/80' style={floatingDividerStyle}>
                   <div className='flex items-center justify-between px-2 pb-2'>
-                    <div className='text-[11px] lg:text-xs font-semibold uppercase tracking-[0.18em] text-neutral-500 dark:text-neutral-400'>
+                    <div
+                      className='text-[11px] lg:text-xs font-semibold uppercase tracking-[0.18em] text-neutral-500 dark:text-neutral-400'
+                      style={floatingSectionTitleStyle}
+                    >
                       History
                     </div>
                     {streamHistory.length > 0 ? (
-                      <div className='text-[10px] lg:text-[11px] text-neutral-500 dark:text-neutral-400'>
+                      <div className='text-[10px] lg:text-[11px] text-neutral-500 dark:text-neutral-400' style={floatingMutedTextStyle}>
                         last {streamHistory.length}
                       </div>
                     ) : null}
                   </div>
 
                   {streamHistory.length === 0 ? (
-                    <div className='rounded-2xl bg-neutral-50/70 px-3 py-2.5 text-xs lg:text-sm text-neutral-500 dark:bg-neutral-900/40 dark:text-neutral-400'>
+                    <div
+                      className='rounded-2xl bg-neutral-50/70 px-3 py-2.5 text-xs lg:text-sm text-neutral-500 dark:bg-neutral-900/40 dark:text-neutral-400'
+                      style={floatingCardStyle}
+                    >
                       Completed streams will appear here.
                     </div>
                   ) : (
@@ -717,7 +942,12 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                             layout
                             onClick={() => navigateToStream(stream)}
                             disabled={!href}
-                            className='group w-full rounded-2xl bg-stone-50/70 px-3 py-2.5 text-left opacity-90 transition hover:bg-neutral-100/90 hover:opacity-100 disabled:cursor-default disabled:opacity-60 dark:bg-neutral-900/35 dark:hover:bg-neutral-800/65'
+                            className={`group w-full rounded-2xl bg-stone-50/70 px-3 py-2.5 text-left opacity-90 transition hover:opacity-100 disabled:cursor-default disabled:opacity-60 ${
+                              customThemeEnabled
+                                ? 'hover:bg-[var(--running-agents-row-hover-bg)] dark:hover:bg-[var(--running-agents-row-hover-bg)]'
+                                : 'hover:bg-neutral-100/90 dark:bg-neutral-900/35 dark:hover:bg-neutral-800/65'
+                            }`}
+                            style={floatingRowStyle}
                             transition={shouldReduceMotion ? softTransition : internalTransition}
                             whileHover={shouldReduceMotion ? undefined : { scale: 1.004 }}
                             whileTap={shouldReduceMotion ? undefined : { scale: 0.996 }}
@@ -725,28 +955,42 @@ export const RunningAgentsFloatingButton: React.FC<RunningAgentsFloatingButtonPr
                             <div className='flex items-start justify-between gap-3'>
                               <div className='min-w-0 flex-1'>
                                 <div className='flex min-w-0 items-center gap-2'>
-                                  <span className='shrink-0 text-[11px] lg:text-xs font-bold text-neutral-500 dark:text-neutral-400'>
+                                  <span
+                                    className='shrink-0 text-[11px] lg:text-xs font-bold text-neutral-500 dark:text-neutral-400'
+                                    style={floatingAgentHistoryNameStyle}
+                                  >
                                     {stream.displayName}
                                   </span>
-                                  <span className='shrink-0 text-[10px] lg:text-[11px] font-medium text-neutral-500 dark:text-neutral-400'>
+                                  <span className='shrink-0 text-[10px] lg:text-[11px] font-medium text-neutral-500 dark:text-neutral-400'
+                                  style={floatingMutedTextStyle}>
                                     {formatAgentTime(stream.completedAt || stream.createdAt)}
                                   </span>
-                                  <span className='truncate text-[12px] lg:text-sm font-semibold text-neutral-800 dark:text-neutral-100'>
+                                  <span
+                                    className='truncate text-[12px] lg:text-sm font-semibold text-neutral-800 dark:text-neutral-100'
+                                    style={floatingPrimaryTextStyle}
+                                  >
                                     {stream.conversationTitle || `Conversation ${stream.conversationId || 'Unknown'}`}
                                   </span>
                                 </div>
                                 <ParentMessageTicker text={stream.parentMessageText} reduceMotion={shouldReduceMotion} />
                                 <div className='mt-1 flex flex-wrap items-center gap-1.5 text-[11px] lg:text-xs'>
                                   <span
-                                    className={`h-2.5 w-2.5 rounded-full ${stream.hasError ? 'bg-rose-500' : 'bg-emerald-500'}`}
+                                    className={`h-2.5 w-2.5 rounded-full ${customThemeEnabled ? '' : stream.hasError ? 'bg-rose-500' : 'bg-emerald-500'}`}
+                                    style={stream.hasError ? floatingErrorDotStyle : floatingCompletedDotStyle}
                                     aria-label={stream.hasError ? 'Agent stream ended with error' : 'Agent stream completed'}
                                   />
                                   {stream.hasError ? (
-                                    <span className='rounded-full bg-rose-100 px-2 py-0.5 text-[10px] lg:text-[11px] font-medium text-rose-700 dark:bg-rose-500/15 dark:text-rose-200'>
+                                    <span
+                                      className='rounded-full bg-rose-100 px-2 py-0.5 text-[10px] lg:text-[11px] font-medium text-rose-700 dark:bg-rose-500/15 dark:text-rose-200'
+                                      style={floatingErrorBadgeStyle}
+                                    >
                                       ended with error
                                     </span>
                                   ) : (
-                                    <span className='rounded-full bg-neutral-100 px-2 py-0.5 text-[10px] lg:text-[11px] font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400'>
+                                    <span
+                                      className='rounded-full bg-neutral-100 px-2 py-0.5 text-[10px] lg:text-[11px] font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400'
+                                      style={floatingBadgeStyle}
+                                    >
                                       completed
                                     </span>
                                   )}

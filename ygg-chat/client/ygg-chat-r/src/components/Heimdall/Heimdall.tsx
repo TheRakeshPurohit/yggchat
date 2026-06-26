@@ -125,6 +125,21 @@ const getReadableTextColor = (hex: string) => {
   return luminance > 150 ? '#0f172a' : '#ffffff'
 }
 
+const getTranslucentCssColor = (color: string, alpha: number) => {
+  const clampedAlpha = Math.max(0, Math.min(1, alpha))
+  const hexMatch = color.match(/^#([0-9a-fA-F]{6})$/)
+
+  if (hexMatch) {
+    const hex = hexMatch[1]
+    const r = parseInt(hex.slice(0, 2), 16)
+    const g = parseInt(hex.slice(2, 4), 16)
+    const b = parseInt(hex.slice(4, 6), 16)
+    return `rgba(${r}, ${g}, ${b}, ${clampedAlpha})`
+  }
+
+  return `color-mix(in srgb, ${color} ${Math.round(clampedAlpha * 100)}%, transparent)`
+}
+
 const getHeimdallNodeFallbackFillClass = (sender: ChatNode['sender'], isVisible: boolean, isDarkMode: boolean) => {
   if (isVisible) {
     return isDarkMode ? 'fill-orange-500/20' : 'fill-blue-100'
@@ -2951,7 +2966,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       const nodeTheme = customTheme.colors.heimdallNodes[senderKey]
 
       return {
-        fill: getThemeModeColor(nodeTheme.fill, isDarkMode),
+        fill: getThemeModeColor(isVisible ? nodeTheme.visibleFill : nodeTheme.fill, isDarkMode),
         stroke: getThemeModeColor(isVisible ? nodeTheme.visibleStroke : nodeTheme.stroke, isDarkMode),
       }
     },
@@ -3081,6 +3096,68 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const heimdallNoteDialogCloseButtonTextColor = customThemeEnabled
     ? getThemeModeColor(customTheme.colors.heimdallNoteDialogCloseButtonText, isDarkMode)
     : '#a8a29e'
+  const heimdallGlassSurfaceBaseBackgroundColor = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.settingsCustomThemesCardBg, isDarkMode)
+    : undefined
+  const heimdallGlassSurfaceBorderColor = customThemeEnabled
+    ? getTranslucentCssColor(getThemeModeColor(customTheme.colors.heimdallNoteDialogBorder, isDarkMode), isDarkMode ? 0.22 : 0.45)
+    : undefined
+  const heimdallContextMenuBaseBackgroundColor = heimdallGlassSurfaceBaseBackgroundColor
+  const heimdallContextMenuBackgroundColor = heimdallContextMenuBaseBackgroundColor
+    ? getTranslucentCssColor(heimdallContextMenuBaseBackgroundColor, 0.78)
+    : undefined
+  const heimdallContextMenuTextColor = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.toolJobsPrimaryText, isDarkMode)
+    : undefined
+  const heimdallContextMenuMutedTextColor = customThemeEnabled
+    ? getThemeModeColor(customTheme.colors.toolJobsMutedText, isDarkMode)
+    : undefined
+  const heimdallContextMenuBorderColor = heimdallGlassSurfaceBorderColor
+  const heimdallContextMenuDividerColor = customThemeEnabled
+    ? getTranslucentCssColor(getThemeModeColor(customTheme.colors.heimdallNoteDialogBorder, isDarkMode), 0.35)
+    : undefined
+  const heimdallContextMenuItemHoverColor = customThemeEnabled
+    ? getTranslucentCssColor(getThemeModeColor(customTheme.colors.settingsCustomThemesInnerCardBg, isDarkMode), 0.72)
+    : undefined
+  const heimdallContextMenuDestructiveHoverColor = customThemeEnabled
+    ? getTranslucentCssColor('#dc2626', isDarkMode ? 0.24 : 0.12)
+    : undefined
+  const heimdallContextMenuStyle: React.CSSProperties = {
+    left: Math.max(8, Math.min(contextMenuPos?.x ?? 0, Math.max(0, dimensions.width - 260))),
+    top: Math.max(8, Math.min(contextMenuPos?.y ?? 0, Math.max(0, dimensions.height - 270))),
+    ...(customThemeEnabled
+      ? {
+          backgroundColor: heimdallContextMenuBackgroundColor,
+          borderColor: heimdallContextMenuBorderColor,
+          color: heimdallContextMenuTextColor,
+        }
+      : {}),
+  }
+  const heimdallContextMenuHeaderStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { color: heimdallContextMenuMutedTextColor }
+    : undefined
+  const heimdallContextMenuDividerStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? { backgroundColor: heimdallContextMenuDividerColor }
+    : undefined
+  const getHeimdallContextMenuItemStyle = useCallback(
+    (destructive = false): React.CSSProperties | undefined =>
+      customThemeEnabled
+        ? ({
+            '--heimdall-context-menu-item-hover-bg': destructive
+              ? heimdallContextMenuDestructiveHoverColor
+              : heimdallContextMenuItemHoverColor,
+            '--heimdall-context-menu-item-hover-text': destructive ? '#ef4444' : heimdallContextMenuTextColor,
+            color: heimdallContextMenuMutedTextColor,
+          } as React.CSSProperties)
+        : undefined,
+    [
+      customThemeEnabled,
+      heimdallContextMenuDestructiveHoverColor,
+      heimdallContextMenuItemHoverColor,
+      heimdallContextMenuMutedTextColor,
+      heimdallContextMenuTextColor,
+    ]
+  )
 
   const getNotePillColors = useCallback(
     (noteColor?: string | null) => {
@@ -3803,6 +3880,54 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     'group/control relative flex h-11 w-11 items-center justify-center rounded-full border border-stone-200/80 bg-white/85 text-stone-700 shadow-[0_18px_42px_-24px_rgba(15,23,42,0.65),0_4px_14px_-10px_rgba(15,23,42,0.45)] backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-105 hover:border-stone-300 hover:bg-white hover:text-stone-950 hover:shadow-[0_22px_46px_-22px_rgba(15,23,42,0.7)] active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-50 dark:border-white/10 dark:bg-yBlack-900/85 dark:text-stone-200 dark:shadow-[0_20px_52px_-24px_rgba(0,0,0,0.9)] dark:hover:border-white/20 dark:hover:bg-neutral-900 dark:hover:text-white dark:focus-visible:ring-orange-400/70 dark:focus-visible:ring-offset-yBlack-900'
   const heimdallControlButtonActiveClass =
     'border-blue-300 bg-blue-50 text-blue-700 shadow-[0_18px_42px_-22px_rgba(37,99,235,0.55)] hover:border-blue-300 hover:bg-blue-100 hover:text-blue-800 dark:border-orange-400/40 dark:bg-orange-500/15 dark:text-orange-100 dark:shadow-[0_20px_52px_-24px_rgba(249,115,22,0.65)] dark:hover:border-orange-300/60 dark:hover:bg-orange-500/25 dark:hover:text-orange-50'
+  const heimdallControlPanelBackgroundColor = heimdallGlassSurfaceBaseBackgroundColor
+    ? getTranslucentCssColor(heimdallGlassSurfaceBaseBackgroundColor, 0.6)
+    : undefined
+  const heimdallControlPanelStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: heimdallControlPanelBackgroundColor,
+        borderColor: heimdallGlassSurfaceBorderColor,
+      }
+    : undefined
+  const heimdallControlButtonStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: getTranslucentCssColor(
+          getThemeModeColor(customTheme.colors.settingsCustomThemesButtonBg, isDarkMode),
+          0.82
+        ),
+        borderColor: getTranslucentCssColor(getThemeModeColor(customTheme.colors.settingsCustomThemesButtonBorder, isDarkMode), 0.5),
+        color: getThemeModeColor(customTheme.colors.settingsCustomThemesButtonText, isDarkMode),
+      }
+    : undefined
+  const getHeimdallControlButtonStyle = useCallback(
+    (active = false): React.CSSProperties | undefined =>
+      customThemeEnabled
+        ? active
+          ? {
+              backgroundColor: getTranslucentCssColor(
+                getThemeModeColor(customTheme.colors.composerToggleActiveBg, isDarkMode),
+                0.84
+              ),
+              borderColor: getTranslucentCssColor(
+                getThemeModeColor(customTheme.colors.composerToggleActiveBorder, isDarkMode),
+                0.65
+              ),
+              color: getThemeModeColor(customTheme.colors.composerToggleActiveText, isDarkMode),
+            }
+          : heimdallControlButtonStyle
+        : undefined,
+    [customTheme, customThemeEnabled, heimdallControlButtonStyle, isDarkMode]
+  )
+  const heimdallContextMenuItemClass = `w-full flex items-center gap-3 px-3 py-2.5 rounded-[14px] text-sm font-medium cursor-pointer transition-all duration-200 hover:pl-4 group ${
+    customThemeEnabled
+      ? 'text-stone-500 hover:bg-[var(--heimdall-context-menu-item-hover-bg)] hover:text-[var(--heimdall-context-menu-item-hover-text)] dark:text-neutral-400 dark:hover:bg-[var(--heimdall-context-menu-item-hover-bg)] dark:hover:text-[var(--heimdall-context-menu-item-hover-text)]'
+      : 'text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-white'
+  }`
+  const heimdallContextMenuDestructiveItemClass = `w-full flex items-center gap-3 px-3 py-2.5 rounded-[14px] text-sm font-medium cursor-pointer transition-all duration-200 hover:pl-4 group ${
+    customThemeEnabled
+      ? 'text-stone-500 hover:bg-[var(--heimdall-context-menu-item-hover-bg)] hover:text-[var(--heimdall-context-menu-item-hover-text)] dark:text-neutral-400 dark:hover:bg-[var(--heimdall-context-menu-item-hover-bg)] dark:hover:text-[var(--heimdall-context-menu-item-hover-text)]'
+      : 'text-stone-500 hover:bg-red-50 hover:text-red-600 dark:text-neutral-400 dark:hover:bg-red-950 dark:hover:text-red-400'
+  }`
 
   return (
     <div
@@ -3881,12 +4006,14 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         </div>
       )}
       <div
-        className={`absolute bottom-12 left-4 z-10 flex items-center gap-2 rounded-full border border-stone-200/70 bg-white/30 p-1.5 shadow-[0_24px_56px_-30px_rgba(15,23,42,0.65)] backdrop-blur-xl transition-all duration-200 dark:border-white/10 dark:bg-black/20 ${isHovering ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0'}`}
+        className={`absolute bottom-12 left-4 z-10 flex items-center gap-2 rounded-full border border-stone-200/55 bg-white/30 p-1.5 shadow-[0_24px_56px_-30px_rgba(15,23,42,0.65)] backdrop-blur-2xl transition-all duration-200 dark:border-white/[0.04] dark:bg-black/20 ${isHovering ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0'}`}
+        style={heimdallControlPanelStyle}
       >
         <button
           type='button'
           onClick={zoomIn}
           className={heimdallControlButtonClass}
+          style={getHeimdallControlButtonStyle()}
           title='Zoom In'
           aria-label='Zoom in'
         >
@@ -3896,6 +4023,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           type='button'
           onClick={zoomOut}
           className={heimdallControlButtonClass}
+          style={getHeimdallControlButtonStyle()}
           title='Zoom Out'
           aria-label='Zoom out'
         >
@@ -3905,6 +4033,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           type='button'
           onClick={resetView}
           className={heimdallControlButtonClass}
+          style={getHeimdallControlButtonStyle()}
           title='Reset View'
           aria-label='Reset view'
         >
@@ -3914,6 +4043,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           type='button'
           onClick={toggleFilterEmptyMessages}
           className={`${heimdallControlButtonClass} ${filterEmptyMessages ? heimdallControlButtonActiveClass : ''}`}
+          style={getHeimdallControlButtonStyle(filterEmptyMessages)}
           title={filterEmptyMessages ? 'Show Empty Messages' : 'Hide Empty Messages'}
           aria-label={filterEmptyMessages ? 'Show empty messages' : 'Hide empty messages'}
           aria-pressed={filterEmptyMessages}
@@ -3928,6 +4058,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
               ? 'border-transparent bg-gradient-to-br from-sky-500 via-emerald-500 to-orange-500 text-white shadow-[0_18px_44px_-20px_rgba(249,115,22,0.75)] hover:border-transparent hover:text-white dark:border-transparent dark:bg-gradient-to-br dark:from-sky-500 dark:via-emerald-500 dark:to-orange-500 dark:text-white'
               : ''
           }`}
+          style={getHeimdallControlButtonStyle(heatmapMode)}
           title={heatmapMode ? 'Disable Heatmap Mode' : 'Enable Heatmap Mode'}
           aria-label={heatmapMode ? 'Disable heatmap mode' : 'Enable heatmap mode'}
           aria-pressed={heatmapMode}
@@ -3940,6 +4071,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
             dispatch(chatSliceActions.heimdallCompactModeToggled())
           }}
           className={heimdallControlButtonClass}
+          style={getHeimdallControlButtonStyle()}
           title={compactMode ? 'Switch to Full Mode' : 'Switch to Compact Mode'}
           aria-label={compactMode ? 'Switch to full mode' : 'Switch to compact mode'}
         >
@@ -4218,19 +4350,20 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       {/* Custom context menu after selection */}
       {showContextMenu && contextMenuPos && (
         <div
-          className='absolute z-30 w-[240px] rounded-[20px] p-1.5 border border-stone-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 shadow-[0_30px_60px_-12px_rgba(0,0,0,0.25)] dark:shadow-[0_30px_60px_-12px_rgba(0,0,0,0.6)] animate-menuEntrance'
-          style={{
-            left: Math.max(8, Math.min(contextMenuPos.x, Math.max(0, dimensions.width - 260))),
-            top: Math.max(8, Math.min(contextMenuPos.y, Math.max(0, dimensions.height - 270))),
-          }}
+          className='absolute z-30 w-[240px] rounded-[20px] border border-stone-200/55 bg-white/75 p-1.5 shadow-[0_30px_60px_-12px_rgba(0,0,0,0.25)] backdrop-blur-2xl animate-menuEntrance dark:border-neutral-700/55 dark:bg-neutral-900/75 dark:shadow-[0_30px_60px_-12px_rgba(0,0,0,0.6)]'
+          style={heimdallContextMenuStyle}
           onMouseDown={e => e.stopPropagation()}
         >
-          <div className='font-mono text-[9px] uppercase tracking-[0.1em] text-stone-400 dark:text-neutral-500 px-3 py-2'>
+          <div
+            className='font-mono text-[9px] uppercase tracking-[0.1em] text-stone-400 dark:text-neutral-500 px-3 py-2'
+            style={heimdallContextMenuHeaderStyle}
+          >
             Message Actions
           </div>
 
           <button
-            className='w-full flex items-center gap-3 px-3 py-2.5 rounded-[14px] text-stone-500 dark:text-neutral-400 text-sm font-medium cursor-pointer transition-all duration-200 hover:bg-stone-100 dark:hover:bg-neutral-800 hover:text-stone-900 dark:hover:text-white hover:pl-4 group'
+            className={heimdallContextMenuItemClass}
+            style={getHeimdallContextMenuItemStyle()}
             onClick={handleCopySelectedPaths}
           >
             <svg
@@ -4250,7 +4383,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
           {selectedNodes.length === 1 && (
             <button
-              className='w-full flex items-center gap-3 px-3 py-2.5 rounded-[14px] text-stone-500 dark:text-neutral-400 text-sm font-medium cursor-pointer transition-all duration-200 hover:bg-stone-100 dark:hover:bg-neutral-800 hover:text-stone-900 dark:hover:text-white hover:pl-4 group'
+              className={heimdallContextMenuItemClass}
+              style={getHeimdallContextMenuItemStyle()}
               onClick={() => {
                 const nodeId = String(selectedNodes[0])
                 if (contextMenuPos) {
@@ -4280,10 +4414,14 @@ export const Heimdall: React.FC<HeimdallProps> = ({
             </button>
           )}
 
-          <div className='h-px bg-stone-200 dark:bg-neutral-700 mx-2 my-1.5' />
+          <div
+            className='h-px bg-stone-200 dark:bg-neutral-700 mx-2 my-1.5'
+            style={heimdallContextMenuDividerStyle}
+          />
 
           <button
-            className='w-full flex items-center gap-3 px-3 py-2.5 rounded-[14px] text-stone-500 dark:text-neutral-400 text-sm font-medium cursor-pointer transition-all duration-200 hover:bg-stone-100 dark:hover:bg-neutral-800 hover:text-stone-900 dark:hover:text-white hover:pl-4 group'
+            className={heimdallContextMenuItemClass}
+            style={getHeimdallContextMenuItemStyle()}
             onClick={handleCreateNewChat}
           >
             <svg
@@ -4299,7 +4437,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           </button>
 
           <button
-            className='w-full flex items-center gap-3 px-3 py-2.5 rounded-[14px] text-stone-500 dark:text-neutral-400 text-sm font-medium cursor-pointer transition-all duration-200 hover:bg-stone-100 dark:hover:bg-neutral-800 hover:text-stone-900 dark:hover:text-white hover:pl-4 group'
+            className={heimdallContextMenuItemClass}
+            style={getHeimdallContextMenuItemStyle()}
             onClick={() => handleOpenConversationSelector('copy')}
           >
             <svg
@@ -4315,7 +4454,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           </button>
 
           <button
-            className='w-full flex items-center gap-3 px-3 py-2.5 rounded-[14px] text-stone-500 dark:text-neutral-400 text-sm font-medium cursor-pointer transition-all duration-200 hover:bg-stone-100 dark:hover:bg-neutral-800 hover:text-stone-900 dark:hover:text-white hover:pl-4 group'
+            className={heimdallContextMenuItemClass}
+            style={getHeimdallContextMenuItemStyle()}
             onClick={() => handleOpenConversationSelector('move')}
           >
             <svg
@@ -4330,10 +4470,14 @@ export const Heimdall: React.FC<HeimdallProps> = ({
             <span>Move to Existing Chat</span>
           </button>
 
-          <div className='h-px bg-stone-200 dark:bg-neutral-700 mx-2 my-1.5' />
+          <div
+            className='h-px bg-stone-200 dark:bg-neutral-700 mx-2 my-1.5'
+            style={heimdallContextMenuDividerStyle}
+          />
 
           <button
-            className='w-full flex items-center gap-3 px-3 py-2.5 rounded-[14px] text-stone-500 dark:text-neutral-400 text-sm font-medium cursor-pointer transition-all duration-200 hover:bg-red-50 dark:hover:bg-red-950 hover:text-red-600 dark:hover:text-red-400 hover:pl-4 group'
+            className={heimdallContextMenuDestructiveItemClass}
+            style={getHeimdallContextMenuItemStyle(true)}
             onClick={handleDeleteNodes}
           >
             <svg

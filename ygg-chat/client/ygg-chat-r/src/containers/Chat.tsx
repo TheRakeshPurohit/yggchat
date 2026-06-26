@@ -135,7 +135,7 @@ import {
 } from '../features/ideContext/ideContextSelectors'
 import { selectSelectedProject } from '../features/projects/projectSelectors'
 import { uiActions } from '../features/ui'
-import { refreshUserCredits, selectCurrentUser } from '../features/users'
+import { selectCurrentUser } from '../features/users'
 import {
   CHAT_REASONING_SETTINGS_CHANGE_EVENT,
   loadChatReasoningSettings,
@@ -1333,7 +1333,6 @@ function Chat() {
   const [inputAreaHeight, setInputAreaHeight] = useState(170)
   const [containerHeight, setContainerHeight] = useState(1100)
   // Credits refresh loading state
-  const [isRefreshingCredits, setIsRefreshingCredits] = useState(false)
   // Todo list collapsed state
   const [todoListCollapsed, setTodoListCollapsed] = useState(false)
   const [workspaceMutationsCollapsed, setWorkspaceMutationsCollapsed] = useState(false)
@@ -3490,13 +3489,10 @@ function Chat() {
   const effectiveChatInputBorderLightColor = effectiveAnimatedInputBorderColor ?? chatInputBorderLightColor
   const effectiveChatInputBorderDarkColor = effectiveAnimatedInputBorderColor ?? chatInputBorderDarkColor
 
-  const inputAreaBorderClasses = chatInputBorderAnimationEnabled
-    ? `chat-input-border-anim chat-input-border-${chatInputBorderAnimation}`
-    : operationMode === 'plan'
+  const leftControlsBorderClasses =
+    operationMode === 'plan'
       ? 'outline-1 outline-blue-200/70 dark:outline-neutral-700/50'
-      : useCustomInputAreaBorderColor
-        ? 'outline-2 dark:outline-2'
-        : 'outline-2 dark:outline-2 dark:outline-orange-700/70 outline-orange-700/70'
+      : 'outline-1 outline-neutral-200/70 dark:outline-neutral-700/50'
 
   const [showTokenUsageBar, setShowTokenUsageBar] = useState<boolean>(() => loadShowTokenUsageBar())
   const [showTokenUsageHoverDetails, setShowTokenUsageHoverDetails] = useState<boolean>(() =>
@@ -6029,21 +6025,46 @@ function Chat() {
   // Calculate progress percentages.
   const totalContextProgress =
     tokenLimits.totalBudget > 0 ? Math.min((tokenUsage.totalContextTokens / tokenLimits.totalBudget) * 100, 100) : 0
+  const tokenUsageProgressColor =
+    customThemeEnabled && chatProgressBarFillColor
+      ? chatProgressBarFillColor
+      : totalContextProgress >= 95
+        ? isDarkMode
+          ? '#f87171'
+          : '#ef4444'
+        : totalContextProgress >= 80
+          ? isDarkMode
+            ? '#fbbf24'
+            : '#f59e0b'
+          : isDarkMode
+            ? '#60a5fa'
+            : '#3b82f6'
+  const tokenUsageTintStrength = isDarkMode ? 16 : 13
+  const leftControlsTokenTintBaseColor = isDarkMode ? 'rgba(23, 23, 23, 0.4)' : 'rgba(245, 245, 245, 0.4)'
+  const leftControlsTokenTintStyle: React.CSSProperties | undefined = showTokenUsageBar
+    ? {
+        backgroundImage: `linear-gradient(90deg, color-mix(in srgb, ${tokenUsageProgressColor} ${tokenUsageTintStrength}%, transparent) 0%, color-mix(in srgb, ${tokenUsageProgressColor} ${tokenUsageTintStrength}%, transparent) ${totalContextProgress}%, ${leftControlsTokenTintBaseColor} ${Math.min(totalContextProgress + 8, 100)}%)`,
+      }
+    : undefined
+  const rightControlsTintColor =
+    useCustomInputAreaBorderColor && chatInputAreaBorderColor
+      ? chatInputAreaBorderColor
+      : chatInputBorderAnimationEnabled
+        ? isDarkMode
+          ? effectiveChatInputBorderDarkColor
+          : effectiveChatInputBorderLightColor
+        : isDarkMode
+          ? '#c2410c'
+          : '#93c5fd'
+  const rightControlsTintStrength = isDarkMode ? 28 : 24
+  const rightControlsTintStyle: React.CSSProperties | undefined =
+    operationMode === 'plan'
+      ? undefined
+      : {
+          backgroundColor: `color-mix(in srgb, ${rightControlsTintColor} ${rightControlsTintStrength}%, ${leftControlsTokenTintBaseColor})`,
+        }
   // Auto-compaction now runs as part of the explicit user send flow (handleSend),
   // so we intentionally avoid passive threshold-triggered compaction effects here.
-
-  // Handler to refresh user credits
-  const handleRefreshCredits = useCallback(async () => {
-    if (!userId || !accessToken || isRefreshingCredits) return
-    setIsRefreshingCredits(true)
-    try {
-      await dispatch(refreshUserCredits({ userId, accessToken })).unwrap()
-    } catch (error) {
-      console.error('Failed to refresh credits:', error)
-    } finally {
-      setIsRefreshingCredits(false)
-    }
-  }, [dispatch, userId, accessToken, isRefreshingCredits])
 
   return (
     <motion.div
@@ -6634,17 +6655,7 @@ function Chat() {
             />
 
             <div
-              className={`slate-input-wrapper relative z-10 ${inputAreaBorderClasses} bg-neutral-100/40 dark:bg-neutral-900/40 backdrop-blur-xl rounded-3xl px-2 py-3 transition-all duration-300`}
-              style={
-                chatInputBorderAnimationEnabled
-                  ? ({
-                      '--chat-input-border-light': effectiveChatInputBorderLightColor,
-                      '--chat-input-border-dark': effectiveChatInputBorderDarkColor,
-                    } as React.CSSProperties)
-                  : useCustomInputAreaBorderColor && chatInputAreaBorderColor
-                    ? { outlineColor: chatInputAreaBorderColor }
-                    : undefined
-              }
+              className={`slate-input-wrapper relative z-10 ${leftControlsBorderClasses} bg-neutral-100/40 dark:bg-neutral-900/40 backdrop-blur-xl rounded-3xl px-2 pt-3 pb-2 transition-all duration-300`}
             >
               {toolCallPermissionRequest && (
                 <ToolPermissionDialog
@@ -6675,7 +6686,7 @@ function Chat() {
                       <div className='flex items-center justify-between gap-2'>
                         <span className='flex min-w-0 items-center gap-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-400'>
                           <i className='bx bx-list-check shrink-0 text-2xl'></i>
-                          <span className='truncate text-[12px]'>{latestTodoList.name || 'Todo List'}</span>
+                          <span className='truncate text-[12px]'>Todo list</span>
                           {effectiveTodoListCollapsed && (
                             <span className='ml-1 shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
                               ({latestTodoList.items.filter(i => i.done).length}/{latestTodoList.items.length})
@@ -7015,89 +7026,15 @@ function Chat() {
                 </div>
               )}
 
-              {/* Token Usage Progress Bar - Optional */}
-              {showTokenUsageBar && (
-                <div className='mx-1 mb-0.5 group relative cursor-pointer'>
-                  <div className='flex items-center gap-2'>
-                    <div className='flex-1 h-0.5 bg-neutral-300/50 dark:bg-neutral-700/50 rounded-full overflow-hidden relative'>
-                      <div
-                        className={`absolute inset-0 h-full rounded-full transition-all duration-300 ${
-                          customThemeEnabled
-                            ? ''
-                            : totalContextProgress >= 95
-                              ? 'bg-red-500 dark:bg-red-400'
-                              : totalContextProgress >= 80
-                                ? 'bg-amber-500 dark:bg-amber-400'
-                                : 'bg-blue-500 dark:bg-blue-400'
-                        }`}
-                        style={{
-                          width: `${totalContextProgress}%`,
-                          ...(customThemeEnabled && chatProgressBarFillColor
-                            ? { backgroundColor: chatProgressBarFillColor }
-                            : {}),
-                        }}
-                      />
-                    </div>
-                    {/* Refresh credits button */}
-                    <button
-                      onClick={handleRefreshCredits}
-                      disabled={isRefreshingCredits}
-                      className='p-1 rounded-full hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors disabled:opacity-50'
-                      title='Refresh credits'
-                    >
-                      <svg
-                        className={`w-3 h-3 text-neutral-500 dark:text-neutral-400 ${isRefreshingCredits ? 'animate-spin' : ''}`}
-                        fill='none'
-                        stroke='currentColor'
-                        viewBox='0 0 24 24'
-                      >
-                        <path
-                          strokeLinecap='round'
-                          strokeLinejoin='round'
-                          strokeWidth={2}
-                          d='M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15'
-                        />
-                      </svg>
-                    </button>
-                  </div>
-                  {/* Hover Popup with Token Details */}
-                  {showTokenUsageHoverDetails && (
-                    <div className='absolute left-1/2 -translate-x-1/2 bottom-full mb-2 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50'>
-                      <div className='bg-neutral-100 dark:bg-neutral-900 text-black dark:text-white rounded-lg shadow-lg px-3 py-2 whitespace-nowrap'>
-                        <div className='flex items-center gap-2 text-xs'>
-                          <span className='text-blue-700 dark:text-blue-400'>Context:</span>
-                          <span>
-                            {tokenUsage.totalContextTokens.toLocaleString()} /{' '}
-                            {tokenLimits.totalBudget.toLocaleString()}
-                          </span>
-                        </div>
-                        <div className='flex items-center gap-2 text-xs mt-1'>
-                          <span className='text-neutral-700 dark:text-neutral-300'>Messages:</span>
-                          <span>{tokenUsage.messageTokens.toLocaleString()}</span>
-                        </div>
-                        <div className='flex items-center gap-2 text-xs mt-1'>
-                          <span className='text-neutral-700 dark:text-neutral-300'>Prompts + Context:</span>
-                          <span>{tokenUsage.promptAndContextTokens.toLocaleString()}</span>
-                        </div>
-                        <div className='flex items-center gap-2 text-xs mt-1'>
-                          <span className='text-neutral-700 dark:text-neutral-300'>Model window:</span>
-                          <span>{tokenLimits.totalContextLimit.toLocaleString()}</span>
-                        </div>
-                        <div className='flex items-center gap-2 text-xs mt-1'>
-                          <span className='text-neutral-900 dark:text-neutral-200'>Credits:</span>
-                          <span>{(current_credits * 100).toFixed(3)}</span>
-                        </div>
-                        {/* Tooltip Arrow */}
-                        <div className='absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-l-4 border-r-4 border-t-4 border-l-transparent border-r-transparent border-t-neutral-800 dark:border-t-neutral-900' />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-              {/* Controls row */}
-              <div className='flex items-center justify-between gap-0 flex-wrap'>
+            </div>
+
+            {/* Controls row */}
+            <div className='composer-controls-row relative z-10 mt-2 flex items-center justify-between gap-3'>
                 {/* Left side controls */}
-                <div className='flex items-center min-w-0 flex-1 overflow-hidden'>
+                <div
+                  className={`composer-controls-left group relative flex h-10 xl:h-12 min-w-0 flex-[0_1_58%] max-w-[58%] cursor-pointer items-center overflow-hidden rounded-full ${leftControlsBorderClasses} bg-neutral-100/40 px-2 py-1 md:py-1 xl:py-1.5 backdrop-blur-xl transition-all duration-300 dark:bg-neutral-900/40`}
+                  style={leftControlsTokenTintStyle}
+                >
                   <button
                     className='flex h-9 w-9 items-center justify-center rounded-full bg-white/80 text-stone-700 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-105 hover:bg-white hover:text-stone-950 active:translate-y-0 active:scale-95 dark:bg-yBlack-900/80 dark:text-stone-200 dark:hover:bg-neutral-900 dark:hover:text-white'
                     style={actionPopoverTriggerStyle}
@@ -7114,7 +7051,7 @@ function Chat() {
                       onAnimationEnd={() => setSpinSettings(false)}
                     />
                   </button>
-                  <div className='flex items-center gap-1 flex-nowrap min-w-0 flex-1 overflow-hidden'>
+                  <div className='composer-controls-left-selectors flex items-center gap-1 flex-nowrap min-w-0 flex-1 overflow-hidden'>
                     {import.meta.env.VITE_ENVIRONMENT === 'electron' && extensions.length > 0 && (
                       <Select
                         value={selectedExtensionId || ''}
@@ -7162,9 +7099,43 @@ function Chat() {
                       footerContent={modelSelectFooter}
                     />
                   </div>
+                  {showTokenUsageBar && showTokenUsageHoverDetails && (
+                    <div className='absolute left-1/2 bottom-full z-50 mb-2 -translate-x-1/2 opacity-0 invisible transition-all duration-200 group-hover:opacity-100 group-hover:visible'>
+                      <div className='rounded-lg bg-neutral-100 px-3 py-2 text-black shadow-lg whitespace-nowrap dark:bg-neutral-900 dark:text-white'>
+                        <div className='flex items-center gap-2 text-xs'>
+                          <span className='text-blue-700 dark:text-blue-400'>Context:</span>
+                          <span>
+                            {tokenUsage.totalContextTokens.toLocaleString()} /{' '}
+                            {tokenLimits.totalBudget.toLocaleString()}
+                          </span>
+                        </div>
+                        <div className='mt-1 flex items-center gap-2 text-xs'>
+                          <span className='text-neutral-700 dark:text-neutral-300'>Messages:</span>
+                          <span>{tokenUsage.messageTokens.toLocaleString()}</span>
+                        </div>
+                        <div className='mt-1 flex items-center gap-2 text-xs'>
+                          <span className='text-neutral-700 dark:text-neutral-300'>Prompts + Context:</span>
+                          <span>{tokenUsage.promptAndContextTokens.toLocaleString()}</span>
+                        </div>
+                        <div className='mt-1 flex items-center gap-2 text-xs'>
+                          <span className='text-neutral-700 dark:text-neutral-300'>Model window:</span>
+                          <span>{tokenLimits.totalContextLimit.toLocaleString()}</span>
+                        </div>
+                        <div className='mt-1 flex items-center gap-2 text-xs'>
+                          <span className='text-neutral-900 dark:text-neutral-200'>Credits:</span>
+                          <span>{(current_credits * 100).toFixed(3)}</span>
+                        </div>
+                        {/* Tooltip Arrow */}
+                        <div className='absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-x-4 border-t-4 border-x-transparent border-t-neutral-800 dark:border-t-neutral-900' />
+                      </div>
+                    </div>
+                  )}
                 </div>
                 {/* Right side controls */}
-                <div className='flex items-center gap-1 mr-2'>
+                <div
+                  className={`flex h-10 xl:h-12 shrink-0 items-center gap-1 rounded-full ${leftControlsBorderClasses} bg-neutral-100/40 px-2 py-1 md:py-1 xl:py-1.5 backdrop-blur-xl transition-all duration-300 dark:bg-neutral-900/40`}
+                  style={rightControlsTintStyle}
+                >
                   {(isImageGenerationModel ||
                     think ||
                     (import.meta.env.VITE_ENVIRONMENT === 'electron' && conversationIdFromUrl)) && (
@@ -7452,7 +7423,7 @@ function Chat() {
                   )}
                   {/* Thinking toggle - next to popover, disabled when not supported */}
                   <button
-                    className={`p-2 rounded-lg transition-all duration-200 ${
+                    className={`p-2 rounded-full transition-all duration-200 ${
                       selectedModel?.thinking
                         ? 'text-neutral-500 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-white/10 dark:hover:bg-white/5'
                         : 'text-neutral-300 dark:text-neutral-600 cursor-not-allowed'
@@ -7500,7 +7471,7 @@ function Chat() {
                     aria-hidden='true'
                   />
                   <button
-                    className='p-2 rounded-lg text-neutral-500 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-white/10 dark:hover:bg-white/5 transition-all duration-200'
+                    className='p-2 rounded-full text-neutral-500 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-white/10 dark:hover:bg-white/5 transition-all duration-200'
                     onClick={() => attachmentInputRef.current?.click()}
                     title='Attach files'
                   >
@@ -7573,7 +7544,6 @@ function Chat() {
             </div>
           </div>
         </div>
-      </div>
 
       {/* SEPARATOR - Hidden on mobile */}
       {heimdallVisible && !isMobile && (

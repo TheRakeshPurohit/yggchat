@@ -378,14 +378,13 @@ body.ygg-no-select * {
   /* Firefox */
   scroll-padding-top: 4px;
   scroll-padding-bottom: 4px;
-  scrollbar-color: #c5c5c5;
+  scrollbar-color: var(--thin-scrollbar-thumb, transparent) var(--thin-scrollbar-track, transparent);
   /* Hidden by default */
 }
 
 .thin-scrollbar:hover {
   /* Firefox - show on hover */
-  scrollbar-color: #c5c5c5;
-  /* light: neutral-400 thumb on transparent track */
+  scrollbar-color: var(--thin-scrollbar-thumb-hover, #c5c5c5) var(--thin-scrollbar-track, transparent);
 }
 
 /* Chromium/WebKit */
@@ -394,22 +393,21 @@ body.ygg-no-select * {
 }
 
 .thin-scrollbar::-webkit-scrollbar-thumb {
-  background-color: transparent;
+  background-color: var(--thin-scrollbar-thumb, transparent);
   /* Hidden by default */
   border-radius: 20px;
   border: 0.5px solid transparent;
-  box-shadow: inset 0 0 0 1px rgba(90, 90, 90, 0.02);
+  box-shadow: inset 0 0 0 1px var(--thin-scrollbar-shadow, rgba(90, 90, 90, 0.02));
   transition: background-color 0.2s ease-in-out;
   /* background-clip: padding-box; */
 }
 
 .thin-scrollbar:hover::-webkit-scrollbar-thumb {
-  background-color: #c5c5c5;
-  /* light: neutral-400 - visible on hover */
+  background-color: var(--thin-scrollbar-thumb-hover, #c5c5c5);
 }
 
 .thin-scrollbar::-webkit-scrollbar-track {
-  background: transparent;
+  background: var(--thin-scrollbar-track, transparent);
 }
 
 .thin-scrollbar::-webkit-scrollbar-button {
@@ -417,21 +415,13 @@ body.ygg-no-select * {
 }
 
 /* Dark mode overrides */
-.dark .thin-scrollbar {
-  /* Firefox */
-  scrollbar-color: transparent transparent;
-  /* Hidden by default */
-}
-
 .dark .thin-scrollbar:hover {
   /* Firefox - show on hover */
-  scrollbar-color: #262626 transparent;
-  /* dark: neutral-800 thumb on transparent track */
+  scrollbar-color: var(--thin-scrollbar-thumb-hover, #262626) var(--thin-scrollbar-track, transparent);
 }
 
 .dark .thin-scrollbar:hover::-webkit-scrollbar-thumb {
-  background-color: #262626;
-  /* dark: neutral-800 - visible on hover */
+  background-color: var(--thin-scrollbar-thumb-hover, #262626);
 }
 
 /* Utility: multi-line clamp without Tailwind plugin */
@@ -1065,4 +1055,19 @@ html {
 
 .chat-markdown .hljs-addition {
   color: var(--chat-md-syntax-addition);
+}
+
+@media (max-width: 860px) {
+  .composer-controls-row {
+    flex-wrap: nowrap;
+  }
+
+  .composer-controls-left {
+    flex: 0 0 auto;
+    max-width: none;
+  }
+
+  .composer-controls-left-selectors {
+    display: none;
+  }
 }

@@ -626,6 +626,8 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       return hasSimpleContent || hasBlockContent
     }, [content, contentBlocks])
 
+    const canBranchMessage = role === 'user' || (role === 'assistant' && messageData?.parent_id == null)
+
     const handleEdit = () => {
       dispatch(chatSliceActions.editingBranchSet(false))
       setEditingState(true)
@@ -2840,7 +2842,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       <div
         id={`message-${id}`}
         ref={messageRef}
-        className={`group px-0 sm:px-2 md:px-2 ${styles.container} ${contextHighlightClass} ${width} ${role === 'user' ? 'mt-4' : ''} transition-colors duration-200 rounded-md hover:bg-opacity-80 ${isCompactionSummary ? 'border border-emerald-300/50 dark:border-emerald-600/50 bg-emerald-50/40 dark:bg-emerald-900/10' : ''} ${className ?? ''}`}
+        className={`group px-0 sm:px-2 md:px-2 ${styles.container} ${contextHighlightClass} ${width} ${role === 'user' ? 'mt-4 pb-4' : ''} transition-colors duration-200 rounded-md hover:bg-opacity-80 ${isCompactionSummary ? 'border border-emerald-300/50 dark:border-emerald-600/50 bg-emerald-50/40 dark:bg-emerald-900/10' : ''} ${className ?? ''}`}
         style={styles.containerStyle}
         onContextMenu={handleContextMenu}
         onMouseEnter={() => setIsHovering(true)}
@@ -2848,16 +2850,6 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         onClick={handleMobileMessageActivate}
         onTouchStart={handleMobileMessageActivate}
       >
-        {role === 'user' && userTurnElapsedLabel && (
-          <div className='mb-4 flex w-full items-center gap-3 pt-1' aria-label={userTurnElapsedLabel}>
-            <div className='h-px flex-1 bg-gradient-to-r from-transparent via-neutral-500/30 to-neutral-500/20' />
-            <span className='shrink-0 rounded-full border border-neutral-500/20 bg-white/70 px-3 py-1 text-[0.625em] font-medium uppercase tracking-[0.12em] text-neutral-500 shadow-sm backdrop-blur dark:bg-neutral-950/60 dark:text-neutral-400'>
-              {userTurnElapsedLabel}
-            </span>
-            <div className='h-px flex-1 bg-gradient-to-l from-transparent via-neutral-500/30 to-neutral-500/20' />
-          </div>
-        )}
-
         {isCompactionSummary && (
           <div className='inline-flex mt-4 items-center gap-2 py-[3px] px-2.5 bg-emerald-100/70 dark:bg-emerald-900/40 border border-emerald-300/70 dark:border-emerald-700 rounded-md'>
             <div className='w-1.5 h-1.5 rounded-full bg-emerald-500' />
@@ -3045,19 +3037,31 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
           </div>
         )}
         {/* Actions row (at bottom) */}
-        {hasContent && role === 'user' && showInlineActions && (
-          <div className='flex items-center justify-end'>
-            <div ref={moreButtonRef} className='relative'>
+        {hasContent && canBranchMessage && showInlineActions && (
+          <div className='flex items-center justify-between gap-3'>
+            {role === 'user' && userTurnElapsedLabel && !editingState ? (
+              <div
+                className={`min-w-0 flex-1 text-[0.625em] font-medium uppercase tracking-[0.12em] text-neutral-500 transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] dark:text-neutral-400 ${
+                  isHovering ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0 pointer-events-none'
+                }`}
+                aria-label={userTurnElapsedLabel}
+              >
+                {userTurnElapsedLabel}
+              </div>
+            ) : (
+              <div className='flex-1' />
+            )}
+            <div ref={moreButtonRef} className='relative shrink-0'>
               <MessageActions
-                onEdit={handleEdit}
+                onEdit={role === 'user' ? handleEdit : undefined}
                 onBranch={handleBranch}
-                onDelete={handleDelete}
+                onDelete={role === 'user' ? handleDelete : undefined}
                 onCopy={handleCopy}
                 onSave={handleSave}
                 onSaveBranch={handleSaveBranch}
                 onCancel={handleCancel}
                 onMore={handleMoreClick}
-                onUndoEdits={undoState?.available ? onUndoStreamEdits : undefined}
+                onUndoEdits={role === 'user' && undoState?.available ? onUndoStreamEdits : undefined}
                 undoLabel={undoLabel}
                 undoDisabled={undoState?.restoring || undoState?.restored}
                 isEditing={editingState}
@@ -3154,7 +3158,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                     : undefined
                 }
                 onBranch={
-                  !hasSelection && role === 'user'
+                  !hasSelection && canBranchMessage
                     ? () => {
                         closeFloatingActions()
                         handleBranch()

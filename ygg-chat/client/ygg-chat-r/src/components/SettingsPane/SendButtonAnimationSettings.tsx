@@ -33,7 +33,7 @@ export const STREAMING_LIGHT_COLOR_STORAGE_KEY = 'chat:streamingAnimationLightCo
 export const STREAMING_DARK_COLOR_STORAGE_KEY = 'chat:streamingAnimationDarkColor'
 export const STREAMING_SPEED_STORAGE_KEY = 'chat:streamingAnimationSpeed'
 
-export const DEFAULT_SEND_BUTTON_LIGHT_COLOR = '#3b82f6'
+export const DEFAULT_SEND_BUTTON_LIGHT_COLOR = '#93c5fd'
 export const DEFAULT_SEND_BUTTON_DARK_COLOR = '#f97316'
 export const DEFAULT_STREAMING_LIGHT_COLOR = '#3b82f6'
 export const DEFAULT_STREAMING_DARK_COLOR = '#f97316'
@@ -111,7 +111,7 @@ export const getStoredSendButtonAnimation = (): SendButtonAnimationType => {
   } catch {
     // Ignore localStorage errors
   }
-  return 'pulse-orbit'
+  return 'inertia'
 }
 
 export const getStoredSendButtonColor = (): string => {
@@ -516,7 +516,7 @@ export const SendButtonAnimationSettings: React.FC<SendButtonAnimationSettingsPr
   }, [])
 
   const selectedSendButtonAnimationName = useMemo(
-    () => SEND_BUTTON_ANIMATIONS.find(animation => animation.id === selectedSendButtonAnimation)?.name || 'Pulse Orbit',
+    () => SEND_BUTTON_ANIMATIONS.find(animation => animation.id === selectedSendButtonAnimation)?.name || 'Inertia',
     [selectedSendButtonAnimation]
   )
   const isDarkModePreview =

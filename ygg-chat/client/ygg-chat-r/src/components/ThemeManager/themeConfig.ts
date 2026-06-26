@@ -18,6 +18,7 @@ export interface ChatMessageRoleTheme {
 
 export interface HeimdallNodeTheme {
   fill: ThemeColorPair
+  visibleFill: ThemeColorPair
   stroke: ThemeColorPair
   visibleStroke: ThemeColorPair
 }
@@ -32,6 +33,10 @@ export interface CustomChatTheme {
     conversationToolbarBg: ThemeColorPair
     settingsSolidColorSectionBg: ThemeColorPair
     appBackgroundColor: ThemeColorPair
+    thinScrollbarThumb: ThemeColorPair
+    thinScrollbarThumbHover: ThemeColorPair
+    thinScrollbarTrack: ThemeColorPair
+    thinScrollbarShadow: ThemeColorPair
     settingsPaneBodyBg: ThemeColorPair
     settingsCustomThemesCardBg: ThemeColorPair
     settingsCustomThemesCardBorder: ThemeColorPair
@@ -263,6 +268,22 @@ export const createDefaultCustomChatTheme = (): CustomChatTheme => ({
     appBackgroundColor: {
       light: '#F7F9FB',
       dark: '#050505',
+    },
+    thinScrollbarThumb: {
+      light: 'transparent',
+      dark: 'transparent',
+    },
+    thinScrollbarThumbHover: {
+      light: '#c5c5c5',
+      dark: '#262626',
+    },
+    thinScrollbarTrack: {
+      light: 'transparent',
+      dark: 'transparent',
+    },
+    thinScrollbarShadow: {
+      light: 'rgba(90, 90, 90, 0.02)',
+      dark: 'rgba(90, 90, 90, 0.02)',
     },
     settingsPaneBodyBg: {
       light: 'oklch(97% 0 0)',
@@ -998,16 +1019,19 @@ export const createDefaultCustomChatTheme = (): CustomChatTheme => ({
     heimdallNodes: {
       user: {
         fill: { light: '#f5f5f5', dark: '#171717' },
+        visibleFill: { light: '#dbeafe', dark: 'rgba(249, 115, 22, 0.2)' },
         stroke: { light: '#d4d4d4', dark: '#262626' },
         visibleStroke: { light: '#34d399', dark: '#f97316' },
       },
       assistant: {
         fill: { light: '#f1f5f9', dark: '#171717' },
+        visibleFill: { light: '#dbeafe', dark: 'rgba(249, 115, 22, 0.2)' },
         stroke: { light: '#e5e5e5', dark: '#262626' },
         visibleStroke: { light: '#34d399', dark: '#f97316' },
       },
       ex_agent: {
         fill: { light: '#f8fafc', dark: '#0a0a0a' },
+        visibleFill: { light: '#dbeafe', dark: 'rgba(249, 115, 22, 0.2)' },
         stroke: { light: '#ea580c', dark: '#ea580c' },
         visibleStroke: { light: '#34d399', dark: '#ea580c' },
       },
@@ -1049,6 +1073,7 @@ export const sanitizeCustomTheme = (value: unknown): CustomChatTheme => {
 
       acc[sender] = {
         fill: readColorPair(rawNodeTheme.fill, fallback.fill),
+        visibleFill: readColorPair(rawNodeTheme.visibleFill, fallback.visibleFill),
         stroke: readColorPair(rawNodeTheme.stroke, fallback.stroke),
         visibleStroke: readColorPair(rawNodeTheme.visibleStroke, fallback.visibleStroke),
       }
@@ -1071,6 +1096,13 @@ export const sanitizeCustomTheme = (value: unknown): CustomChatTheme => {
         defaults.colors.settingsSolidColorSectionBg
       ),
       appBackgroundColor: readColorPair(rawColors.appBackgroundColor, defaults.colors.appBackgroundColor),
+      thinScrollbarThumb: readColorPair(rawColors.thinScrollbarThumb, defaults.colors.thinScrollbarThumb),
+      thinScrollbarThumbHover: readColorPair(
+        rawColors.thinScrollbarThumbHover,
+        defaults.colors.thinScrollbarThumbHover
+      ),
+      thinScrollbarTrack: readColorPair(rawColors.thinScrollbarTrack, defaults.colors.thinScrollbarTrack),
+      thinScrollbarShadow: readColorPair(rawColors.thinScrollbarShadow, defaults.colors.thinScrollbarShadow),
       settingsPaneBodyBg: readColorPair(rawColors.settingsPaneBodyBg, defaults.colors.settingsPaneBodyBg),
       settingsCustomThemesCardBg: readColorPair(
         rawColors.settingsCustomThemesCardBg,
@@ -1646,6 +1678,10 @@ export const getThemeModeColor = (pair: ThemeColorPair, isDarkMode: boolean): st
   isDarkMode ? pair.dark : pair.light
 
 type MarkdownThemeCssVariable =
+  | '--thin-scrollbar-thumb'
+  | '--thin-scrollbar-thumb-hover'
+  | '--thin-scrollbar-track'
+  | '--thin-scrollbar-shadow'
   | '--chat-md-text'
   | '--chat-md-muted-text'
   | '--chat-md-heading-text'
@@ -1692,6 +1728,10 @@ export type MarkdownThemeCssProperties = CSSProperties & Partial<Record<Markdown
 export const getMarkdownThemeVars = (theme: CustomChatTheme, isDarkMode: boolean): MarkdownThemeCssProperties => {
   const colors = theme.colors
   return {
+    '--thin-scrollbar-thumb': getThemeModeColor(colors.thinScrollbarThumb, isDarkMode),
+    '--thin-scrollbar-thumb-hover': getThemeModeColor(colors.thinScrollbarThumbHover, isDarkMode),
+    '--thin-scrollbar-track': getThemeModeColor(colors.thinScrollbarTrack, isDarkMode),
+    '--thin-scrollbar-shadow': getThemeModeColor(colors.thinScrollbarShadow, isDarkMode),
     '--chat-md-text': getThemeModeColor(colors.markdownText, isDarkMode),
     '--chat-md-muted-text': getThemeModeColor(colors.markdownMutedText, isDarkMode),
     '--chat-md-heading-text': getThemeModeColor(colors.markdownHeadingText, isDarkMode),

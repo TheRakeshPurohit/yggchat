@@ -1,6 +1,7 @@
 import { Analytics } from '@vercel/analytics/react'
 import { AnimatePresence } from 'framer-motion'
 import { useCallback, useEffect, useRef } from 'react'
+import { getThemeModeColor, useCustomChatTheme, useHtmlDarkMode } from './components/ThemeManager/themeConfig'
 import { BrowserRouter, HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import './App.css'
 import { HtmlIframeRegistryProvider, useHtmlIframeRegistry } from './components/HtmlIframeRegistry/HtmlIframeRegistry'
@@ -261,6 +262,42 @@ function AnimatedRoutes() {
   )
 }
 
+const GlobalCustomThemeCssVariables = () => {
+  const { theme: customTheme, enabled: customThemeEnabled } = useCustomChatTheme()
+  const isDarkMode = useHtmlDarkMode()
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+
+    const rootStyle = document.documentElement.style
+    const variableNames = [
+      '--thin-scrollbar-thumb',
+      '--thin-scrollbar-thumb-hover',
+      '--thin-scrollbar-track',
+      '--thin-scrollbar-shadow',
+    ]
+
+    if (!customThemeEnabled) {
+      variableNames.forEach(name => rootStyle.removeProperty(name))
+      return
+    }
+
+    rootStyle.setProperty('--thin-scrollbar-thumb', getThemeModeColor(customTheme.colors.thinScrollbarThumb, isDarkMode))
+    rootStyle.setProperty(
+      '--thin-scrollbar-thumb-hover',
+      getThemeModeColor(customTheme.colors.thinScrollbarThumbHover, isDarkMode)
+    )
+    rootStyle.setProperty('--thin-scrollbar-track', getThemeModeColor(customTheme.colors.thinScrollbarTrack, isDarkMode))
+    rootStyle.setProperty('--thin-scrollbar-shadow', getThemeModeColor(customTheme.colors.thinScrollbarShadow, isDarkMode))
+
+    return () => {
+      variableNames.forEach(name => rootStyle.removeProperty(name))
+    }
+  }, [customTheme, customThemeEnabled, isDarkMode])
+
+  return null
+}
+
 function App() {
   const currentUser = useAppSelector(selectCurrentUser)
   const resetKey = currentUser?.id ?? null
@@ -269,6 +306,8 @@ function App() {
     <>
       {/* Custom title bar for Windows Electron */}
       <TitleBar />
+      {/* Persistent custom theme CSS variables */}
+      <GlobalCustomThemeCssVariables />
       {/* Persistent app background across all routes */}
       <VideoBackground />
       {/* SVG filters for liquid glass effect */}
