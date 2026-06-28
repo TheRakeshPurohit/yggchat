@@ -2,11 +2,13 @@ import type { HeadlessMessageRequest, HeadlessStreamEvent } from '../contracts/h
 import { ConversationRepo } from '../persistence/conversationRepo.js'
 import { MessageRepo } from '../persistence/messageRepo.js'
 import { ProjectRepo } from '../persistence/projectRepo.js'
+import { StreamingRunRepo } from '../persistence/streamingRunRepo.js'
 import type { ProviderTokenStore } from '../providers/tokenStore.js'
 import { BranchOrchestrator, type ResolvedExecution } from './branchOrchestrator.js'
 import { buildHeadlessSystemPrompt } from './headlessSystemPrompt.js'
 import { ProviderRouter } from './providerRouter.js'
-import { ToolLoopService, type ToolExecutor } from './toolLoopService.js'
+import { ProviderErrorAssistantResponse, ToolLoopService, type ToolExecutor, type ToolLoopRunResult } from './toolLoopService.js'
+import { filterToolsForOperationMode } from '../../../../../shared/operationModeToolPolicy.js'
 
 interface ChatOrchestratorDeps {
   db: any
@@ -27,6 +29,7 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
   private readonly conversationRepo: ConversationRepo
   private readonly messageRepo: MessageRepo
   private readonly projectRepo: ProjectRepo
+  private readonly streamingRunRepo: StreamingRunRepo
   private readonly providerRouter: ProviderRouter
   private readonly branchOrchestrator: BranchOrchestrator
   private readonly toolLoopService: ToolLoopService
@@ -36,6 +39,7 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
     this.conversationRepo = new ConversationRepo({ db: deps.db, statements: deps.statements })
     this.messageRepo = new MessageRepo({ db: deps.db, statements: deps.statements })
     this.projectRepo = new ProjectRepo({ db: deps.db })
+    this.streamingRunRepo = new StreamingRunRepo({ statements: deps.statements })
     this.providerRouter = deps.providerRouter ?? new ProviderRouter({ tokenStore: deps.tokenStore })
     this.branchOrchestrator = deps.branchOrchestrator ?? new BranchOrchestrator()
     this.toolLoopService =
@@ -77,6 +81,8 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
   }
 
   async runMessage(request: HeadlessMessageRequest, emit: (event: HeadlessStreamEvent) => void): Promise<void> {
+    let trackedStreamId = request.streamId ?? null
+    try {
     const conversation = this.conversationRepo.getById(request.conversationId)
     if (!conversation) {
       throw new Error(`Conversation not found: ${request.conversationId}`)
@@ -90,6 +96,18 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
 
     const resolved = this.resolveExecution(request)
 
+    trackedStreamId = this.streamingRunRepo.upsert({
+      streamId: trackedStreamId,
+      conversationId: request.conversationId,
+      parentMessageId: resolved.assistantParentId,
+      streamType: request.operation === 'branch' || request.operation === 'edit-branch' ? 'branch' : 'primary',
+      provider: request.provider,
+      modelName: request.modelName,
+      operation: request.operation,
+      source: 'headless',
+      rootMessageId: resolved.assistantParentId,
+    })
+
     emit({
       type: 'started',
       operation: request.operation,
@@ -97,6 +115,7 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
       parentId: resolved.assistantParentId,
       provider: request.provider,
       modelName: request.modelName,
+      streamId: trackedStreamId,
     })
 
     if (resolved.userMessage) {
@@ -111,21 +130,27 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
 
     const history = this.conversationRepo.listPathToMessage(request.conversationId, resolved.historyLeafId)
 
-    const resolvedTools =
-      Array.isArray(request.tools) && request.tools.length > 0 ? request.tools : this.defaultToolsProvider()
+    const resolvedOperationMode = request.operationMode ?? 'execute'
+    const resolvedTools = filterToolsForOperationMode(
+      Array.isArray(request.tools) && request.tools.length > 0 ? request.tools : this.defaultToolsProvider(),
+      resolvedOperationMode
+    )
 
     const project = conversation?.project_id ? this.projectRepo.getById(conversation.project_id) : null
     const systemPrompt = buildHeadlessSystemPrompt({
-      operationMode: request.operationMode ?? 'execute',
+      operationMode: resolvedOperationMode,
       includeOperationModePrompt: request.includeOperationModePrompt ?? true,
       requestPrompt: request.systemPrompt ?? null,
       projectPrompt: project?.system_prompt ?? null,
       conversationPrompt: conversation?.system_prompt ?? null,
+      planModeVerbosity: request.planModeVerbosity ?? 'concise',
     })
     const conversationContext = request.conversationContext ?? conversation?.conversation_context ?? null
     const projectContext = request.projectContext ?? project?.context ?? null
 
-    const toolLoopResult = await this.toolLoopService.run(
+    let toolLoopResult: ToolLoopRunResult
+    try {
+      toolLoopResult = await this.toolLoopService.run(
       {
         provider: request.provider,
         operation: request.operation,
@@ -152,14 +177,50 @@ export class ChatOrchestrator implements HeadlessChatOrchestrator {
         serviceTier: request.serviceTier,
         promptCacheRetention: request.promptCacheRetention,
         tools: resolvedTools,
-        streamId: request.streamId ?? null,
+        streamId: trackedStreamId,
         rootPath: request.rootPath ?? conversation?.cwd ?? null,
-        operationMode: request.operationMode ?? 'execute',
+        operationMode: resolvedOperationMode,
         toolTimeoutMs: request.toolTimeoutMs,
       },
-      emit
-    )
+        emit
+      )
+    } catch (error) {
+      if (error instanceof ProviderErrorAssistantResponse) {
+        this.streamingRunRepo.finish(trackedStreamId, {
+          status: 'error',
+          endReason: 'provider_error',
+          assistantMessageId: error.assistantMessage?.id ?? null,
+          finalMessageId: error.assistantMessage?.id ?? null,
+          error: error.providerError.originalMessage,
+          metadata: {
+            provider: error.providerError.provider,
+            retryExhausted: error.providerError.retryExhausted,
+            status: error.providerError.status,
+            errorType: error.providerError.errorType,
+            resetAt: error.providerError.resetAt,
+          },
+        })
+        emit({ type: 'complete', message: error.assistantMessage, providerError: true })
+        return
+      }
+      throw error
+    }
+
+    this.streamingRunRepo.finish(trackedStreamId, {
+      status: 'completed',
+      endReason: 'completed',
+      assistantMessageId: toolLoopResult.finalAssistantMessage?.id ?? null,
+      finalMessageId: toolLoopResult.finalAssistantMessage?.id ?? null,
+    })
 
     emit({ type: 'complete', message: toolLoopResult.finalAssistantMessage })
+    } catch (error) {
+      this.streamingRunRepo.finish(trackedStreamId, {
+        status: 'error',
+        endReason: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw error
+    }
   }
 }

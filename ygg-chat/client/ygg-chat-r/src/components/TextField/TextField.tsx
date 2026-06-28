@@ -19,6 +19,7 @@ interface TextFieldProps {
   showSearchIcon?: boolean
   onSearchClick?: () => void
   autoFocus?: boolean
+  style?: React.CSSProperties
 }
 
 export const TextField: React.FC<TextFieldProps> = ({
@@ -37,6 +38,7 @@ export const TextField: React.FC<TextFieldProps> = ({
   showSearchIcon = false,
   onSearchClick,
   autoFocus = false,
+  style,
 }) => {
   // We'll use internal state if no value/onChange is provided (uncontrolled component)
   const [internalValue, setInternalValue] = useState('')
@@ -112,6 +114,7 @@ export const TextField: React.FC<TextFieldProps> = ({
           required={required}
           autoFocus={autoFocus}
           className={inputClasses}
+          style={style}
         />
         {showSearchIcon && (
           <button

@@ -59,6 +59,13 @@ function buildHeadlessMessageRequest(req: Request, operation: HeadlessChatOperat
         : typeof body.include_operation_mode_prompt === 'boolean'
           ? body.include_operation_mode_prompt
           : true,
+    planModeVerbosity:
+      body.planModeVerbosity === 'normal' ||
+      body.planModeVerbosity === 'detailed' ||
+      body.plan_mode_verbosity === 'normal' ||
+      body.plan_mode_verbosity === 'detailed'
+        ? (body.planModeVerbosity ?? body.plan_mode_verbosity)
+        : 'concise',
     streamId: body.streamId ?? body.stream_id ?? null,
     toolTimeoutMs:
       typeof body.toolTimeoutMs === 'number'

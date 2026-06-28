@@ -7,6 +7,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { ConversationId, Project } from '../../../../shared/types'
 import { Button } from '../components'
 import SearchList, { type SearchResultItem } from '../components/SearchList/SearchList'
+import { getThemeModeColor, useCustomChatTheme, useHtmlDarkMode } from '../components/ThemeManager/themeConfig'
 import { chatSliceActions } from '../features/chats'
 import {
   activeConversationIdSet,
@@ -20,8 +21,9 @@ import EditProject from './EditProject'
 // import { searchActions, selectSearchLoading, selectSearchQuery, selectSearchResults } from '../features/search'
 import { useAppDispatch } from '../hooks/redux'
 import { useAuth } from '../hooks/useAuth'
+import { useIntersectionObserver } from '../hooks/useIntersectionObserver'
 import {
-  useConversationsByProject,
+  useConversationsByProjectInfinite,
   useFavoritedConversations,
   useLocalTopLevelUserMessages,
   useMoveConversationToProject,
@@ -51,14 +53,176 @@ const SIDEBAR_PREVIEW_PORTAL_GAP_PX = 12
 const SIDEBAR_PREVIEW_PORTAL_MAX_WIDTH_PX = 440
 const SIDEBAR_PREVIEW_PORTAL_MIN_WIDTH_PX = 260
 const SIDEBAR_PREVIEW_CLOSE_DELAY_MS = 120
+const PROJECT_CONVERSATIONS_EXPANSION_DEFER_MS = 240
+const CONVERSATION_SORT_POPOVER_WIDTH_PX = 360
+const CONVERSATION_SORT_POPOVER_GAP_PX = 8
+const PROJECT_CONVERSATIONS_EXPANSION_TRANSITION = {
+  duration: PROJECT_CONVERSATIONS_EXPANSION_DEFER_MS / 1000,
+  ease: [0.22, 1, 0.36, 1] as const,
+}
 
 const DATE_FORMATTER = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' })
+const CONVERSATION_SECTION_DATE_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  day: 'numeric',
+  month: 'long',
+})
 
 const formatDate = (value?: string | null) => {
   if (!value) return null
   const parsedDate = new Date(value)
   if (Number.isNaN(parsedDate.getTime())) return null
   return DATE_FORMATTER.format(parsedDate)
+}
+
+const formatConversationSectionDate = (date: Date) => {
+  return CONVERSATION_SECTION_DATE_FORMATTER.format(date)
+}
+
+type SidebarConversationSortField = 'updated_at' | 'created_at'
+type SidebarConversationSortOrder = 'desc' | 'asc'
+
+interface SidebarConversationSortOptions {
+  field: SidebarConversationSortField
+  order: SidebarConversationSortOrder
+}
+
+interface ConversationDateGroup {
+  key: string
+  label: string
+  conversations: Conversation[]
+}
+
+const DEFAULT_CONVERSATION_SORT_OPTIONS: SidebarConversationSortOptions = {
+  field: 'updated_at',
+  order: 'desc',
+}
+
+const getConversationDateGroupKey = (date: Date) => {
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
+}
+
+const getConversationSortTimestamp = (conversation: Conversation, field: SidebarConversationSortField) => {
+  const value = conversation[field]
+  if (!value) return 0
+  const timestamp = new Date(value).getTime()
+  return Number.isNaN(timestamp) ? 0 : timestamp
+}
+
+const sortSidebarConversations = (
+  conversations: Conversation[],
+  sortOptions: SidebarConversationSortOptions
+): Conversation[] => {
+  const direction = sortOptions.order === 'asc' ? 1 : -1
+
+  return [...conversations].sort((a, b) => {
+    const aTimestamp = getConversationSortTimestamp(a, sortOptions.field)
+    const bTimestamp = getConversationSortTimestamp(b, sortOptions.field)
+    const timestampDiff = aTimestamp - bTimestamp
+
+    if (timestampDiff !== 0) return timestampDiff * direction
+
+    const titleDiff = (a.title || '').localeCompare(b.title || '')
+    if (titleDiff !== 0) return titleDiff
+
+    return String(a.id).localeCompare(String(b.id))
+  })
+}
+
+const groupConversationsByDate = (
+  conversations: Conversation[],
+  field: SidebarConversationSortField
+): ConversationDateGroup[] => {
+  const groups: ConversationDateGroup[] = []
+  const groupByKey = new Map<string, ConversationDateGroup>()
+
+  conversations.forEach(conversation => {
+    const timestamp = getConversationSortTimestamp(conversation, field)
+    const parsedDate = timestamp > 0 ? new Date(timestamp) : null
+    const hasValidDate = parsedDate != null && !Number.isNaN(parsedDate.getTime())
+    const key = hasValidDate ? getConversationDateGroupKey(parsedDate) : 'unknown-date'
+    const label = hasValidDate ? formatConversationSectionDate(parsedDate) : 'Unknown date'
+    const existingGroup = groupByKey.get(key)
+
+    if (existingGroup) {
+      existingGroup.conversations.push(conversation)
+      return
+    }
+
+    const nextGroup = { key, label, conversations: [conversation] }
+    groupByKey.set(key, nextGroup)
+    groups.push(nextGroup)
+  })
+
+  return groups
+}
+
+interface SidebarSortDropdownOption<T extends string> {
+  value: T
+  label: string
+}
+
+interface SidebarSortDropdownProps<T extends string> {
+  value: T
+  options: SidebarSortDropdownOption<T>[]
+  onChange: (value: T) => void
+  ariaLabel: string
+}
+
+const SidebarSortDropdown = <T extends string>({
+  value,
+  options,
+  onChange,
+  ariaLabel,
+}: SidebarSortDropdownProps<T>) => {
+  const [open, setOpen] = useState(false)
+  const selectedOption = options.find(option => option.value === value) ?? options[0]
+
+  return (
+    <div className='relative'>
+      <button
+        type='button'
+        className='flex w-full items-center justify-between gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2.5 text-left text-sm text-neutral-800 outline-none transition-colors hover:bg-neutral-50 focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100 dark:hover:bg-neutral-900 dark:focus:border-orange-400 dark:focus:ring-orange-400/20'
+        onClick={() => setOpen(previous => !previous)}
+        aria-haspopup='listbox'
+        aria-expanded={open}
+        aria-label={ariaLabel}
+      >
+        <span>{selectedOption?.label}</span>
+        <i className={`bx bx-chevron-down text-lg leading-none transition-transform ${open ? 'rotate-180' : ''}`} aria-hidden='true'></i>
+      </button>
+
+      {open && (
+        <div
+          role='listbox'
+          className='absolute left-0 right-0 top-full z-[1410] mt-1 overflow-hidden rounded-xl border border-neutral-200 bg-white py-1 shadow-xl dark:border-neutral-700 dark:bg-neutral-950'
+        >
+          {options.map(option => {
+            const isSelected = option.value === value
+            return (
+              <button
+                key={option.value}
+                type='button'
+                role='option'
+                aria-selected={isSelected}
+                className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors ${
+                  isSelected
+                    ? 'bg-blue-600 text-white dark:bg-orange-500 dark:text-neutral-950'
+                    : 'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-100 dark:hover:bg-neutral-800'
+                }`}
+                onClick={() => {
+                  onChange(option.value)
+                  setOpen(false)
+                }}
+              >
+                <span>{option.label}</span>
+                {isSelected && <i className='bx bx-check text-lg leading-none' aria-hidden='true'></i>}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
 }
 
 const PROJECT_ROW_VISIBILITY_STYLE: React.CSSProperties = {
@@ -71,6 +235,22 @@ const CONVERSATION_ROW_VISIBILITY_STYLE: React.CSSProperties = {
   containIntrinsicSize: '44px',
 }
 
+const SIDEBAR_ROW_ACTIONS_OVERLAY_BASE_CLASS =
+  'pointer-events-none absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-1 rounded-full bg-white/85 p-1 opacity-0 backdrop-blur-xl transition-opacity dark:bg-neutral-950/85'
+const SIDEBAR_ROW_ACTION_BUTTON_CLASS =
+  'pointer-events-auto mt-0 flex h-7 w-7 shrink-0 items-center justify-center p-0'
+
+interface SidebarConversationPage {
+  conversations: Conversation[]
+  nextCursor: string | null
+  hasMore: boolean
+}
+
+interface SidebarInfiniteConversationData {
+  pages: SidebarConversationPage[]
+  pageParams: unknown[]
+}
+
 interface ProjectAccordionItemProps {
   project: SidebarProject
   isExpanded: boolean
@@ -79,6 +259,7 @@ interface ProjectAccordionItemProps {
   favoriteConversationIds: Set<ConversationId>
   hoveredPreviewConversationId?: ConversationId | null
   isElectronMode: boolean
+  conversationSortOptions: SidebarConversationSortOptions
   onToggle: (projectId: string) => void
   onSelectConversation: (conversation: Conversation) => void
   onCreateConversation: (project: SidebarProject) => void
@@ -98,6 +279,8 @@ interface ProjectConversationsPanelProps {
   favoriteConversationIds: Set<ConversationId>
   hoveredPreviewConversationId?: ConversationId | null
   isElectronMode: boolean
+  conversationSortOptions: SidebarConversationSortOptions
+  shouldLoadConversations: boolean
   onSelectConversation: (conversation: Conversation) => void
   onToggleFavorite: (conversation: Conversation) => void
   onMoveConversation: (conversation: Conversation) => void
@@ -114,6 +297,8 @@ const ProjectConversationsPanel: React.FC<ProjectConversationsPanelProps> = memo
     favoriteConversationIds,
     hoveredPreviewConversationId = null,
     isElectronMode,
+    conversationSortOptions,
+    shouldLoadConversations,
     onSelectConversation,
     onToggleFavorite,
     onMoveConversation,
@@ -122,17 +307,53 @@ const ProjectConversationsPanel: React.FC<ProjectConversationsPanelProps> = memo
     onConversationHoverStart,
     onConversationHoverEnd,
   }) => {
+    const isDarkMode = useHtmlDarkMode()
+    const { theme: customTheme, enabled: customThemeEnabled } = useCustomChatTheme()
     const {
-      data: projectConversations = [],
+      data: projectConversationsData,
       isLoading: projectConversationsLoading,
       error: projectConversationsError,
-    } = useConversationsByProject(projectId)
+      fetchNextPage,
+      hasNextPage,
+      isFetchingNextPage,
+    } = useConversationsByProjectInfinite(projectId, { enabled: shouldLoadConversations })
+
+    const projectConversations = useMemo(
+      () => projectConversationsData?.pages.flatMap(page => page.conversations) ?? [],
+      [projectConversationsData]
+    )
 
     const sortedConversations = useMemo(() => {
-      return [...projectConversations].sort(
-        (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-      )
-    }, [projectConversations])
+      return sortSidebarConversations(projectConversations, conversationSortOptions)
+    }, [conversationSortOptions, projectConversations])
+
+    const { ref: loadMoreRef, isIntersecting } = useIntersectionObserver<HTMLDivElement>({
+      rootMargin: '120px',
+      enabled: shouldLoadConversations && Boolean(hasNextPage) && !isFetchingNextPage,
+    })
+
+    useEffect(() => {
+      if (shouldLoadConversations && isIntersecting && hasNextPage && !isFetchingNextPage) {
+        fetchNextPage()
+      }
+    }, [fetchNextPage, hasNextPage, isFetchingNextPage, isIntersecting, shouldLoadConversations])
+
+    const conversationDateGroups = useMemo(
+      () => groupConversationsByDate(sortedConversations, conversationSortOptions.field),
+      [conversationSortOptions.field, sortedConversations]
+    )
+
+    const conversationDateHeaderStyle = useMemo<React.CSSProperties | undefined>(() => {
+      if (!customThemeEnabled) return undefined
+
+      return {
+        color: getThemeModeColor(customTheme.colors.streamingAnimationColor, isDarkMode),
+      }
+    }, [customTheme.colors.streamingAnimationColor, customThemeEnabled, isDarkMode])
+
+    if (!shouldLoadConversations) {
+      return <div className='pb-2 pr-2 pl-8' aria-hidden='true' />
+    }
 
     return (
       <div className='pb-2 pr-2 pl-8'>
@@ -147,90 +368,106 @@ const ProjectConversationsPanel: React.FC<ProjectConversationsPanelProps> = memo
         )}
         {!projectConversationsLoading &&
           !projectConversationsError &&
-          sortedConversations.map(conversation => {
-            const isActive = String(activeConversationId) === String(conversation.id)
-            const isFavorite = favoriteConversationIds.has(conversation.id)
-            const isPreviewHighlighted =
-              enableConversationHoverPreview &&
-              hoveredPreviewConversationId != null &&
-              String(hoveredPreviewConversationId) === String(conversation.id)
-            const conversationUpdatedDate = formatDate(conversation.updated_at)
-
-            return (
+          conversationDateGroups.map(group => (
+            <div key={group.key}>
               <div
-                key={conversation.id}
-                className='group/conv flex items-start gap-1 mb-1 min-w-0 overflow-hidden'
-                style={CONVERSATION_ROW_VISIBILITY_STYLE}
-                onMouseEnter={() => {
-                  if (!enableConversationHoverPreview) return
-                  onConversationHoverStart?.(conversation)
-                }}
-                onMouseLeave={() => {
-                  if (!enableConversationHoverPreview) return
-                  onConversationHoverEnd?.()
-                }}
+                className='px-2 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-blue-600 dark:text-orange-400'
+                style={conversationDateHeaderStyle}
               >
-                <button
-                  type='button'
-                  onClick={() => onSelectConversation(conversation)}
-                  className={`w-full min-w-0 overflow-hidden text-left rounded-md px-2 py-1.5 text-xs md:text-[11px] lg:text-[12px] transition-colors ${
-                    isActive
-                      ? 'bg-blue-100 dark:bg-neutral-500/40 text-blue-700 dark:text-orange-300'
-                      : isPreviewHighlighted
-                        ? 'text-neutral-700 dark:text-neutral-300 bg-neutral-200/60 dark:bg-neutral-800/70'
-                        : 'text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/70'
-                  }`}
-                >
-                  <div className='min-w-0'>
-                    <div className='truncate'>{conversation.title || 'Untitled conversation'}</div>
-                    {conversationUpdatedDate && (
-                      <div className='text-[10px] text-neutral-500 dark:text-neutral-400 mt-0.5 truncate'>
-                        {conversationUpdatedDate}
-                      </div>
-                    )}
-                  </div>
-                </button>
-                {isElectronMode && (
-                  <Button
-                    variant='outline2'
-                    size='smaller'
-                    rounded='full'
-                    className='mt-0.5 px-1 py-1 shrink-0'
-                    onClick={() => onToggleFavorite(conversation)}
-                    title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                    aria-label={`${isFavorite ? 'Remove' : 'Add'} ${conversation.title || conversation.id} ${isFavorite ? 'from' : 'to'} favorites`}
-                  >
-                    <i
-                      className={`bx ${isFavorite ? 'bxs-star' : 'bx-star'} text-[16px] pointer-events-none group-hover/conv:opacity-100 opacity-0 group-hover/conv:pointer-events-auto group-focus-within/conv:opacity-100 group-focus-within/conv:pointer-events-auto  ${isFavorite ? 'text-yellow-500' : ''}`}
-                      aria-hidden='true'
-                    ></i>
-                  </Button>
-                )}
-                <Button
-                  variant='outline2'
-                  size='smaller'
-                  rounded='full'
-                  className='mt-0.5 px-2 py-1 shrink-0 opacity-0 pointer-events-none group-hover/conv:opacity-100 group-hover/conv:pointer-events-auto group-focus-within/conv:opacity-100 group-focus-within/conv:pointer-events-auto transition-opacity duration-150'
-                  onClick={() => onMoveConversation(conversation)}
-                  title='Conversation actions'
-                  aria-label={`Conversation actions for ${conversation.title || conversation.id}`}
-                >
-                  <i className='bx bx-dots-horizontal-rounded text-lg' aria-hidden='true'></i>
-                </Button>
-                <Button
-                  variant='outline2'
-                  size='smaller'
-                  rounded='full'
-                  className='mt-0.5 px-2 py-1 shrink-0 text-red-500 dark:text-red-400 opacity-0 pointer-events-none group-hover/conv:opacity-100 group-hover/conv:pointer-events-auto group-focus-within/conv:opacity-100 group-focus-within/conv:pointer-events-auto transition-opacity duration-150'
-                  onClick={() => onDeleteConversation(conversation)}
-                  title='Delete conversation'
-                  aria-label={`Delete conversation ${conversation.title || conversation.id}`}
-                >
-                  <i className='bx bx-trash text-lg' aria-hidden='true'></i>
-                </Button>
+                {group.label}
               </div>
-            )
-          })}
+              {group.conversations.map(conversation => {
+                const isActive = String(activeConversationId) === String(conversation.id)
+                const isFavorite = favoriteConversationIds.has(conversation.id)
+                const isPreviewHighlighted =
+                  enableConversationHoverPreview &&
+                  hoveredPreviewConversationId != null &&
+                  String(hoveredPreviewConversationId) === String(conversation.id)
+
+                return (
+                  <div
+                    key={conversation.id}
+                    className='group/conv relative mb-1 min-w-0 overflow-visible rounded-md'
+                    style={CONVERSATION_ROW_VISIBILITY_STYLE}
+                    onMouseEnter={() => {
+                      if (!enableConversationHoverPreview) return
+                      onConversationHoverStart?.(conversation)
+                    }}
+                    onMouseLeave={() => {
+                      if (!enableConversationHoverPreview) return
+                      onConversationHoverEnd?.()
+                    }}
+                  >
+                    <button
+                      type='button'
+                      onClick={() => onSelectConversation(conversation)}
+                      className={`w-full min-w-0 overflow-hidden text-left rounded-md px-2 py-1.5 text-xs md:text-[11px] lg:text-[12px] transition-colors ${
+                        isActive
+                          ? 'bg-blue-100 dark:bg-neutral-500/40 text-blue-700 dark:text-orange-300'
+                          : isPreviewHighlighted
+                            ? 'text-neutral-700 dark:text-neutral-300 bg-neutral-200/60 dark:bg-neutral-800/70'
+                            : 'text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/70'
+                      }`}
+                    >
+                      <div className='min-w-0'>
+                        <div className='truncate'>{conversation.title || 'Untitled conversation'}</div>
+                      </div>
+                    </button>
+                    <div
+                      className={`${SIDEBAR_ROW_ACTIONS_OVERLAY_BASE_CLASS} group-hover/conv:pointer-events-auto group-hover/conv:opacity-100`}
+                    >
+                      {isElectronMode && (
+                        <Button
+                          variant='outline2'
+                          size='smaller'
+                          rounded='full'
+                          className={SIDEBAR_ROW_ACTION_BUTTON_CLASS}
+                          onClick={() => onToggleFavorite(conversation)}
+                          title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                          aria-label={`${isFavorite ? 'Remove' : 'Add'} ${conversation.title || conversation.id} ${isFavorite ? 'from' : 'to'} favorites`}
+                        >
+                          <i
+                            className={`bx ${isFavorite ? 'bxs-star text-yellow-500' : 'bx-star'} text-[16px] pointer-events-none`}
+                            aria-hidden='true'
+                          ></i>
+                        </Button>
+                      )}
+                      <Button
+                        variant='outline2'
+                        size='smaller'
+                        rounded='full'
+                        className={SIDEBAR_ROW_ACTION_BUTTON_CLASS}
+                        onClick={() => onMoveConversation(conversation)}
+                        title='Conversation actions'
+                        aria-label={`Conversation actions for ${conversation.title || conversation.id}`}
+                      >
+                        <i className='bx bx-dots-horizontal-rounded text-lg' aria-hidden='true'></i>
+                      </Button>
+                      <Button
+                        variant='outline2'
+                        size='smaller'
+                        rounded='full'
+                        className={`${SIDEBAR_ROW_ACTION_BUTTON_CLASS} text-red-500 dark:text-red-400`}
+                        onClick={() => onDeleteConversation(conversation)}
+                        title='Delete conversation'
+                        aria-label={`Delete conversation ${conversation.title || conversation.id}`}
+                      >
+                        <i className='bx bx-trash text-lg' aria-hidden='true'></i>
+                      </Button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ))}
+        {!projectConversationsLoading && !projectConversationsError && hasNextPage && (
+          <div ref={loadMoreRef} className='py-2 text-center text-[10px] text-neutral-500 dark:text-neutral-400'>
+            {isFetchingNextPage ? 'Loading more chats...' : 'Load more chats'}
+          </div>
+        )}
+        {!projectConversationsLoading && !projectConversationsError && isFetchingNextPage && !hasNextPage && (
+          <div className='py-2 text-center text-[10px] text-neutral-500 dark:text-neutral-400'>Loading more chats...</div>
+        )}
       </div>
     )
   }
@@ -247,6 +484,7 @@ const ProjectAccordionItem: React.FC<ProjectAccordionItemProps> = memo(
     favoriteConversationIds,
     hoveredPreviewConversationId = null,
     isElectronMode,
+    conversationSortOptions,
     onToggle,
     onSelectConversation,
     onCreateConversation,
@@ -262,10 +500,27 @@ const ProjectAccordionItem: React.FC<ProjectAccordionItemProps> = memo(
     const projectLastActivityDate =
       project.latest_conversation_updated_at || project.updated_at || project.created_at || null
     const projectLastActivityDateLabel = formatDate(projectLastActivityDate)
+    const [isConversationPanelReady, setIsConversationPanelReady] = useState(() => isExpanded)
+
+    useEffect(() => {
+      if (!isExpanded) {
+        setIsConversationPanelReady(false)
+        return
+      }
+
+      setIsConversationPanelReady(false)
+      const timeoutId = window.setTimeout(() => {
+        setIsConversationPanelReady(true)
+      }, PROJECT_CONVERSATIONS_EXPANSION_DEFER_MS)
+
+      return () => {
+        window.clearTimeout(timeoutId)
+      }
+    }, [isExpanded])
 
     return (
       <div
-        className='sm:mb-1 md:mb-1 lg:mb-1.5 2xl:mb-2 group relative overflow-hidden'
+        className='sm:mb-1 md:mb-1 lg:mb-1.5 2xl:mb-2 group relative overflow-visible'
         style={PROJECT_ROW_VISIBILITY_STYLE}
       >
         {isCollapsed ? (
@@ -292,21 +547,23 @@ const ProjectAccordionItem: React.FC<ProjectAccordionItemProps> = memo(
             </Button>
           </div>
         ) : (
-          <div className='rounded-lg hover:bg-stone-100/30 dark:hover:bg-yBlack-900/10 transition-all duration-200'>
-            <div className='flex items-start justify-between px-2 py-2 gap-2 min-w-0'>
+          <div className='relative overflow-visible rounded-lg transition-all duration-200'>
+            <div className='group/projectHeader relative min-w-0 rounded-lg px-2 py-2 hover:bg-stone-100/30 dark:hover:bg-yBlack-900/10'>
               <button
                 type='button'
                 onClick={() => onToggle(project.id)}
-                className='flex items-start gap-2 min-w-0 flex-1 text-left'
+                className='flex w-full min-w-0 items-start gap-2 text-left'
                 aria-expanded={isExpanded}
               >
-                <i
-                  className={`bx ${isExpanded ? 'bx-chevron-down' : 'bx-chevron-right'} text-neutral-500 text-lg mt-0.5`}
+                <motion.i
+                  className='bx bx-chevron-right mt-0.5 inline-flex h-5 w-5 items-center justify-center text-lg leading-none text-neutral-500'
+                  animate={{ rotate: isExpanded ? 90 : 0 }}
+                  transition={{ type: 'spring', stiffness: 420, damping: 30 }}
                   aria-hidden='true'
-                ></i>
+                />
                 <div className='min-w-0 flex-1'>
                   <div className='flex items-center gap-1 min-w-0'>
-                    <div className='text-[12px] md:text-[12px] lg:text-[13px] xl:text-[13px] 2xl:text-[14px] font-medium text-neutral-900 dark:text-stone-200 truncate min-w-0 flex-1'>
+                    <div className='text-[13px] md:text-[13px] lg:text-[14px] xl:text-[14px] 2xl:text-[15px] font-medium text-neutral-900 dark:text-stone-200 truncate min-w-0 flex-1'>
                       {project.name}
                     </div>
                     {project.storage_mode !== 'local' && (
@@ -318,18 +575,18 @@ const ProjectAccordionItem: React.FC<ProjectAccordionItemProps> = memo(
                     )}
                   </div>
                   {projectLastActivityDateLabel && (
-                    <div className='text-[10px] text-neutral-500 dark:text-neutral-400'>
+                    <div className='mt-1 text-[11px] text-neutral-500 dark:text-neutral-400'>
                       {projectLastActivityDateLabel}
                     </div>
                   )}
                 </div>
               </button>
-              <div className='flex items-center gap-1 shrink-0'>
+              <div className={`${SIDEBAR_ROW_ACTIONS_OVERLAY_BASE_CLASS} group-hover/projectHeader:pointer-events-auto group-hover/projectHeader:opacity-100`}>
                 <Button
                   variant='outline2'
                   size='smaller'
                   rounded='full'
-                  className='mt-0.5 px-2 py-1 shrink-0'
+                  className={SIDEBAR_ROW_ACTION_BUTTON_CLASS}
                   onClick={() => onCreateConversation(project)}
                   title='New chat in project'
                   aria-label={`Create new chat in ${project.name}`}
@@ -340,7 +597,7 @@ const ProjectAccordionItem: React.FC<ProjectAccordionItemProps> = memo(
                   variant='outline2'
                   size='smaller'
                   rounded='full'
-                  className='mt-0.5 px-2 py-1 shrink-0 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto transition-opacity duration-150'
+                  className={SIDEBAR_ROW_ACTION_BUTTON_CLASS}
                   onClick={() => onEditProject(project)}
                   title='Edit project'
                   aria-label={`Edit project ${project.name}`}
@@ -351,7 +608,7 @@ const ProjectAccordionItem: React.FC<ProjectAccordionItemProps> = memo(
                   variant='outline2'
                   size='smaller'
                   rounded='full'
-                  className='mt-0.5 px-2 py-1 text-red-500 dark:text-red-400 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto transition-opacity duration-150'
+                  className={`${SIDEBAR_ROW_ACTION_BUTTON_CLASS} text-red-500 dark:text-red-400`}
                   onClick={() => onDeleteProject(project)}
                   title='Delete project'
                   aria-label={`Delete project ${project.name}`}
@@ -361,22 +618,36 @@ const ProjectAccordionItem: React.FC<ProjectAccordionItemProps> = memo(
               </div>
             </div>
 
-            {isExpanded && (
-              <ProjectConversationsPanel
-                projectId={project.id}
-                activeConversationId={activeConversationId}
-                favoriteConversationIds={favoriteConversationIds}
-                hoveredPreviewConversationId={hoveredPreviewConversationId}
-                isElectronMode={isElectronMode}
-                onSelectConversation={onSelectConversation}
-                onToggleFavorite={onToggleFavorite}
-                onMoveConversation={onMoveConversation}
-                onDeleteConversation={onDeleteConversation}
-                enableConversationHoverPreview={enableConversationHoverPreview}
-                onConversationHoverStart={onConversationHoverStart}
-                onConversationHoverEnd={onConversationHoverEnd}
-              />
-            )}
+            <AnimatePresence initial={false}>
+              {isExpanded && (
+                <motion.div
+                  key='project-conversations'
+                  className='overflow-hidden'
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={PROJECT_CONVERSATIONS_EXPANSION_TRANSITION}
+                  layout
+                >
+                  <ProjectConversationsPanel
+                    projectId={project.id}
+                    activeConversationId={activeConversationId}
+                    favoriteConversationIds={favoriteConversationIds}
+                    hoveredPreviewConversationId={hoveredPreviewConversationId}
+                    isElectronMode={isElectronMode}
+                    conversationSortOptions={conversationSortOptions}
+                    shouldLoadConversations={isConversationPanelReady}
+                    onSelectConversation={onSelectConversation}
+                    onToggleFavorite={onToggleFavorite}
+                    onMoveConversation={onMoveConversation}
+                    onDeleteConversation={onDeleteConversation}
+                    enableConversationHoverPreview={enableConversationHoverPreview}
+                    onConversationHoverStart={onConversationHoverStart}
+                    onConversationHoverEnd={onConversationHoverEnd}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         )}
 
@@ -422,6 +693,14 @@ const SideBar: React.FC<SideBarProps> = ({
   const [showMoveConfirm, setShowMoveConfirm] = useState(false)
   const [conversationToMove, setConversationToMove] = useState<Conversation | null>(null)
   const [destinationProject, setDestinationProject] = useState<{ id: string; name: string } | null>(null)
+  const [conversationSortOptions, setConversationSortOptions] = useState<SidebarConversationSortOptions>(
+    DEFAULT_CONVERSATION_SORT_OPTIONS
+  )
+  const [draftConversationSortOptions, setDraftConversationSortOptions] = useState<SidebarConversationSortOptions>(
+    DEFAULT_CONVERSATION_SORT_OPTIONS
+  )
+  const [showConversationSortModal, setShowConversationSortModal] = useState(false)
+  const [conversationSortModalPosition, setConversationSortModalPosition] = useState({ top: 96, left: 16 })
   const moveConversationMutation = useMoveConversationToProject()
   // NOTE: 'recent' tab is repurposed as the Projects tab across the app.
   const isProjectsTab = conversationTab !== 'favorites'
@@ -467,6 +746,11 @@ const SideBar: React.FC<SideBarProps> = ({
     if (typeof limit !== 'number' || !Number.isFinite(limit)) return favoriteConversations
     return favoriteConversations.slice(0, limit)
   }, [favoriteConversations, limit])
+
+  const favoriteConversationDateGroups = useMemo(
+    () => groupConversationsByDate(displayedFavoriteConversations, 'updated_at'),
+    [displayedFavoriteConversations]
+  )
 
   const favoriteConversationIds = useMemo(
     () => new Set(favoriteConversations.map(conversation => conversation.id)),
@@ -523,6 +807,7 @@ const SideBar: React.FC<SideBarProps> = ({
   const hoverPreviewCloseTimeoutRef = useRef<number | null>(null)
   const sidebarRef = useRef<HTMLElement | null>(null)
   const expandButtonRef = useRef<HTMLButtonElement | null>(null)
+  const conversationSortButtonRef = useRef<HTMLButtonElement | null>(null)
   const { data: recentConversations = [] } = useRecentConversations(limit)
 
   // Theme state
@@ -764,9 +1049,11 @@ const SideBar: React.FC<SideBarProps> = ({
     (projectId: string) => {
       const normalizedProjectId = String(projectId)
       const projectConversationsQueryKey = ['conversations', 'project', normalizedProjectId]
+      const projectConversationsInfiniteQueryKey = ['conversations', 'project', normalizedProjectId, 'infinite']
 
       if (!isExpandPortalOpen) {
         queryClient.invalidateQueries({ queryKey: projectConversationsQueryKey, refetchType: 'none' })
+        queryClient.invalidateQueries({ queryKey: projectConversationsInfiniteQueryKey, refetchType: 'none' })
         setExpandedProjectIds(prev => (prev.includes(normalizedProjectId) ? prev : [normalizedProjectId, ...prev]))
         openExpandPortal()
         return
@@ -777,6 +1064,7 @@ const SideBar: React.FC<SideBarProps> = ({
 
         if (!isCurrentlyExpanded) {
           queryClient.invalidateQueries({ queryKey: projectConversationsQueryKey, refetchType: 'none' })
+          queryClient.invalidateQueries({ queryKey: projectConversationsInfiniteQueryKey, refetchType: 'none' })
         }
 
         return isCurrentlyExpanded ? prev.filter(id => id !== normalizedProjectId) : [...prev, normalizedProjectId]
@@ -808,6 +1096,7 @@ const SideBar: React.FC<SideBarProps> = ({
           previous ? previous.filter(item => String(item.project_id) !== String(project.id)) : previous
         )
         queryClient.removeQueries({ queryKey: ['conversations', 'project', project.id] })
+        queryClient.removeQueries({ queryKey: ['conversations', 'project', project.id, 'infinite'] })
 
         queryClient.invalidateQueries({ queryKey: ['projects'] })
         queryClient.invalidateQueries({ queryKey: ['conversations'] })
@@ -834,6 +1123,19 @@ const SideBar: React.FC<SideBarProps> = ({
 
         queryClient.setQueryData<Conversation[]>(['conversations', 'project', conversation.project_id], previous =>
           previous ? previous.filter(item => String(item.id) !== String(conversation.id)) : previous
+        )
+        queryClient.setQueryData<SidebarInfiniteConversationData>(
+          ['conversations', 'project', conversation.project_id, 'infinite'],
+          previous =>
+            previous
+              ? {
+                  ...previous,
+                  pages: previous.pages.map(page => ({
+                    ...page,
+                    conversations: page.conversations.filter(item => String(item.id) !== String(conversation.id)),
+                  })),
+                }
+              : previous
         )
         queryClient.setQueryData<Conversation[]>(['conversations'], previous =>
           previous ? previous.filter(item => String(item.id) !== String(conversation.id)) : previous
@@ -950,6 +1252,7 @@ const SideBar: React.FC<SideBarProps> = ({
             projectId: project.id,
             title: `${project.name} Conversation`,
             storageMode: project.storage_mode || 'cloud',
+            cwd: project.cwd || null,
           })
         ).unwrap()
 
@@ -962,6 +1265,31 @@ const SideBar: React.FC<SideBarProps> = ({
           const previousItems = previous || []
           return [createdConversation, ...previousItems.filter(item => item.id !== createdConversation.id)]
         })
+        queryClient.setQueryData<SidebarInfiniteConversationData>(
+          ['conversations', 'project', project.id, 'infinite'],
+          previous => {
+            if (!previous || previous.pages.length === 0) {
+              return {
+                pages: [{ conversations: [createdConversation], nextCursor: null, hasMore: false }],
+                pageParams: [undefined],
+              }
+            }
+
+            return {
+              ...previous,
+              pages: [
+                {
+                  ...previous.pages[0],
+                  conversations: [
+                    createdConversation,
+                    ...previous.pages[0].conversations.filter(item => item.id !== createdConversation.id),
+                  ],
+                },
+                ...previous.pages.slice(1),
+              ],
+            }
+          }
+        )
 
         queryClient.setQueryData<Conversation[]>(['conversations'], previous => {
           const previousItems = previous || []
@@ -1027,6 +1355,8 @@ const SideBar: React.FC<SideBarProps> = ({
         queryClient.invalidateQueries({ queryKey: ['projects'], refetchType: 'none' })
 
         closeExpandPortal(false)
+        const inheritedCwd = createdConversation.storage_mode === 'local' ? createdConversation.cwd || project.cwd || '' : ''
+        dispatch(chatSliceActions.ccCwdSet(inheritedCwd))
         dispatch(chatSliceActions.conversationSet(createdConversation.id))
         dispatch(activeConversationIdSet(createdConversation.id))
         navigate(`/chat/${createdConversation.project_id || project.id}/${createdConversation.id}`, {
@@ -1055,6 +1385,50 @@ const SideBar: React.FC<SideBarProps> = ({
     setEditingProject(null)
     setShowEditProjectModal(true)
   }, [])
+
+  const updateConversationSortModalPosition = useCallback(() => {
+    if (typeof window === 'undefined') return
+
+    const rect = conversationSortButtonRef.current?.getBoundingClientRect()
+    if (!rect) return
+
+    const viewportPadding = 8
+    const width = Math.min(CONVERSATION_SORT_POPOVER_WIDTH_PX, window.innerWidth - viewportPadding * 2)
+    const desiredLeft = rect.right - width
+    const left = Math.max(viewportPadding, Math.min(desiredLeft, window.innerWidth - width - viewportPadding))
+    const desiredTop = rect.bottom + CONVERSATION_SORT_POPOVER_GAP_PX
+    const top = Math.max(viewportPadding, Math.min(desiredTop, window.innerHeight - viewportPadding - 120))
+
+    setConversationSortModalPosition({ top, left })
+  }, [])
+
+  const handleOpenConversationSortModal = useCallback(() => {
+    setDraftConversationSortOptions(conversationSortOptions)
+    updateConversationSortModalPosition()
+    setShowConversationSortModal(true)
+  }, [conversationSortOptions, updateConversationSortModalPosition])
+
+  const handleCloseConversationSortModal = useCallback(() => {
+    setShowConversationSortModal(false)
+  }, [])
+
+  const handleApplyConversationSortOptions = useCallback(() => {
+    setConversationSortOptions(draftConversationSortOptions)
+    setShowConversationSortModal(false)
+  }, [draftConversationSortOptions])
+
+  useEffect(() => {
+    if (!showConversationSortModal) return
+
+    updateConversationSortModalPosition()
+    window.addEventListener('resize', updateConversationSortModalPosition)
+    window.addEventListener('scroll', updateConversationSortModalPosition, true)
+
+    return () => {
+      window.removeEventListener('resize', updateConversationSortModalPosition)
+      window.removeEventListener('scroll', updateConversationSortModalPosition, true)
+    }
+  }, [showConversationSortModal, updateConversationSortModalPosition])
 
   const handleSidebarProjectCreated = useCallback(
     async (project: Project) => {
@@ -1141,15 +1515,15 @@ const SideBar: React.FC<SideBarProps> = ({
       <>
         {!renderCollapsed && (
           <div className='px-2 pb-2'>
-            <div className='rounded-xl border border-white/10 dark:bg-neutral-900/70 bg-neutral-100/85 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-sm dark:bg-neutral-950/70'>
+            <div className='rounded-full p-1'>
               <div className='grid grid-cols-2 gap-1'>
                 <button
                   type='button'
                   onClick={() => setConversationTab('recent')}
-                  className={`rounded-lg px-3 py-2 text-sm font-semibold transition-all duration-200 ${
+                  className={`rounded-full px-3 py-2 text-sm font-semibold transition-all duration-200 ${
                     conversationTab === 'recent'
-                      ? 'bg-neutral-100/85 dark:bg-neutral-700/85  text-neutral-900 dark:text-neutral-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_4px_14px_rgba(0,0,0,0.05)]'
-                      : 'text-neutral-400 hover:bg-neutral-100/85 dark:hover:bg-neutral-800/70 hover:text-neutral-900 dark:hover:text-neutral-200'
+                      ? 'bg-white/80 text-neutral-900 shadow-[0_0_8px_rgba(15,23,42,0.08)] dark:bg-white/15 dark:text-neutral-100 dark:shadow-none'
+                      : 'text-neutral-500 hover:bg-white/45 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-200'
                   }`}
                 >
                   Projects
@@ -1157,10 +1531,10 @@ const SideBar: React.FC<SideBarProps> = ({
                 <button
                   type='button'
                   onClick={() => setConversationTab('favorites')}
-                  className={`rounded-lg px-3 py-2 text-sm font-semibold transition-all duration-200 ${
+                  className={`rounded-full px-3 py-2 text-sm font-semibold transition-all duration-200 ${
                     conversationTab === 'favorites'
-                      ? 'bg-neutral-100/85 dark:bg-neutral-700/85 text-neutral-900 dark:text-neutral-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_4px_14px_rgba(0,0,0,0.05)]'
-                      : 'text-neutral-400 hover:bg-neutral-100/85 dark:hover:bg-neutral-800/70 hover:text-neutral-900 dark:hover:text-neutral-200'
+                      ? 'bg-white/80 text-neutral-900 shadow-[0_0_8px_rgba(15,23,42,0.08)] dark:bg-white/15 dark:text-neutral-100 dark:shadow-none'
+                      : 'text-neutral-500 hover:bg-white/45 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-200'
                   }`}
                 >
                   Favorites
@@ -1183,21 +1557,34 @@ const SideBar: React.FC<SideBarProps> = ({
                 placeholder='Search chat...'
                 dropdownVariant='neutral'
                 dropdownZIndex={enableMiniHoverPreview ? 1301 : 50}
+                inputRounding='full'
+                inputClassName='border-0 bg-white/55 px-4 py-2.5 text-neutral-800 placeholder:text-neutral-500 shadow-none outline-none focus:border-transparent focus:ring-2 focus:ring-blue-400/50 dark:border-0 dark:bg-white/10 dark:text-neutral-100 dark:placeholder:text-neutral-400 dark:focus:border-transparent dark:focus:ring-orange-400/40'
               />
             </div>
             <div className='px-2 pb-2'>
-              <Button
-                variant='outline2'
-                size='medium'
-                rounded='full'
-                onClick={handleOpenCreateProject}
-                className='group w-full justify-center gap-2'
-                title='Create a new project'
-                aria-label='Create a new project'
-              >
-                <i className='bx bx-plus text-lg transition-transform duration-100 group-active:scale-90'></i>
-                <span className='text-sm font-medium'>New Project</span>
-              </Button>
+              <div className='flex items-center gap-2'>
+                <button
+                  onClick={handleOpenCreateProject}
+                  className='group flex min-w-0 flex-1 items-center justify-center gap-2 rounded-full bg-white/80 px-3 py-2.5 shadow-[0_0_8px_rgba(15,23,42,0.08)] backdrop-blur-sm dark:bg-white/10 dark:text-neutral-100 dark:shadow-[0_0_8px_rgba(15,23,42,0.38)]'
+                  title='Create a new project'
+                  aria-label='Create a new project'
+                >
+                  <i className='bx bx-plus flex h-5 w-5 items-center justify-center text-lg leading-none transition-transform duration-100 group-active:scale-90'></i>
+                  <span className='truncate text-sm font-medium leading-5'>New Project</span>
+                </button>
+                <button
+                  ref={conversationSortButtonRef}
+                  type='button'
+                  onClick={handleOpenConversationSortModal}
+                  className='group flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/80 shadow-[0_0_8px_rgba(15,23,42,0.08)] backdrop-blur-sm transition-transform duration-100 active:scale-95 dark:bg-white/10 dark:text-neutral-100 dark:shadow-[0_0_8px_rgba(15,23,42,0.38)]'
+                  title='Sort project conversations'
+                  aria-label='Sort project conversations'
+                  aria-haspopup='dialog'
+                  aria-expanded={showConversationSortModal}
+                >
+                  <i className='bx bx-sort-alt-2 text-xl leading-none transition-transform duration-100 group-active:scale-90' aria-hidden='true'></i>
+                </button>
+              </div>
             </div>
           </>
         )}
@@ -1234,6 +1621,7 @@ const SideBar: React.FC<SideBarProps> = ({
                     favoriteConversationIds={favoriteConversationIds}
                     hoveredPreviewConversationId={hoveredConversationId}
                     isElectronMode={isElectronMode}
+                    conversationSortOptions={conversationSortOptions}
                     onToggle={handleToggleProjectExpansion}
                     onSelectConversation={handleProjectConversationSelect}
                     onCreateConversation={handleCreateConversationForProject}
@@ -1254,66 +1642,95 @@ const SideBar: React.FC<SideBarProps> = ({
           ) : (
             <>
               {!renderCollapsed &&
-                displayedFavoriteConversations.map(conv => {
-                  const isActive = activeConversationId === conv.id
-                  const isPreviewHighlighted =
-                    enableMiniHoverPreview &&
-                    hoveredConversationId != null &&
-                    String(hoveredConversationId) === String(conv.id)
-                  const projectName = conv.project_id ? projectNameById.get(String(conv.project_id)) : undefined
-                  const conversationUpdatedDate = formatDate(conv.updated_at)
-
-                  return (
-                    <div
-                      key={conv.id}
-                      className='sm:mb-1 md:mb-1 lg:mb-1.5 2xl:mb-2 group relative'
-                      style={CONVERSATION_ROW_VISIBILITY_STYLE}
-                      onMouseEnter={() => {
-                        if (!enableMiniHoverPreview) return
-                        handleConversationHoverStart(conv)
-                      }}
-                      onMouseLeave={() => {
-                        if (!enableMiniHoverPreview) return
-                        handleConversationHoverEnd()
-                      }}
-                    >
-                      <div
-                        role='button'
-                        tabIndex={0}
-                        onClick={() => handleSelect(conv.id)}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
-                            handleSelect(conv.id)
-                          }
-                        }}
-                        className={`w-full text-left rounded-lg transition-all duration-200 cursor-pointer hover:bg-stone-100/30 hover:ring-neutral-100 hover:ring-1 sm:py-1 xl:py-2 dark:hover:ring-neutral-600/60 outline-transparent dark:hover:bg-yBlack-900/10 ${
-                          isActive
-                            ? 'bg-indigo-100 dark:bg-indigo-900/40 border-l-4 border-indigo-500'
-                            : isPreviewHighlighted
-                              ? 'bg-stone-100/30 ring-neutral-100 ring-1 dark:ring-neutral-600/60 dark:bg-yBlack-900/10'
-                              : ''
-                        }`}
-                      >
-                        <div className='flex flex-col gap-0 md:gap-1 lg:gap-1.5 xl:gap-1 2xl:gap-2 py-2 md:py-0 lg:py-0 xl:py-0 mx-2'>
-                          <span className='text-[14px] font-medium text-neutral-900 dark:text-stone-200 truncate'>
-                            {conv.title || `Conversation ${conv.id}`}
-                          </span>
-                          {projectName && (
-                            <span className='text-[12px] text-neutral-600 dark:text-stone-300 truncate'>
-                              Project: {projectName}
-                            </span>
-                          )}
-                          {conversationUpdatedDate && (
-                            <span className='text-xs md:text-[11px] lg:text-[10px] xl:text-[9px] 2xl:text-[11px] 3xl:text-[12px] 4xl:text-[14px] text-neutral-500 dark:text-neutral-400 text-right'>
-                              {conversationUpdatedDate}
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                favoriteConversationDateGroups.map(group => (
+                  <div key={group.key}>
+                    <div className='px-2 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-blue-600 dark:text-orange-400'>
+                      {group.label}
                     </div>
-                  )
-                })}
+                    {group.conversations.map(conv => {
+                      const isActive = activeConversationId === conv.id
+                      const isPreviewHighlighted =
+                        enableMiniHoverPreview &&
+                        hoveredConversationId != null &&
+                        String(hoveredConversationId) === String(conv.id)
+                      const projectName = conv.project_id ? projectNameById.get(String(conv.project_id)) : undefined
+
+                      return (
+                        <div
+                          key={conv.id}
+                          className='group/fav relative mb-1 min-w-0 overflow-visible rounded-md'
+                          style={CONVERSATION_ROW_VISIBILITY_STYLE}
+                          onMouseEnter={() => {
+                            if (!enableMiniHoverPreview) return
+                            handleConversationHoverStart(conv)
+                          }}
+                          onMouseLeave={() => {
+                            if (!enableMiniHoverPreview) return
+                            handleConversationHoverEnd()
+                          }}
+                        >
+                          <button
+                            type='button'
+                            onClick={() => handleSelect(conv.id)}
+                            className={`w-full min-w-0 overflow-hidden rounded-md px-2 py-1.5 text-left text-xs transition-colors md:text-[11px] lg:text-[12px] ${
+                              isActive
+                                ? 'bg-blue-100 text-blue-700 dark:bg-neutral-500/40 dark:text-orange-300'
+                                : isPreviewHighlighted
+                                  ? 'bg-neutral-200/60 text-neutral-700 dark:bg-neutral-800/70 dark:text-neutral-300'
+                                  : 'text-neutral-700 hover:bg-neutral-200/60 dark:text-neutral-300 dark:hover:bg-neutral-800/70'
+                            }`}
+                          >
+                            <div className='min-w-0'>
+                              <div className='truncate'>{conv.title || 'Untitled conversation'}</div>
+                              {projectName && (
+                                <div className='mt-0.5 truncate text-[10px] text-neutral-500 dark:text-neutral-400'>
+                                  {projectName}
+                                </div>
+                              )}
+                            </div>
+                          </button>
+                          <div className={`${SIDEBAR_ROW_ACTIONS_OVERLAY_BASE_CLASS} group-hover/fav:pointer-events-auto group-hover/fav:opacity-100`}>
+                            {isElectronMode && (
+                              <Button
+                                variant='outline2'
+                                size='smaller'
+                                rounded='full'
+                                className={SIDEBAR_ROW_ACTION_BUTTON_CLASS}
+                                onClick={() => handleToggleFavorite(conv)}
+                                title='Remove from favorites'
+                                aria-label={`Remove ${conv.title || conv.id} from favorites`}
+                              >
+                                <i className='bx bxs-star text-[16px] text-yellow-500' aria-hidden='true'></i>
+                              </Button>
+                            )}
+                            <Button
+                              variant='outline2'
+                              size='smaller'
+                              rounded='full'
+                              className={SIDEBAR_ROW_ACTION_BUTTON_CLASS}
+                              onClick={() => handleOpenMoveConversation(conv)}
+                              title='Conversation actions'
+                              aria-label={`Conversation actions for ${conv.title || conv.id}`}
+                            >
+                              <i className='bx bx-dots-horizontal-rounded text-lg' aria-hidden='true'></i>
+                            </Button>
+                            <Button
+                              variant='outline2'
+                              size='smaller'
+                              rounded='full'
+                              className={`${SIDEBAR_ROW_ACTION_BUTTON_CLASS} text-red-500 dark:text-red-400`}
+                              onClick={() => handleDeleteSidebarConversation(conv)}
+                              title='Delete conversation'
+                              aria-label={`Delete conversation ${conv.title || conv.id}`}
+                            >
+                              <i className='bx bx-trash text-lg' aria-hidden='true'></i>
+                            </Button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                ))}
               {displayedFavoriteConversations.length === 0 && !loading && !error && (
                 <div
                   className={`text-xs text-neutral-500 dark:text-neutral-400 px-2 py-1 ${renderCollapsed ? 'hidden' : ''}`}
@@ -1576,6 +1993,106 @@ const SideBar: React.FC<SideBarProps> = ({
           </AnimatePresence>,
           document.body
         )}
+
+      {/* Project Conversation Sort Modal */}
+      {showConversationSortModal && (
+        <div
+          className='fixed inset-0 z-[1300] bg-transparent'
+          onClick={handleCloseConversationSortModal}
+        >
+          <div
+            className='fixed bg-neutral-50/95 text-neutral-900 backdrop-blur-xl dark:bg-neutral-900/95 rounded-3xl border border-gray-200 dark:border-zinc-700 w-[calc(100vw-16px)] max-w-sm p-6 shadow-[0_8px_32px_rgba(0,0,0,0.1)] dark:shadow-[0_8px_32px_rgba(0,0,0,0.3)]'
+            style={{
+              top: `${conversationSortModalPosition.top}px`,
+              left: `${conversationSortModalPosition.left}px`,
+              width: `${CONVERSATION_SORT_POPOVER_WIDTH_PX}px`,
+            }}
+            onClick={event => event.stopPropagation()}
+          >
+            <div className='mb-5 flex items-start justify-between gap-3'>
+              <div>
+                <h3 className='text-xl font-semibold dark:text-neutral-100'>Sort conversations</h3>
+                <p className='mt-1 text-sm text-neutral-600 dark:text-neutral-400'>
+                  Choose how conversations are ordered inside expanded projects.
+                </p>
+              </div>
+              <Button
+                variant='outline2'
+                size='smaller'
+                rounded='full'
+                className='mt-0 flex h-8 w-8 shrink-0 items-center justify-center p-0'
+                onClick={handleCloseConversationSortModal}
+                aria-label='Close conversation sort options'
+              >
+                <i className='bx bx-x text-lg' aria-hidden='true'></i>
+              </Button>
+            </div>
+
+            <div className='space-y-4'>
+              <label className='block'>
+                <span className='mb-2 block text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400'>
+                  Sort by
+                </span>
+                <SidebarSortDropdown<SidebarConversationSortField>
+                  value={draftConversationSortOptions.field}
+                  onChange={field =>
+                    setDraftConversationSortOptions(prev => ({
+                      ...prev,
+                      field,
+                    }))
+                  }
+                  options={[
+                    { value: 'updated_at', label: 'Updated at' },
+                    { value: 'created_at', label: 'Created at' },
+                  ]}
+                  ariaLabel='Choose project conversation sort field'
+                />
+              </label>
+
+              <label className='block'>
+                <span className='mb-2 block text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400'>
+                  Order
+                </span>
+                <SidebarSortDropdown<SidebarConversationSortOrder>
+                  value={draftConversationSortOptions.order}
+                  onChange={order =>
+                    setDraftConversationSortOptions(prev => ({
+                      ...prev,
+                      order,
+                    }))
+                  }
+                  options={[
+                    { value: 'desc', label: 'Newest first' },
+                    { value: 'asc', label: 'Oldest first' },
+                  ]}
+                  ariaLabel='Choose project conversation sort order'
+                />
+              </label>
+            </div>
+
+            <div className='mt-6 flex justify-end gap-3'>
+              <Button
+                variant='outline2'
+                size='circle'
+                rounded='full'
+                className='group'
+                onClick={handleCloseConversationSortModal}
+              >
+                <p className='transition-transform duration-100 group-active:scale-95'>Cancel</p>
+              </Button>
+              <Button
+                variant='outline2'
+                size='circle'
+                rounded='full'
+                className='group bg-blue-500 hover:bg-blue-600 dark:bg-blue-600 hover:text-black dark:hover:bg-blue-700 text-white border-blue-600 dark:border-blue-700 px-5 py-2.5'
+                onClick={handleApplyConversationSortOptions}
+              >
+                <p className='transition-transform duration-100 group-active:scale-95'>Apply</p>
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Move Project Modal */}
       {showMoveModal && conversationToMove && (

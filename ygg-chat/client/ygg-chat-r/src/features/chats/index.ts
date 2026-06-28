@@ -9,7 +9,6 @@ export type {
   ModelsResponse,
   SendCCBranchPayload,
   SendCCMessagePayload,
-  SendHermesMessagePayload,
   SendMessagePayload,
   StreamChunk,
   StreamState,
@@ -39,11 +38,12 @@ export {
   compactBranch,
   sendCCBranch,
   sendCCMessage,
-  sendHermesMessage,
   sendMessage,
   sendMessageToBranch,
   syncConversationToLocal,
   updateMessage,
+  fetchConversationStreamUndo,
+  restoreStreamFileEdits,
 } from './chatActions'
 
 // Selectors - grouped by feature
@@ -86,6 +86,10 @@ export {
   selectPrimaryStreamId,
   selectPrimaryStreamState,
   selectStreamingRoot,
+  selectStreamUndoRoot,
+  selectStreamUndoSummariesForParentMessage,
+  selectStreamUndoRestoringByStreamId,
+  selectStreamUndoErrorByStreamId,
 } from './chatSelectors'
 
 // Convenience re-exports

@@ -2,7 +2,6 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Crosshair, Eraser, RotateCcw, X } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
-import { useNavigate } from 'react-router-dom'
 import { ConversationId } from '../../../../shared/types'
 import {
   BrowserPane,
@@ -18,7 +17,6 @@ import { useHtmlDarkMode } from '../components/ThemeManager/themeConfig'
 import { updateResearchNote } from '../features/conversations/conversationActions'
 import { makeSelectConversationById } from '../features/conversations/conversationSelectors'
 import { Conversation } from '../features/conversations/conversationTypes'
-import type { StreamEvent, StreamState } from '../features/chats/chatTypes'
 import { setCurrentSelection, type SelectionInfo } from '../features/ideContext'
 import { uiActions } from '../features/ui'
 import { AGENT_SETTINGS_CHANGE_EVENT, AgentSettings, loadAgentSettings } from '../helpers/agentSettingsStorage'
@@ -163,23 +161,6 @@ type BrowserDockState = {
   canGoBack: boolean
   canGoForward: boolean
   lastError: string | null
-}
-
-type AgentStreamActivityKind = StreamEvent['type'] | 'idle'
-
-type AgentStreamListItem = {
-  streamId: string
-  streamType: string
-  conversationId: string | null
-  projectId: string | null
-  conversationTitle: string | null
-  anchorMessageId: string | null
-  hasError: boolean
-  createdAt: string
-  rootMessageId: string | null
-  activityKind: AgentStreamActivityKind
-  activityLabel: string
-  completedAt: string | null
 }
 
 const getFileDockTabId = (filePath: string): string => `file:${filePath}`
@@ -372,6 +353,7 @@ const DOCKED_EDITOR_DEFAULT_WIDTH_PX = 720
 const DOCKED_TOTAL_WIDTH_RATIO = 0.9
 const DOCKED_LAYOUT_GAP_PX = 8
 const DOCKED_CHAT_MIN_WIDTH_PX = 580
+const RIGHT_BAR_EXPANDED_CONTENT_DEFER_MS = 320
 
 const PRESET_CONFIGS: Array<{
   key: GlobalAgentSchedulePreset
@@ -394,13 +376,11 @@ const intervalUnitToMs = (value: number, unit: ScheduleIntervalUnit): number => 
 
 const RightBar: React.FC<RightBarProps> = ({
   conversationId,
-  notes = [],
   className = '',
   ccCwd = '',
   onFilePathInsert,
 }) => {
   const dispatch = useDispatch()
-  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { userId } = useAuth()
   const isWeb = import.meta.env.VITE_ENVIRONMENT === 'web'
@@ -412,9 +392,17 @@ const RightBar: React.FC<RightBarProps> = ({
   const [fileSearchQuery, setFileSearchQuery] = useState('')
   const [debouncedFileSearchQuery, setDebouncedFileSearchQuery] = useState('')
   const [followGitignore, setFollowGitignore] = useState(true)
-  const { data: directoryData, isLoading: isLoadingFiles, error: filesError } = useDirectoryFiles(currentPath || null)
-  const fileSearchBasePath = ccCwd || currentPath || null
-  const activeFileSearchQuery = debouncedFileSearchQuery.trim()
+  const initialTerminalDockState = useMemo(() => loadTerminalDockState(), [])
+  const isCollapsed = useSelector((state: RootState) => state.ui.rightBarCollapsed)
+  const rightBarWidth = useSelector((state: RootState) => state.ui.rightBarWidth)
+  const [isExpandedContentReady, setIsExpandedContentReady] = useState(() => !isCollapsed)
+  const shouldRenderExpandedContent = !isCollapsed && isExpandedContentReady
+  const shouldLoadFileBrowser = shouldRenderExpandedContent && !!ccCwd
+  const { data: directoryData, isLoading: isLoadingFiles, error: filesError } = useDirectoryFiles(
+    shouldLoadFileBrowser ? currentPath || null : null
+  )
+  const fileSearchBasePath = shouldLoadFileBrowser ? ccCwd || currentPath || null : null
+  const activeFileSearchQuery = shouldLoadFileBrowser ? debouncedFileSearchQuery.trim() : ''
   const isFileSearchMode = activeFileSearchQuery.length > 0
   const {
     data: fileSearchData,
@@ -424,9 +412,6 @@ const RightBar: React.FC<RightBarProps> = ({
   } = useDirectoryFileSearch(fileSearchBasePath, activeFileSearchQuery, followGitignore, 200)
   const displayedDirectoryFiles = isFileSearchMode ? fileSearchData?.files || [] : directoryData?.files || []
   const isSearchingFiles = isLoadingFileSearch || isFetchingFileSearch
-  const initialTerminalDockState = useMemo(() => loadTerminalDockState(), [])
-  const isCollapsed = useSelector((state: RootState) => state.ui.rightBarCollapsed)
-  const rightBarWidth = useSelector((state: RootState) => state.ui.rightBarWidth)
   const extensionConnected = useSelector((state: RootState) => state.ideContext.extensionConnected)
   const hasConnectedIdeExtensions = useSelector((state: RootState) =>
     state.ideContext.extensions.some(extension => extension.isConnected)
@@ -447,6 +432,7 @@ const RightBar: React.FC<RightBarProps> = ({
   const [terminalPreferences, setTerminalPreferences] = useState<TerminalDockPreferences>(
     () => initialTerminalDockState.preferences
   )
+  const [isTerminalPreferencesOpen, setIsTerminalPreferencesOpen] = useState(false)
   const [activeDockTabId, setActiveDockTabId] = useState<string | null>(() =>
     initialTerminalDockState.activeTerminalTabId
       ? getTerminalDockTabId(initialTerminalDockState.activeTerminalTabId)
@@ -511,8 +497,23 @@ const RightBar: React.FC<RightBarProps> = ({
     openGitDiffTabs.length > 0 ||
     openTerminalTabs.length > 0 ||
     openBrowserTabs.length > 0
-  const isEditorDockOpen = !isCollapsed && hasDockTabs && !!activeDockTabId
+  const isEditorDockOpen = shouldRenderExpandedContent && hasDockTabs && !!activeDockTabId
   const monacoTheme = isDarkMode ? 'vs-dark' : 'vs'
+
+  useEffect(() => {
+    if (isCollapsed) {
+      setIsExpandedContentReady(false)
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setIsExpandedContentReady(true)
+    }, RIGHT_BAR_EXPANDED_CONTENT_DEFER_MS)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [isCollapsed])
 
   useEffect(() => {
     openFileEditorsRef.current = openFileEditors
@@ -633,7 +634,7 @@ const RightBar: React.FC<RightBarProps> = ({
     if (maxDockOverlayWidth <= 0) return 0
     return Math.max(minDockOverlayWidth, Math.min(DOCKED_EDITOR_DEFAULT_WIDTH_PX, maxDockOverlayWidth))
   }, [maxDockOverlayWidth, minDockOverlayWidth])
-  const shouldMountDockOverlay = hasDockTabs && maxDockOverlayWidth > 0
+  const shouldMountDockOverlay = shouldRenderExpandedContent && hasDockTabs && maxDockOverlayWidth > 0
   const dockOverlayWidthPx = useMemo(() => {
     if (!shouldMountDockOverlay) return 0
     const baseWidth = dockedLayoutWidth == null ? defaultDockOverlayWidth : dockedLayoutWidth
@@ -805,8 +806,8 @@ const RightBar: React.FC<RightBarProps> = ({
   }, [fileSearchQuery])
 
   // Tab state: 'git' for repository tools, 'note' for single conversation note,
-  // 'terminal' for terminal management, 'agents' for active stream overview, 'global' for agent (hidden)
-  const [activeTab, setActiveTab] = useState<'git' | 'note' | 'terminal' | 'agents' | 'global'>('note')
+  // 'terminal' for terminal management, 'global' for agent (hidden)
+  const [activeTab, setActiveTab] = useState<'git' | 'note' | 'terminal' | 'global'>('note')
   const gitBasePath = currentPath || ccCwd || null
   const isGitTabAvailable = !isWeb
   const [selectedGitDiff, setSelectedGitDiff] = useState<{
@@ -825,13 +826,17 @@ const RightBar: React.FC<RightBarProps> = ({
     isLoading: isLoadingGitOverview,
     isFetching: isFetchingGitOverview,
     refetch: refetchGitOverview,
-  } = useGitOverview(gitBasePath, isGitTabAvailable && activeTab === 'git' && !isCollapsed)
+  } = useGitOverview(gitBasePath, isGitTabAvailable && activeTab === 'git' && shouldRenderExpandedContent)
   const selectedGitStatusFile = useMemo(
     () => gitOverviewData?.status.all.find(file => file.relativePath === selectedGitDiff?.relativePath) ?? null,
     [gitOverviewData?.status.all, selectedGitDiff?.relativePath]
   )
   const shouldLoadGitDiff =
-    isGitTabAvailable && !isCollapsed && !!gitBasePath && !!activeGitDiffTab?.relativePath && !!activeDockTabId
+    isGitTabAvailable &&
+    shouldRenderExpandedContent &&
+    !!gitBasePath &&
+    !!activeGitDiffTab?.relativePath &&
+    !!activeDockTabId
   const {
     data: gitDiffData,
     isLoading: isLoadingGitDiff,
@@ -864,21 +869,20 @@ const RightBar: React.FC<RightBarProps> = ({
     endDate: '',
     allowedWeekdays: [...ALL_WEEKDAYS],
   })
-  const [streamHistory, setStreamHistory] = useState<AgentStreamListItem[]>([])
-  const previousActiveStreamIdsRef = useRef<Set<string>>(new Set())
+  const shouldLoadGlobalAgentPanel = shouldRenderExpandedContent && activeTab === 'global'
 
   // Use React Query hooks for agent messages
-  const { data: agentData } = useGlobalAgentMessages()
+  const { data: agentData } = useGlobalAgentMessages(shouldLoadGlobalAgentPanel)
   const agentMessages = agentData?.messages || []
   const agentConversationDate = agentData?.conversationDate
     ? new Date(agentData.conversationDate).toLocaleDateString()
     : null
 
   // Subscribe to live streaming updates (triggers re-render on stream buffer changes)
-  const agentStreamBuffer = useGlobalAgentStreamBuffer()
-  const optimisticMessage = useGlobalAgentOptimisticMessage()
+  const agentStreamBuffer = useGlobalAgentStreamBuffer(shouldLoadGlobalAgentPanel)
+  const optimisticMessage = useGlobalAgentOptimisticMessage(shouldLoadGlobalAgentPanel)
   const isAgentStreaming = Boolean(agentStreamBuffer) || Boolean(agentState.streamId)
-  const scheduleModalVisible = scheduleModalOpen && !isCollapsed && activeTab === 'global'
+  const scheduleModalVisible = scheduleModalOpen && shouldLoadGlobalAgentPanel
   const {
     data: queuedTasksData,
     isLoading: isLoadingQueuedTasks,
@@ -987,190 +991,6 @@ const RightBar: React.FC<RightBarProps> = ({
 
   // Get conversation data using selector
   const conversation = useSelector(conversationId ? makeSelectConversationById(conversationId) : () => null)
-  const conversations = useSelector((state: RootState) => state.conversations.items)
-  const streamingRoot = useSelector((state: RootState) => state.chat.streaming)
-
-  const summarizeId = useCallback((value: string | null | undefined) => {
-    if (!value) return '—'
-    return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value
-  }, [])
-
-  const getActivityBadgeClasses = useCallback((kind: AgentStreamActivityKind): string => {
-    const baseClasses = 'rounded-full px-2 py-0.5 font-medium'
-    if (kind === 'tool_call' || kind === 'tool_result') {
-      return `${baseClasses} bg-violet-100/80 dark:bg-violet-500/15 text-violet-700 dark:text-violet-200`
-    }
-    if (kind === 'reasoning') {
-      return `${baseClasses} bg-sky-100/80 dark:bg-sky-500/15 text-sky-700 dark:text-sky-200`
-    }
-    if (kind === 'text') {
-      return `${baseClasses} bg-emerald-100/80 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-200`
-    }
-    if (kind === 'image') {
-      return `${baseClasses} bg-fuchsia-100/80 dark:bg-fuchsia-500/15 text-fuchsia-700 dark:text-fuchsia-200`
-    }
-    return `${baseClasses} bg-neutral-100 dark:bg-neutral-800/70 text-neutral-600 dark:text-neutral-300`
-  }, [])
-
-  const notesByConversationId = useMemo(() => {
-    const map = new Map<string, ResearchNoteItem>()
-    for (const note of notes) {
-      map.set(String(note.id), note)
-    }
-    return map
-  }, [notes])
-
-  const conversationsById = useMemo(() => {
-    const map = new Map<string, Conversation>()
-    for (const item of conversations) {
-      map.set(String(item.id), item)
-    }
-    return map
-  }, [conversations])
-
-  const getStreamActivity = useCallback(
-    (stream: StreamState): { activityKind: AgentStreamActivityKind; activityLabel: string } => {
-      if (Array.isArray(stream.events) && stream.events.length > 0) {
-        for (let index = stream.events.length - 1; index >= 0; index -= 1) {
-          const event = stream.events[index]
-          if (!event) continue
-
-          if (event.type === 'tool_call') {
-            const toolName = event.toolCall?.name || stream.toolCalls[stream.toolCalls.length - 1]?.name || 'tool'
-            return {
-              activityKind: 'tool_call',
-              activityLabel: `tool: ${toolName}`,
-            }
-          }
-
-          if (event.type === 'tool_result') {
-            const matchingTool = stream.toolCalls.find(toolCall => toolCall.id === event.toolResult?.tool_use_id)
-            return {
-              activityKind: 'tool_result',
-              activityLabel: matchingTool?.name ? `result: ${matchingTool.name}` : 'tool result',
-            }
-          }
-
-          if (event.type === 'reasoning') {
-            return { activityKind: 'reasoning', activityLabel: 'reasoning' }
-          }
-
-          if (event.type === 'text') {
-            return { activityKind: 'text', activityLabel: 'text' }
-          }
-
-          if (event.type === 'image') {
-            return { activityKind: 'image', activityLabel: 'image' }
-          }
-        }
-      }
-
-      if (stream.toolCalls.length > 0) {
-        const latestTool = stream.toolCalls[stream.toolCalls.length - 1]
-        return {
-          activityKind: 'tool_call',
-          activityLabel: `tool: ${latestTool?.name || 'tool'}`,
-        }
-      }
-
-      if (stream.thinkingBuffer.trim().length > 0) {
-        return { activityKind: 'reasoning', activityLabel: 'reasoning' }
-      }
-
-      if (stream.buffer.trim().length > 0) {
-        return { activityKind: 'text', activityLabel: 'text' }
-      }
-
-      return { activityKind: 'idle', activityLabel: 'starting' }
-    },
-    []
-  )
-
-  const buildAgentStreamListItem = useCallback(
-    (streamId: string, stream: StreamState, completedAt: string | null = null): AgentStreamListItem => {
-      const streamConversationId = stream.conversationId ? String(stream.conversationId) : null
-      const convo = streamConversationId ? conversationsById.get(streamConversationId) : null
-      const note = streamConversationId ? notesByConversationId.get(streamConversationId) : null
-      const anchorMessageId =
-        stream.streamingMessageId ||
-        stream.messageId ||
-        stream.lineage.originMessageId ||
-        stream.lineage.rootMessageId ||
-        null
-      const { activityKind, activityLabel } = getStreamActivity(stream)
-
-      return {
-        streamId,
-        streamType: stream.streamType,
-        conversationId: streamConversationId,
-        projectId: convo?.project_id ? String(convo.project_id) : note?.project_id ? String(note.project_id) : null,
-        conversationTitle:
-          convo?.title || note?.title || (streamConversationId ? `Conversation ${streamConversationId}` : null),
-        anchorMessageId: anchorMessageId ? String(anchorMessageId) : null,
-        hasError: Boolean(stream.error),
-        createdAt: stream.createdAt,
-        rootMessageId: stream.lineage.rootMessageId ? String(stream.lineage.rootMessageId) : null,
-        activityKind,
-        activityLabel,
-        completedAt,
-      }
-    },
-    [conversationsById, getStreamActivity, notesByConversationId]
-  )
-
-  const activeStreams = useMemo(() => {
-    const items: AgentStreamListItem[] = []
-
-    for (const streamId of streamingRoot.activeIds) {
-      const stream = streamingRoot.byId[streamId]
-      if (!stream || !stream.active) continue
-      items.push(buildAgentStreamListItem(streamId, stream, null))
-    }
-
-    return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-  }, [buildAgentStreamListItem, streamingRoot.activeIds, streamingRoot.byId])
-
-  useEffect(() => {
-    const currentActiveIds = new Set<string>()
-
-    for (const streamId of streamingRoot.activeIds) {
-      const stream = streamingRoot.byId[streamId]
-      if (stream?.active) {
-        currentActiveIds.add(streamId)
-      }
-    }
-
-    const completedItems: AgentStreamListItem[] = []
-
-    previousActiveStreamIdsRef.current.forEach(streamId => {
-      if (currentActiveIds.has(streamId)) return
-      const stream = streamingRoot.byId[streamId]
-      if (!stream) return
-      completedItems.push(buildAgentStreamListItem(streamId, stream, new Date().toISOString()))
-    })
-
-    if (completedItems.length > 0) {
-      setStreamHistory(previous => {
-        const incomingById = new Map(completedItems.map(item => [item.streamId, item]))
-        const merged = [...completedItems, ...previous.filter(item => !incomingById.has(item.streamId))]
-        return merged
-          .sort((a, b) => (b.completedAt || b.createdAt).localeCompare(a.completedAt || a.createdAt))
-          .slice(0, 40)
-      })
-    }
-
-    previousActiveStreamIdsRef.current = currentActiveIds
-  }, [buildAgentStreamListItem, streamingRoot.activeIds, streamingRoot.byId])
-
-  const handleActiveStreamClick = useCallback(
-    (item: (typeof activeStreams)[number]) => {
-      if (!item.conversationId) return
-      const projectSegment = item.projectId ? String(item.projectId) : 'unknown'
-      const hash = item.anchorMessageId ? `#${item.anchorMessageId}` : ''
-      navigate(`/chat/${projectSegment}/${item.conversationId}${hash}`)
-    },
-    [navigate]
-  )
 
   // Initialize local note from conversation data
   useEffect(() => {
@@ -1342,13 +1162,10 @@ const RightBar: React.FC<RightBarProps> = ({
   }
 
   const beginSidebarResize = useCallback(() => {
-    if (isCollapsed) {
-      dispatch(uiActions.rightBarWidthSet(resolvedRightBarWidth))
-      dispatch(uiActions.rightBarExpanded())
-    }
+    if (isCollapsed) return
 
     setIsResizingSidebar(true)
-  }, [dispatch, isCollapsed, resolvedRightBarWidth])
+  }, [isCollapsed])
 
   const handleSidebarResizeMouseDown = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -2856,7 +2673,7 @@ const RightBar: React.FC<RightBarProps> = ({
   return (
     <aside
       ref={asideRef}
-      className={`relative z-10 ${isWeb ? 'h-[100vh]' : 'h-full'} flex flex-col ${isEditorDockOpen ? 'overflow-visible' : 'overflow-hidden'} bg-transparent dark:bg-transparent flex-shrink-0 ${isResizingSidebar ? 'transition-none' : 'transition-all duration-300 ease-in-out'} ${className}`}
+      className={`relative z-10 ${isWeb ? 'h-[100vh]' : 'h-full'} flex flex-col ${isEditorDockOpen ? 'overflow-visible' : 'overflow-hidden'} bg-transparent dark:bg-transparent flex-shrink-0 ${isResizingSidebar ? 'transition-none' : 'transition-[width,flex-basis] duration-300 ease-in-out'} ${className}`}
       style={{
         width: `${asideWidthPx}px`,
         maxWidth: '100%',
@@ -2864,7 +2681,7 @@ const RightBar: React.FC<RightBarProps> = ({
       }}
       aria-label='Research Notes'
     >
-      {!isEditorDockOpen && (
+      {!isEditorDockOpen && !isCollapsed && (
         <div
           className='group absolute inset-y-0 left-0 z-30 flex cursor-col-resize select-none items-center justify-center'
           style={{ width: `${RIGHT_BAR_RESIZE_HANDLE_WIDTH_PX}px` }}
@@ -2922,7 +2739,7 @@ const RightBar: React.FC<RightBarProps> = ({
                 ></i>
               </Button>
 
-              {!isCollapsed && !isEditorDockOpen && (
+              {shouldRenderExpandedContent && !isEditorDockOpen && (
                 <div className='flex flex-wrap items-center gap-2'>
                   {hasDockTabs ? (
                     <span className='leading-none rounded-[18px] py-2 px-3.5 bg-neutral-50 font-semibold text-[22px] text-neutral-600 dark:text-neutral-200 acrylic-ultra-light-nb-3'>
@@ -2936,7 +2753,7 @@ const RightBar: React.FC<RightBarProps> = ({
               )}
             </div>
 
-            {/* {!isCollapsed && (
+            {/* {shouldRenderExpandedContent && (
           <h2 className='leading-none text-[14px] md:text-[16px] lg:text-[16px] xl:text-[16px] 2xl:text-[18px] 3xl:text-[20px] 4xl:text-[22px] rounded-[18px] py-2 px-2.5 font-semibold text-neutral-700 dark:text-neutral-200 truncate bg-neutral-50 acrylic-ultra-light-nb-3'>
             Explorer
           </h2>
@@ -3096,7 +2913,7 @@ const RightBar: React.FC<RightBarProps> = ({
           }
         >
           {/* File browser - show when ccCwd is set and expanded */}
-          {!isCollapsed && ccCwd && (
+          {shouldRenderExpandedContent && ccCwd && (
             <div className='min-w-0 flex-1 min-h-0 flex flex-col overflow-hidden px-2 pb-2 border-b border-neutral-200 dark:border-neutral-800'>
               {/* Path header with navigation */}
               <div className='flex min-w-0 items-center gap-2 mb-2 flex-shrink-0 overflow-hidden'>
@@ -3272,7 +3089,7 @@ const RightBar: React.FC<RightBarProps> = ({
           )}
 
           {/* Tab buttons - only show when expanded */}
-          {!isCollapsed && (
+          {shouldRenderExpandedContent && (
             <div className='flex min-w-0 gap-2 overflow-hidden px-3 py-2 flex-shrink-0'>
               {!isWeb && (
                 <button
@@ -3309,17 +3126,6 @@ const RightBar: React.FC<RightBarProps> = ({
                   Terminal {openTerminalTabs.length > 0 ? `(${openTerminalTabs.length})` : ''}
                 </button>
               )}
-              <button
-                onClick={() => setActiveTab('agents')}
-                className={`flex-1 px-2 py-2 text-sm font-medium rounded-xl transition-all duration-200 ${
-                  activeTab === 'agents'
-                    ? 'bg-neutral-50 acrylic-ultra-light-nb-3 text-stone-800 dark:text-stone-200 scale-102 dark:border-transparent shadow-[0px_0.5px_3px_-0.5px_rgba(0,0,0,0.05)] dark:shadow-[0px_0.5px_3px_2px_rgba(0,0,0,0.05)]'
-                    : 'bg-transparent hover:scale-101 text-stone-600 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-neutral-900/50 '
-                }`}
-                title='Active streaming branches'
-              >
-                Agents {activeStreams.length > 0 ? `(${activeStreams.length})` : ''}
-              </button>
               {/* Global tab intentionally hidden.
             <button
               onClick={() => setActiveTab('global')}
@@ -3337,7 +3143,7 @@ const RightBar: React.FC<RightBarProps> = ({
 
           {/* Content Area */}
           <div
-            className={`${!isCollapsed && ccCwd ? 'flex-1' : 'flex-1'} min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-2 pt-2 2xl:pt-2 no-scrollbar scroll-fade dark:border-neutral-800 rounded-xl border-t-0`}
+            className={`${shouldRenderExpandedContent && ccCwd ? 'flex-1' : 'flex-1'} min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-2 pt-2 2xl:pt-2 no-scrollbar scroll-fade dark:border-neutral-800 rounded-xl border-t-0`}
             data-heimdall-wheel-exempt='true'
             data-heimdall-contextmenu-exempt='true'
           >
@@ -3383,6 +3189,8 @@ const RightBar: React.FC<RightBarProps> = ({
                   </Button>
                 )}
               </div>
+            ) : !shouldRenderExpandedContent ? (
+              <div className='h-full min-h-0' aria-hidden='true' />
             ) : activeTab === 'git' ? (
               !gitBasePath ? (
                 <div className='text-xs text-neutral-500 dark:text-neutral-400 px-2 py-1'>
@@ -3939,9 +3747,6 @@ const RightBar: React.FC<RightBarProps> = ({
                         {openTerminalTabs.filter(tab => tab.status === 'open' || tab.status === 'launching').length}{' '}
                         running
                       </div>
-                      <div className='mt-1 text-[11px] text-neutral-500 dark:text-neutral-400'>
-                        Launch local shells and reopen them on next app launch.
-                      </div>
                     </div>
                     <button
                       type='button'
@@ -3954,14 +3759,14 @@ const RightBar: React.FC<RightBarProps> = ({
                   </div>
 
                   <div className='mt-2 flex flex-wrap gap-x-3 gap-y-1'>
-                    <button
+                    {/* <button
                       type='button'
                       onClick={() => openNewTerminalDock(currentPath || ccCwd)}
                       disabled={isWeb || !(currentPath || ccCwd)}
                       className='text-[11px] font-medium text-neutral-500 transition-colors hover:text-neutral-800 disabled:opacity-50 dark:text-neutral-400 dark:hover:text-neutral-200'
                     >
                       Current path
-                    </button>
+                    </button> */}
                     {ccCwd && currentPath && currentPath !== ccCwd && (
                       <button
                         type='button'
@@ -3984,54 +3789,69 @@ const RightBar: React.FC<RightBarProps> = ({
                 </div>
 
                 <div className='border-t border-neutral-200/70 px-2 pt-4 dark:border-neutral-800/70'>
-                  <h3 className='text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500 dark:text-neutral-400'>
-                    Preferences
-                  </h3>
-                  <div className='mt-2 divide-y divide-neutral-200/70 dark:divide-neutral-800/70'>
-                    <button
-                      type='button'
-                      onClick={() =>
-                        setTerminalPreferences(current => ({
-                          ...current,
-                          restoreSessionsOnLaunch: !current.restoreSessionsOnLaunch,
-                        }))
-                      }
-                      className='group flex w-full items-start justify-between gap-3 py-1.5 text-left'
-                    >
-                      <div className='min-w-0'>
-                        <div className='text-[11px] font-medium text-neutral-900 dark:text-neutral-100'>
-                          Restore sessions on launch
-                        </div>
-                        <div className='mt-0.5 text-[10px] text-neutral-500 dark:text-neutral-400'>
-                          Reopen saved terminal tabs after restarting Electron.
-                        </div>
-                      </div>
-                      <span className='inline-flex shrink-0 items-center justify-center rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 transition-transform duration-150 group-hover:scale-110 group-focus-visible:scale-110 dark:bg-neutral-800 dark:text-neutral-400'>
-                        {terminalPreferences.restoreSessionsOnLaunch ? 'On' : 'Off'}
-                      </span>
-                    </button>
-                    <button
-                      type='button'
-                      onClick={() =>
-                        setTerminalPreferences(current => ({
-                          ...current,
-                          persistHistory: !current.persistHistory,
-                        }))
-                      }
-                      className='group flex w-full items-start justify-between gap-3 py-1.5 text-left'
-                    >
-                      <div className='min-w-0'>
-                        <div className='text-[11px] font-medium text-neutral-900 dark:text-neutral-100'>
-                          Persist shell history
-                        </div>
-                        <div className='mt-0.5 text-[10px] text-neutral-500 dark:text-neutral-400'>
-                          Save each terminal buffer so restored tabs show previous output.
-                        </div>
-                      </div>
-                      <span className='inline-flex shrink-0 items-center justify-center rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 transition-transform duration-150 group-hover:scale-110 group-focus-visible:scale-110 dark:bg-neutral-800 dark:text-neutral-400'>
-                        {terminalPreferences.persistHistory ? 'On' : 'Off'}
-                      </span>
-                    </button>
+                  <button
+                    type='button'
+                    onClick={() => setIsTerminalPreferencesOpen(value => !value)}
+                    className='flex w-full items-center justify-between gap-2 text-left'
+                    aria-expanded={isTerminalPreferencesOpen}
+                  >
+                    <h3 className='text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500 dark:text-neutral-400'>
+                      Preferences
+                    </h3>
+                    <span className='flex items-center gap-2 text-[10px] text-neutral-500 dark:text-neutral-400'>
+                      {terminalPreferences.restoreSessionsOnLaunch ? 'Restore on' : 'Restore off'} ·{' '}
+                      {terminalPreferences.persistHistory ? 'History on' : 'History off'}
+                      <i
+                        className={`bx bx-chevron-down text-sm transition-transform ${
+                          isTerminalPreferencesOpen ? 'rotate-180' : ''
+                        }`}
+                        aria-hidden='true'
+                      />
+                    </span>
+                  </button>
+                  <div
+                    className={`grid transition-[grid-template-rows,opacity,margin-top] duration-200 ease-in-out ${
+                      isTerminalPreferencesOpen ? 'mt-2 grid-rows-[1fr] opacity-100' : 'mt-0 grid-rows-[0fr] opacity-0'
+                    }`}
+                  >
+                    <div className='min-h-0 overflow-hidden divide-y divide-neutral-200/70 dark:divide-neutral-800/70'>
+                      <button
+                        type='button'
+                        onClick={() =>
+                          setTerminalPreferences(current => ({
+                            ...current,
+                            restoreSessionsOnLaunch: !current.restoreSessionsOnLaunch,
+                          }))
+                        }
+                        className='group flex w-full items-center justify-between gap-3 py-1.5 text-left'
+                        tabIndex={isTerminalPreferencesOpen ? 0 : -1}
+                      >
+                        <span className='min-w-0 text-[11px] font-medium text-neutral-900 dark:text-neutral-100'>
+                          Restore sessions
+                        </span>
+                        <span className='inline-flex shrink-0 items-center justify-center rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 transition-transform duration-150 group-hover:scale-110 group-focus-visible:scale-110 dark:bg-neutral-800 dark:text-neutral-400'>
+                          {terminalPreferences.restoreSessionsOnLaunch ? 'On' : 'Off'}
+                        </span>
+                      </button>
+                      <button
+                        type='button'
+                        onClick={() =>
+                          setTerminalPreferences(current => ({
+                            ...current,
+                            persistHistory: !current.persistHistory,
+                          }))
+                        }
+                        className='group flex w-full items-center justify-between gap-3 py-1.5 text-left'
+                        tabIndex={isTerminalPreferencesOpen ? 0 : -1}
+                      >
+                        <span className='min-w-0 text-[11px] font-medium text-neutral-900 dark:text-neutral-100'>
+                          Persist history
+                        </span>
+                        <span className='inline-flex shrink-0 items-center justify-center rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 transition-transform duration-150 group-hover:scale-110 group-focus-visible:scale-110 dark:bg-neutral-800 dark:text-neutral-400'>
+                          {terminalPreferences.persistHistory ? 'On' : 'Off'}
+                        </span>
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -4157,121 +3977,6 @@ const RightBar: React.FC<RightBarProps> = ({
                           </div>
                         )
                       })}
-                    </div>
-                  )}
-                </div>
-              </div>
-            ) : activeTab === 'agents' ? (
-              <div className='space-y-3'>
-                <div>
-                  <div className='px-2 pb-1 text-[11px] uppercase tracking-[0.16em] text-neutral-500 dark:text-neutral-400'>
-                    Running
-                  </div>
-                  {activeStreams.length === 0 ? (
-                    <div className='text-xs text-neutral-500 dark:text-neutral-400 px-2 py-1'>
-                      No active chat streams right now.
-                    </div>
-                  ) : (
-                    <div className='space-y-2'>
-                      {activeStreams.map(stream => (
-                        <div key={stream.streamId} className='group relative'>
-                          <div
-                            role='button'
-                            tabIndex={0}
-                            onClick={() => handleActiveStreamClick(stream)}
-                            onKeyDown={event => {
-                              if (event.key === 'Enter' || event.key === ' ') {
-                                event.preventDefault()
-                                handleActiveStreamClick(stream)
-                              }
-                            }}
-                            className='w-full text-left rounded-xl transition-colors duration-200 cursor-pointer bg-neutral-50/60 hover:bg-neutral-100/80 dark:bg-yBlack-900/20 dark:hover:bg-neutral-800/45 px-3 py-2.5'
-                          >
-                            <div className='flex items-start justify-between gap-2'>
-                              <div className='min-w-0 flex-1'>
-                                <div className='text-[12px] font-medium text-neutral-900 dark:text-stone-200 truncate'>
-                                  {stream.conversationTitle || `Conversation ${stream.conversationId || 'Unknown'}`}
-                                </div>
-                                <div className='mt-1 text-[11px] text-neutral-500 dark:text-neutral-400 flex flex-wrap gap-2'>
-                                  <span className={getActivityBadgeClasses(stream.activityKind)}>
-                                    {stream.activityLabel}
-                                  </span>
-                                </div>
-                                <div className='mt-1 text-[10px] text-neutral-500 dark:text-neutral-400'>
-                                  conversation {summarizeId(stream.conversationId)}
-                                </div>
-                              </div>
-                              <div className='flex flex-col items-end gap-1'>
-                                <span className='text-[10px] text-neutral-500 dark:text-neutral-400'>
-                                  {new Date(stream.createdAt).toLocaleTimeString()}
-                                </span>
-                                {stream.hasError && (
-                                  <span className='text-[10px] rounded-full bg-rose-100 dark:bg-rose-500/15 text-rose-700 dark:text-rose-200 px-2 py-0.5'>
-                                    error
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className='h-px bg-neutral-200/60 dark:bg-neutral-800/60' />
-
-                <div>
-                  <div className='px-2 pb-1 text-[11px] uppercase tracking-[0.16em] text-neutral-500 dark:text-neutral-400'>
-                    History
-                  </div>
-                  {streamHistory.length === 0 ? (
-                    <div className='text-xs text-neutral-500 dark:text-neutral-400 px-2 py-1'>
-                      No completed streams yet.
-                    </div>
-                  ) : (
-                    <div className='space-y-2'>
-                      {streamHistory.map(stream => (
-                        <div key={`history-${stream.streamId}`} className='group relative'>
-                          <div
-                            role='button'
-                            tabIndex={0}
-                            onClick={() => handleActiveStreamClick(stream)}
-                            onKeyDown={event => {
-                              if (event.key === 'Enter' || event.key === ' ') {
-                                event.preventDefault()
-                                handleActiveStreamClick(stream)
-                              }
-                            }}
-                            className='w-full text-left rounded-xl transition-colors duration-200 cursor-pointer bg-stone-50/60 hover:bg-neutral-100/80 dark:bg-yBlack-900/20 dark:hover:bg-neutral-800/45 px-3 py-2.5 opacity-90 hover:opacity-100'
-                          >
-                            <div className='flex items-start justify-between gap-2'>
-                              <div className='min-w-0 flex-1'>
-                                <div className='text-[12px] font-medium text-neutral-800 dark:text-stone-200 truncate'>
-                                  {stream.conversationTitle || `Conversation ${stream.conversationId || 'Unknown'}`}
-                                </div>
-                                <div className='mt-1 text-[11px] text-neutral-500 dark:text-neutral-400 flex flex-wrap gap-2'>
-                                  <span className={getActivityBadgeClasses(stream.activityKind)}>
-                                    {stream.activityLabel}
-                                  </span>
-                                  {stream.hasError ? (
-                                    <span className='text-[10px] rounded-full bg-rose-100 dark:bg-rose-500/15 text-rose-700 dark:text-rose-200 px-2 py-0.5'>
-                                      ended with error
-                                    </span>
-                                  ) : (
-                                    <span className='text-[10px] rounded-full bg-neutral-100 dark:bg-neutral-800/70 px-2 py-0.5'>
-                                      completed
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                              <div className='text-[10px] text-neutral-500 dark:text-neutral-400 whitespace-nowrap'>
-                                {new Date(stream.completedAt || stream.createdAt).toLocaleTimeString()}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
                     </div>
                   )}
                 </div>
@@ -4456,7 +4161,7 @@ const RightBar: React.FC<RightBarProps> = ({
                       value={localNote}
                       onChange={handleNoteChange}
                       placeholder='Enter research notes for this conversation...'
-                      className='w-full resize-none flex-1'
+                      className='w-full resize-none flex-1 border-0 dark:border-0'
                       minRows={undefined}
                       maxRows={undefined}
                       fillAvailableHeight={true}

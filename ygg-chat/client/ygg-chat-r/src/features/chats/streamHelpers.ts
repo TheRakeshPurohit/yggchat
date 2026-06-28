@@ -14,6 +14,8 @@ export const createEmptyStreamState = (
   toolCalls: [],
   events: [],
   messageId: null,
+  triggerUserMessageId: lineage.originMessageId ?? null,
+  currentBranchAnchorMessageId: lineage.originMessageId ?? lineage.rootMessageId ?? null,
   branchAnchorMessageId: lineage.rootMessageId ?? lineage.originMessageId ?? null,
   liveMessageId: null,
   lastCompletedMessageId: null,

@@ -3,6 +3,9 @@ import { contextBridge, ipcRenderer } from 'electron'
 // Expose protected methods that allow the renderer process to use
 // ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
+  dev: {
+    codexDevLogsEnabled: /^(1|true|yes|on)$/i.test(process.env.YGG_CODEX_DEV_LOGS || ''),
+  },
   auth: {
     login: (credentials: any) => ipcRenderer.invoke('auth:login', credentials),
     logout: () => ipcRenderer.invoke('auth:logout'),

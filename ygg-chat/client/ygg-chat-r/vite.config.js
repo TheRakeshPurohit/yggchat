@@ -17,6 +17,7 @@ export default defineConfig(function () {
             __IS_ELECTRON__: JSON.stringify(isElectron),
             __IS_WEB__: JSON.stringify(isWeb),
             __IS_LOCAL__: JSON.stringify(buildTarget === 'local'),
+            __YGG_CODEX_DEV_LOGS__: JSON.stringify(/^(1|true|yes|on)$/i.test(process.env.YGG_CODEX_DEV_LOGS || '')),
         },
         // Resolve aliases for cleaner imports
         resolve: {

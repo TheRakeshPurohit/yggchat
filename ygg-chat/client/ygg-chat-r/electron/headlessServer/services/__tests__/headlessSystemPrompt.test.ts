@@ -21,6 +21,19 @@ describe('buildHeadlessSystemPrompt', () => {
     expect(prompt).toContain('Agent Prompt: Coding mode')
   })
 
+  it('adds Plan response style for plan mode', () => {
+    const prompt = buildHeadlessSystemPrompt({ operationMode: 'plan', planModeVerbosity: 'normal' })
+
+    expect(prompt).toContain('## Plan Response Style')
+    expect(prompt).toContain('Use a balanced plan')
+  })
+
+  it('does not add Plan response style for execute mode', () => {
+    const prompt = buildHeadlessSystemPrompt({ operationMode: 'execute' })
+
+    expect(prompt).not.toContain('## Plan Response Style')
+  })
+
   it('can disable default operation mode prompts', () => {
     const prompt = buildHeadlessSystemPrompt({
       operationMode: 'plan',

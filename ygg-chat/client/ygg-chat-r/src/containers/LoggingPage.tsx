@@ -44,6 +44,13 @@ type ToolJobByTool = {
   failureRatePct: number
 }
 
+type ToolBatchingRow = {
+  toolName: string
+  batches: number
+  expandedCalls: number
+  savedCalls: number
+}
+
 const Bar = RechartsBar as unknown as React.ComponentType<any>
 const BarChart = RechartsBarChart as unknown as React.ComponentType<any>
 const CartesianGrid = RechartsCartesianGrid as unknown as React.ComponentType<any>
@@ -99,7 +106,8 @@ const LoggingPage: React.FC = () => {
   })
 
   const cloudQuery = useCloudLoggingAnalytics(filters, !isCommunityMode && storageView === 'cloud')
-  const localQuery = useLocalLoggingAnalytics(filters, supportsLocal && (isCommunityMode || storageView === 'local'))
+  const localAnalyticsEnabled = supportsLocal && (storageView === 'local' || isCommunityMode)
+  const localQuery = useLocalLoggingAnalytics(filters, localAnalyticsEnabled)
 
   const activeQuery = storageView === 'local' || isCommunityMode ? localQuery : cloudQuery
   const data = activeQuery.data
@@ -231,6 +239,23 @@ const LoggingPage: React.FC = () => {
     { label: 'Failure Rate', value: formatPercent(failureRatePct) },
     { label: 'Completed Jobs', value: integerFormatter.format(completedJobs) },
     { label: 'Avg Duration (ms)', value: formatNumber(data?.tools.jobs.averageDurationMs) },
+  ]
+
+  const localToolBatching = supportsLocal ? localQuery.data?.tools.batching : undefined
+  const toolBatching = data?.tools.batching || localToolBatching
+  const batchingSourceLabel = data?.tools.batching ? 'Current view' : localToolBatching ? 'Local SQLite' : 'No batching data'
+  const batchingRows = ((toolBatching?.byBatchTool || []) as ToolBatchingRow[]).filter(
+    row => row.batches > 0 || row.expandedCalls > 0 || row.savedCalls > 0
+  )
+  const batchingCards = [
+    { label: 'Actual Batched Calls', value: integerFormatter.format(toolBatching?.batchedCalls || 0) },
+    { label: 'Unbatched Equivalent', value: integerFormatter.format(toolBatching?.unbatchedEquivalentCalls || 0) },
+    { label: 'Calls Saved', value: integerFormatter.format(toolBatching?.savedCalls || 0) },
+    { label: 'Saved Call %', value: formatPercent(toolBatching?.savedCallsPct) },
+    {
+      label: 'Cached Prefix Saved (est.)',
+      value: toolBatching ? `${formatNumber(toolBatching.cachePrefixSavingsFactorPct)}%` : '—',
+    },
   ]
 
   return (
@@ -560,6 +585,69 @@ const LoggingPage: React.FC = () => {
                     </div>
                   ))}
                 </div>
+
+                <section className='rounded-xl border border-violet-200/80 dark:border-violet-900/70 bg-violet-50/60 dark:bg-violet-950/20 p-4 mb-4'>
+                  <div className='flex flex-wrap items-start justify-between gap-3 mb-3'>
+                    <div>
+                      <h3 className='text-sm font-semibold text-neutral-900 dark:text-neutral-100'>Batching Savings</h3>
+                      <p className='text-xs text-neutral-500 dark:text-neutral-400'>
+                        Expands multi_call.calls and multi_edit.edits from local message tool_calls. Cached-prefix estimate assumes 10% per avoided separate tool call.
+                      </p>
+                    </div>
+                    <span className='text-[11px] rounded-full bg-violet-100 text-violet-700 dark:bg-violet-900/50 dark:text-violet-200 px-2 py-1'>
+                      {batchingSourceLabel}
+                    </span>
+                  </div>
+
+                  {toolBatching ? (
+                    <>
+                      <div className='grid grid-cols-2 xl:grid-cols-5 gap-3 mb-4'>
+                        {batchingCards.map(card => (
+                          <div key={card.label} className='rounded-lg border border-violet-200/80 dark:border-violet-900/60 bg-white/70 dark:bg-neutral-950/35 p-3'>
+                            <p className='text-[11px] text-neutral-500 dark:text-neutral-400'>{card.label}</p>
+                            <p className='text-lg font-semibold text-neutral-900 dark:text-neutral-100 mt-1'>{card.value}</p>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className='overflow-auto'>
+                        <table className='w-full text-xs'>
+                          <thead>
+                            <tr className='text-left text-neutral-500 dark:text-neutral-400'>
+                              <th className='py-1.5 pr-2'>Batch Tool</th>
+                              <th className='py-1.5 pr-2'>Batches</th>
+                              <th className='py-1.5 pr-2'>Would-be Calls</th>
+                              <th className='py-1.5 pr-2'>Saved Calls</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {batchingRows.map(row => (
+                              <tr key={row.toolName} className='border-t border-violet-100 dark:border-violet-900/50'>
+                                <td className='py-1.5 pr-2 font-medium text-neutral-900 dark:text-neutral-100'>{row.toolName}</td>
+                                <td className='py-1.5 pr-2'>{integerFormatter.format(row.batches)}</td>
+                                <td className='py-1.5 pr-2'>{integerFormatter.format(row.expandedCalls)}</td>
+                                <td className='py-1.5 pr-2'>{integerFormatter.format(row.savedCalls)}</td>
+                              </tr>
+                            ))}
+                            {batchingRows.length === 0 && (
+                              <tr>
+                                <td colSpan={4} className='py-4 text-center text-neutral-500 dark:text-neutral-400'>
+                                  No multi_call or multi_edit batches found for the selected filters.
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  ) : (
+                    <div className='py-6 text-center text-sm text-neutral-500 dark:text-neutral-400'>
+                      {supportsLocal && localQuery.isLoading
+                        ? 'Loading batching savings from local SQLite…'
+                        : 'Batching savings are available when the local analytics endpoint returns tools.batching.'}
+                    </div>
+                  )}
+                </section>
 
                 <div className='grid grid-cols-1 xl:grid-cols-2 gap-4'>
                   <ChartPanel title='Requested vs Tracked Jobs' subtitle='Highest-volume tools'>

@@ -2,6 +2,7 @@ import type { CodexParseResult, CodexResponseParseOptions } from './types.js'
 
 type State = {
   content: string
+  visibleContent: string
   reasoningParts: string[]
   toolCalls: NonNullable<CodexParseResult['toolCalls']>
   generatedImages: NonNullable<CodexParseResult['generatedImages']>
@@ -12,12 +13,14 @@ type State = {
   responseItemsAdded: any[]
   eventCounts: Map<string, number>
   itemPhases: Map<string, string>
+  itemText: Map<string, string>
   options: CodexResponseParseOptions
 }
 
 export function createCodexResponseParseState(options: CodexResponseParseOptions = {}): State {
   return {
     content: '',
+    visibleContent: '',
     reasoningParts: [],
     toolCalls: [],
     generatedImages: [],
@@ -28,12 +31,14 @@ export function createCodexResponseParseState(options: CodexResponseParseOptions
     responseItemsAdded: [],
     eventCounts: new Map(),
     itemPhases: new Map(),
+    itemText: new Map(),
     options,
   }
 }
 
 export function codexResponseParseResult(state: State): CodexParseResult {
-  const reasoningContent = state.reasoningParts.join('')
+  const reasoningContent = canonicalReasoningText(state.reasoningParts)
+  const outputItems = stripDuplicateReasoningFromOutputItems(state.outputItems, reasoningContent)
   return {
     content: selectFinalText(state),
     ...(reasoningContent ? { reasoningContent } : {}),
@@ -42,11 +47,11 @@ export function codexResponseParseResult(state: State): CodexParseResult {
     ...(state.generatedImages.length ? { generatedImages: state.generatedImages } : {}),
     ...(state.responseId ? { responseId: state.responseId } : {}),
     ...(state.usage !== undefined ? { usage: state.usage } : {}),
-    ...(state.outputItems.length ? { outputItems: state.outputItems } : {}),
+    ...(outputItems.length ? { outputItems } : {}),
     ...(state.responseItemsAdded.length ? { responseItemsAdded: state.responseItemsAdded } : {}),
     debug: {
       eventCounts: Object.fromEntries(state.eventCounts.entries()),
-      outputItemCount: state.outputItems.length,
+      outputItemCount: outputItems.length,
       addedItemCount: state.responseItemsAdded.length,
     },
   }
@@ -68,11 +73,25 @@ export function processCodexResponsePayload(payload: any, state: State, eventHin
   switch (eventType) {
     case 'response.output_text.delta': {
       const delta = String(payload.delta ?? '')
-      state.content += delta
+      const itemId = getPayloadItemId(payload)
+      appendOutputText(state, itemId, delta)
       state.options.onTextDelta?.(delta)
-      const itemId = typeof payload.item_id === 'string' ? payload.item_id : typeof payload.itemId === 'string' ? payload.itemId : ''
       const phase = itemId ? state.itemPhases.get(itemId) : ''
-      if (phase !== 'commentary') state.options.emit?.({ type: 'chunk', part: 'text', delta })
+      if (phase !== 'commentary') {
+        state.visibleContent += delta
+        state.options.emit?.({ type: 'chunk', part: 'text', delta })
+      }
+      break
+    }
+    case 'response.output_text.done': {
+      const text = String(payload.text ?? '')
+      const itemId = getPayloadItemId(payload)
+      const existing = itemId ? state.itemText.get(itemId) || '' : ''
+      if (text && (!existing || !existing.includes(text))) {
+        appendOutputText(state, itemId, text)
+        const phase = itemId ? state.itemPhases.get(itemId) : ''
+        if (phase !== 'commentary') state.visibleContent += text
+      }
       break
     }
     case 'response.reasoning_text.delta':
@@ -91,7 +110,7 @@ export function processCodexResponsePayload(payload: any, state: State, eventHin
       break
     }
     case 'response.output_item.done': {
-      const item = payload.item || payload.output_item || payload
+      const item = enrichMessageItemWithStreamedText(payload.item || payload.output_item || payload, state)
       rememberItemPhase(item, state)
       if (item) state.responseItemsAdded.push(item)
       if (isHostedToolOutputItem(item)) state.outputItems.push(item)
@@ -118,22 +137,45 @@ export function processCodexResponsePayload(payload: any, state: State, eventHin
   }
 }
 
+function getPayloadItemId(payload: any): string {
+  return typeof payload?.item_id === 'string'
+    ? payload.item_id
+    : typeof payload?.itemId === 'string'
+      ? payload.itemId
+      : ''
+}
+
+function appendOutputText(state: State, itemId: string, text: string): void {
+  if (!text) return
+  state.content += text
+  if (itemId) state.itemText.set(itemId, `${state.itemText.get(itemId) || ''}${text}`)
+}
+
 function rememberItemPhase(item: any, state: State): void {
   const id = typeof item?.id === 'string' ? item.id : ''
   const phase = typeof item?.phase === 'string' ? item.phase : ''
   if (id && phase) state.itemPhases.set(id, phase)
 }
 
+function enrichMessageItemWithStreamedText(item: any, state: State): any {
+  if (!item || typeof item !== 'object') return item
+  if (item.type !== 'message' && item.type !== 'output_message') return item
+  const id = typeof item.id === 'string' ? item.id : ''
+  const streamedText = id ? state.itemText.get(id) || '' : ''
+  if (!streamedText || outputTextFromItem(item).trim()) return item
+  return { ...item, content: [{ type: 'output_text', text: streamedText }] }
+}
+
 function captureCompletedResponseMetadata(response: any, state: State): void {
   if (!response || typeof response !== 'object') return
   if (typeof response.id === 'string') state.responseId = response.id
   if (response.usage !== undefined) state.usage = response.usage
-  if (Array.isArray(response.output)) state.outputItems = response.output
+  if (Array.isArray(response.output)) state.outputItems = response.output.map(item => enrichMessageItemWithStreamedText(item, state))
 }
 
 function collectResponseOutput(response: any, state: State): void {
   if (!Array.isArray(response?.output)) return
-  for (const item of response.output) collectOutputItem(item, state)
+  for (const item of response.output) collectOutputItem(enrichMessageItemWithStreamedText(item, state), state)
 }
 
 function collectOutputItem(item: any, state: State): void {
@@ -162,32 +204,121 @@ function collectOutputItem(item: any, state: State): void {
     const text = outputTextFromItem(item)
     if (text && !state.content) {
       state.content += text
-      state.options.emit?.({ type: 'chunk', part: 'text', delta: text })
+      if (item.phase !== 'commentary') {
+        state.visibleContent += text
+        state.options.emit?.({ type: 'chunk', part: 'text', delta: text })
+      }
     }
   }
 }
 
 function selectFinalText(state: State): string {
-  if (!Array.isArray(state.outputItems) || state.outputItems.length === 0) return state.content
-  const messages = state.outputItems
-    .filter(item => item?.type === 'message' || item?.type === 'output_message')
-    .map(item => ({ phase: item.phase, text: outputTextFromItem(item) }))
-    .filter(item => item.text.trim())
-  if (messages.length === 0) return state.content
+  const streamFallback = state.options.allowCommentaryFallbackText ? state.content.trim() : state.visibleContent.trim()
+  const messages = Array.isArray(state.outputItems)
+    ? state.outputItems
+        .filter(item => item?.type === 'message' || item?.type === 'output_message')
+        .map(item => {
+          const id = typeof item.id === 'string' ? item.id : ''
+          const phase = typeof item.phase === 'string' ? item.phase : id ? state.itemPhases.get(id) || '' : ''
+          const itemText = outputTextFromItem(item)
+          const streamedText = id ? state.itemText.get(id) || '' : ''
+          return { phase, text: itemText.trim() ? itemText : streamedText }
+        })
+        .filter(item => item.text.trim())
+    : []
+
   const finalAnswer = [...messages].reverse().find(item => item.phase === 'final_answer')
+  if (finalAnswer?.text.trim()) return finalAnswer.text
+
   const nonCommentary = [...messages].reverse().find(item => item.phase !== 'commentary')
-  return finalAnswer?.text || nonCommentary?.text || messages[messages.length - 1]?.text || state.content
+  if (nonCommentary?.text.trim()) return nonCommentary.text
+
+  if (state.options.allowCommentaryFallbackText) {
+    const commentary = [...messages].reverse().find(item => item.phase === 'commentary')
+    if (commentary?.text.trim()) return commentary.text
+  }
+
+  return streamFallback
 }
 
 function appendReasoning(state: State, value: unknown): void {
-  const text = textFromUnknown(value)
-  if (!text.trim()) return
-  const current = state.reasoningParts.join('')
-  if (!current || !normalizeReasoningText(current).includes(normalizeReasoningText(text))) state.reasoningParts.push(text)
+  for (const text of textPartsFromUnknown(value)) {
+    mergeReasoningSegment(state.reasoningParts, text)
+  }
+}
+
+function canonicalReasoningText(parts: string[]): string {
+  const merged: string[] = []
+  for (const part of parts) mergeReasoningSegment(merged, part)
+  return merged.join('\n\n').trim()
+}
+
+function mergeReasoningSegment(parts: string[], value: string): void {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (!text) return
+
+  const normalizedText = normalizeReasoningText(text)
+  if (!normalizedText) return
+
+  for (let index = parts.length - 1; index >= 0; index--) {
+    const existing = parts[index]
+    const normalizedExisting = normalizeReasoningText(existing)
+    if (!normalizedExisting) {
+      parts.splice(index, 1)
+      continue
+    }
+
+    if (normalizedExisting === normalizedText) return
+
+    if (normalizedExisting.includes(normalizedText)) {
+      return
+    }
+
+    if (normalizedText.includes(normalizedExisting)) {
+      parts.splice(index, 1)
+      continue
+    }
+
+    if (areSimilarReasoningSegments(normalizedExisting, normalizedText)) {
+      if (normalizedText.length > normalizedExisting.length) {
+        parts.splice(index, 1)
+        continue
+      }
+      return
+    }
+  }
+
+  parts.push(text)
 }
 
 function normalizeReasoningText(value: string): string {
-  return value.trim().replace(/\s+/g, ' ').toLowerCase()
+  return value
+    .trim()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+}
+
+function areSimilarReasoningSegments(normalizedA: string, normalizedB: string): boolean {
+  if (!normalizedA || !normalizedB) return false
+
+  const [headingA] = normalizedA.split(/\n|\. /)
+  const [headingB] = normalizedB.split(/\n|\. /)
+  if (headingA && headingB && headingA === headingB && Math.min(normalizedA.length, normalizedB.length) > 80) {
+    return true
+  }
+
+  const wordsA = new Set(normalizedA.match(/[a-z0-9']+/g) || [])
+  const wordsB = new Set(normalizedB.match(/[a-z0-9']+/g) || [])
+  if (wordsA.size < 8 || wordsB.size < 8) return false
+
+  let overlap = 0
+  for (const word of wordsA) {
+    if (wordsB.has(word)) overlap++
+  }
+
+  return overlap / Math.min(wordsA.size, wordsB.size) >= 0.65
 }
 
 function isHostedToolOutputItem(item: any): boolean {
@@ -195,7 +326,43 @@ function isHostedToolOutputItem(item: any): boolean {
 }
 
 function reasoningTextFromItem(item: any): string {
-  return [item.summary, item.content, item.text, item.delta].map(textFromUnknown).filter(Boolean).join('')
+  return canonicalReasoningText([item.summary, item.content, item.text, item.delta].flatMap(textPartsFromUnknown))
+}
+
+function stripDuplicateReasoningFromOutputItems(items: any[], canonicalReasoning: string): any[] {
+  if (!Array.isArray(items) || !canonicalReasoning.trim()) return Array.isArray(items) ? items : []
+
+  return items.map(item => {
+    if (!item || typeof item !== 'object' || item.type !== 'reasoning') return item
+    return stripDuplicateReasoningFromItem(item, canonicalReasoning)
+  })
+}
+
+function stripDuplicateReasoningFromItem(item: any, canonicalReasoning: string): any {
+  const stripped = { ...item }
+  const canonicalNormalized = normalizeReasoningText(canonicalReasoning)
+  const stripParts = (parts: any): any => {
+    if (!Array.isArray(parts)) return parts
+    return parts.map(part => {
+      if (!part || typeof part !== 'object' || typeof part.text !== 'string') return part
+      const partNormalized = normalizeReasoningText(part.text)
+      if (!partNormalized || canonicalNormalized === partNormalized || canonicalNormalized.includes(partNormalized)) {
+        const { text: _text, ...rest } = part
+        return rest
+      }
+      return part
+    })
+  }
+
+  stripped.summary = stripParts(stripped.summary)
+  stripped.content = stripParts(stripped.content)
+  if (typeof stripped.text === 'string' && canonicalNormalized.includes(normalizeReasoningText(stripped.text))) {
+    delete stripped.text
+  }
+  if (typeof stripped.delta === 'string' && canonicalNormalized.includes(normalizeReasoningText(stripped.delta))) {
+    delete stripped.delta
+  }
+  return stripped
 }
 
 function outputTextFromItem(item: any): string {

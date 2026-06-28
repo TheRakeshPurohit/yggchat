@@ -3,7 +3,7 @@ import { normalizeAuthorizationToken, syncOpenRouterTokenFromElectronSession } f
 import { LmStudioProvider } from '../providers/lmStudioProvider.js'
 import { HyperRouterBedrockProvider } from '../providers/hyperRouterBedrockProvider.js'
 import { HyperRouterZaiProvider } from '../providers/hyperRouterZaiProvider.js'
-import { OpenAiChatgptProvider } from '../providers/openaiChatgptProvider.js'
+import { OpenAiChatgptProvider, normalizeOpenAIChatGPTModel } from '../providers/openaiChatgptProvider.js'
 import type { ProviderGenerateOutput, ProviderToolDefinition } from '../providers/openRouterProvider.js'
 import type { ProviderTokenStore } from '../providers/tokenStore.js'
 import { normalizeProviderRoute, type ProviderRoute } from '../services/providerRouter.js'
@@ -28,6 +28,7 @@ type EphemeralGenerateInput = {
   temperature?: number
   responseFormat?: any
   think?: boolean
+  allowCommentaryFallbackText?: boolean
 }
 
 function normalizeTools(raw: any): InferenceToolDefinition[] | undefined {
@@ -98,7 +99,7 @@ function normalizeModelName(rawModelName: any, provider: ProviderRoute): string 
   const raw = typeof rawModelName === 'string' && rawModelName.trim() ? rawModelName.trim() : fallback
 
   if (provider === 'openaichatgpt') {
-    return raw.replace(/^(openai|openaichatgpt)\//i, '') || fallback
+    return normalizeOpenAIChatGPTModel(raw) || fallback
   }
 
   if (provider === 'lmstudio') {
@@ -135,6 +136,7 @@ function buildEphemeralGenerateInput(body: any): EphemeralGenerateInput {
     temperature: typeof body?.temperature === 'number' ? body.temperature : undefined,
     responseFormat: body?.response_format ?? body?.responseFormat,
     think: Boolean(body?.think),
+    allowCommentaryFallbackText: body?.allowCommentaryFallbackText !== false,
   }
 }
 
@@ -182,6 +184,16 @@ async function runLocalProviderGenerate(
     tools: parsed.tools,
     think: parsed.think,
     temperature: parsed.temperature,
+    railwayTurn:
+      providerName === 'openaichatgpt'
+        ? {
+            conversationId:
+              typeof body?.conversationId === 'string' && body.conversationId.trim()
+                ? body.conversationId.trim()
+                : `ephemeral:${Date.now()}`,
+            allowCommentaryFallbackText: parsed.allowCommentaryFallbackText,
+          }
+        : undefined,
   })
 
   return {

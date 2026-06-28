@@ -594,7 +594,8 @@ export async function execute(
 
     const explicitUserId = safeText(args?.userId).trim()
     const projectId = safeText(args?.projectId).trim() || undefined
-    const inferredUserId = ''
+    const inferredConversationId = safeText(args?.conversationId || options.currentConversationId).trim()
+    const inferredUserId = inferredConversationId ? safeText(options.getConversationById(inferredConversationId)?.user_id).trim() : ''
     const userId = explicitUserId || inferredUserId
 
     if (!userId) {

@@ -49445,6 +49445,8 @@ var mobileApi = {
         parentId: params.parentId ?? null,
         operationMode: params.operationMode || "execute",
         includeOperationModePrompt: params.includeOperationModePrompt ?? true,
+        think: params.think,
+        reasoningConfig: params.reasoningConfig,
         rootPath: params.rootPath ?? params.cwd ?? null,
         cwd: params.cwd ?? params.rootPath ?? null,
         tools: Array.isArray(params.tools) && params.tools.length > 0 ? params.tools : void 0
@@ -65242,6 +65244,13 @@ var PROVIDER_LABELS = {
   lmstudio: "LM Studio",
   zai: "Z.AI / GLM"
 };
+var REASONING_EFFORT_LABELS = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "X-High"
+};
+var REASONING_EFFORT_OPTIONS = ["low", "medium", "high", "xhigh"];
 var MobileHeader = ({
   providerName,
   providerOptions,
@@ -65254,8 +65263,12 @@ var MobileHeader = ({
   onAgentTextFontSizeChange,
   operationMode,
   includeOperationModePrompts,
+  thinkingEnabled,
+  reasoningEffort,
   onOperationModeToggle,
   onIncludeOperationModePromptsChange,
+  onThinkingEnabledChange,
+  onReasoningEffortChange,
   users,
   selectedUserId,
   onProviderChange,
@@ -65397,7 +65410,23 @@ var MobileHeader = ({
         onChange: (event) => onIncludeOperationModePromptsChange(event.target.checked),
         disabled: selectorsDisabled
       }
-    ), /* @__PURE__ */ import_react34.default.createElement("span", null, includeOperationModePrompts ? "Enabled" : "Disabled"))), /* @__PURE__ */ import_react34.default.createElement("section", { className: "mobile-settings-font-zoom", "aria-label": "Assistant text zoom" }, /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-settings-font-zoom-header" }, /* @__PURE__ */ import_react34.default.createElement("span", null, "Agent text zoom"), /* @__PURE__ */ import_react34.default.createElement("strong", null, agentTextFontSizePx, "px")), /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-settings-font-zoom-row" }, /* @__PURE__ */ import_react34.default.createElement("span", { "aria-hidden": "true" }, "A"), /* @__PURE__ */ import_react34.default.createElement(
+    ), /* @__PURE__ */ import_react34.default.createElement("span", null, includeOperationModePrompts ? "Enabled" : "Disabled"))), /* @__PURE__ */ import_react34.default.createElement("section", { className: "mobile-settings-thinking-options", "aria-label": "Thinking options" }, /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-settings-thinking-options-header" }, /* @__PURE__ */ import_react34.default.createElement("div", null, /* @__PURE__ */ import_react34.default.createElement("strong", null, "Thinking options"), /* @__PURE__ */ import_react34.default.createElement("p", null, "Send reasoning preferences to providers/models that support thinking.")), /* @__PURE__ */ import_react34.default.createElement("label", { className: "mobile-settings-toggle-row" }, /* @__PURE__ */ import_react34.default.createElement(
+      "input",
+      {
+        type: "checkbox",
+        checked: thinkingEnabled,
+        onChange: (event) => onThinkingEnabledChange(event.target.checked),
+        disabled: selectorsDisabled
+      }
+    ), /* @__PURE__ */ import_react34.default.createElement("span", null, thinkingEnabled ? "Enabled" : "Disabled"))), /* @__PURE__ */ import_react34.default.createElement("label", { className: "mobile-settings-field mobile-settings-thinking-effort-field" }, /* @__PURE__ */ import_react34.default.createElement("span", null, "Reasoning effort"), /* @__PURE__ */ import_react34.default.createElement(
+      Select,
+      {
+        value: reasoningEffort,
+        onChange: (event) => onReasoningEffortChange(event.target.value),
+        disabled: selectorsDisabled || !thinkingEnabled
+      },
+      REASONING_EFFORT_OPTIONS.map((option) => /* @__PURE__ */ import_react34.default.createElement("option", { key: option, value: option }, option === reasoningEffort ? `${REASONING_EFFORT_LABELS[option]} (Selected)` : REASONING_EFFORT_LABELS[option]))
+    ))), /* @__PURE__ */ import_react34.default.createElement("section", { className: "mobile-settings-font-zoom", "aria-label": "Assistant text zoom" }, /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-settings-font-zoom-header" }, /* @__PURE__ */ import_react34.default.createElement("span", null, "Agent text zoom"), /* @__PURE__ */ import_react34.default.createElement("strong", null, agentTextFontSizePx, "px")), /* @__PURE__ */ import_react34.default.createElement("div", { className: "mobile-settings-font-zoom-row" }, /* @__PURE__ */ import_react34.default.createElement("span", { "aria-hidden": "true" }, "A"), /* @__PURE__ */ import_react34.default.createElement(
       Input,
       {
         type: "range",
@@ -65644,11 +65673,16 @@ var MOBILE_LAST_PROVIDER_STORAGE_KEY = "mobile:lastProvider";
 var MOBILE_AGENT_TEXT_FONT_SIZE_STORAGE_KEY = "mobile:agentTextFontSizePx";
 var MOBILE_OPERATION_MODE_STORAGE_KEY = "mobile:operationMode";
 var MOBILE_INCLUDE_OPERATION_MODE_PROMPTS_STORAGE_KEY = "mobile:includeOperationModePrompts";
+var MOBILE_THINKING_ENABLED_STORAGE_KEY = "mobile:thinkingEnabled";
+var MOBILE_REASONING_EFFORT_STORAGE_KEY = "mobile:reasoningEffort";
 var mobileLastConversationStorageKey = (userId) => `mobile:lastConversationId:${userId}`;
 var DEFAULT_PROVIDER = "openaichatgpt";
 var DEFAULT_AGENT_TEXT_FONT_SIZE_PX = 14;
 var MIN_AGENT_TEXT_FONT_SIZE_PX = 12;
 var MAX_AGENT_TEXT_FONT_SIZE_PX = 24;
+var DEFAULT_THINKING_ENABLED = true;
+var DEFAULT_REASONING_EFFORT = "high";
+var MOBILE_REASONING_EFFORT_OPTIONS = ["low", "medium", "high", "xhigh"];
 var readStorageValue = (key) => {
   if (typeof window === "undefined") return null;
   try {
@@ -65680,6 +65714,9 @@ var normalizeProviderName = (value) => {
 };
 var normalizeOperationMode = (value) => {
   return value === "execute" ? "execute" : "plan";
+};
+var normalizeReasoningEffort = (value) => {
+  return MOBILE_REASONING_EFFORT_OPTIONS.includes(value) ? value : DEFAULT_REASONING_EFFORT;
 };
 var readBooleanStorageValue = (key, fallback) => {
   const value = readStorageValue(key);
@@ -65861,6 +65898,12 @@ var App = () => {
   );
   const [includeOperationModePrompts, setIncludeOperationModePrompts] = (0, import_react36.useState)(
     () => readBooleanStorageValue(MOBILE_INCLUDE_OPERATION_MODE_PROMPTS_STORAGE_KEY, true)
+  );
+  const [thinkingEnabled, setThinkingEnabled] = (0, import_react36.useState)(
+    () => readBooleanStorageValue(MOBILE_THINKING_ENABLED_STORAGE_KEY, DEFAULT_THINKING_ENABLED)
+  );
+  const [reasoningEffort, setReasoningEffort] = (0, import_react36.useState)(
+    () => normalizeReasoningEffort(readStorageValue(MOBILE_REASONING_EFFORT_STORAGE_KEY))
   );
   const [users, setUsers] = (0, import_react36.useState)([]);
   const [selectedUserId, setSelectedUserId] = (0, import_react36.useState)(() => readStorageValue(MOBILE_LAST_USER_STORAGE_KEY));
@@ -66403,6 +66446,12 @@ ${nextPath}`;
     writeStorageValue(MOBILE_INCLUDE_OPERATION_MODE_PROMPTS_STORAGE_KEY, String(includeOperationModePrompts));
   }, [includeOperationModePrompts]);
   (0, import_react36.useEffect)(() => {
+    writeStorageValue(MOBILE_THINKING_ENABLED_STORAGE_KEY, String(thinkingEnabled));
+  }, [thinkingEnabled]);
+  (0, import_react36.useEffect)(() => {
+    writeStorageValue(MOBILE_REASONING_EFFORT_STORAGE_KEY, reasoningEffort);
+  }, [reasoningEffort]);
+  (0, import_react36.useEffect)(() => {
     const models = providerModels.find((provider) => provider.name === selectedProvider)?.models || [];
     if (models.length === 0) return;
     if (models.includes(modelName)) return;
@@ -66693,6 +66742,8 @@ ${nextPath}`;
         operation: streamOperation,
         operationMode,
         includeOperationModePrompt: includeOperationModePrompts,
+        think: thinkingEnabled,
+        reasoningConfig: { effort: reasoningEffort },
         messageId: branchSourceMessage?.id,
         cwd: activeProjectCwd,
         rootPath: activeProjectCwd,
@@ -66729,8 +66780,12 @@ ${nextPath}`;
       onAgentTextFontSizeChange: (value) => setAgentTextFontSizePx(clampAgentTextFontSize(value)),
       operationMode,
       includeOperationModePrompts,
+      thinkingEnabled,
+      reasoningEffort,
       onOperationModeToggle: () => setOperationMode((previous3) => previous3 === "plan" ? "execute" : "plan"),
       onIncludeOperationModePromptsChange: setIncludeOperationModePrompts,
+      onThinkingEnabledChange: setThinkingEnabled,
+      onReasoningEffortChange: setReasoningEffort,
       users,
       selectedUserId,
       onProviderChange: setSelectedProvider,

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { OpenAiChatgptProvider } from '../openaiChatgptProvider.js'
+import { OpenAiChatgptProvider, normalizeOpenAIChatGPTModel } from '../openaiChatgptProvider.js'
 
 function createSseStream(events: any[]) {
   const encoder = new TextEncoder()
@@ -15,6 +15,102 @@ function createSseStream(events: any[]) {
 }
 
 describe('OpenAiChatgptProvider', () => {
+  it('normalizes ChatGPT display labels to backend model IDs', () => {
+    expect(normalizeOpenAIChatGPTModel('GPT-5.4 Mini')).toBe('gpt-5.4-mini')
+    expect(normalizeOpenAIChatGPTModel('openaichatgpt/GPT-5.4 Mini')).toBe('gpt-5.4-mini')
+    expect(normalizeOpenAIChatGPTModel('GPT-5.4 Pro')).toBe('gpt-5.4-pro')
+    expect(normalizeOpenAIChatGPTModel('GPT-5.3 Codex')).toBe('gpt-5.3-codex')
+  })
+
+  it('does not use commentary-only text as provider content by default', async () => {
+    process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1jb21tZW50YXJ5In19.sig'
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/event-stream' }),
+      body: createSseStream([
+        {
+          type: 'response.output_item.added',
+          item: { id: 'msg-commentary', type: 'message', role: 'assistant', phase: 'commentary' },
+        },
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg-commentary',
+          delta: 'COMMENTARY_ONLY_TEXT',
+        },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp-commentary-default',
+            output: [
+              {
+                id: 'msg-commentary',
+                type: 'message',
+                role: 'assistant',
+                phase: 'commentary',
+                content: [],
+              },
+            ],
+          },
+        },
+      ]),
+      text: async () => '',
+    } as any)
+
+    const provider = new OpenAiChatgptProvider()
+    const result = await provider.generate({ modelName: 'gpt-5.4-mini', history: [], userContent: 'hello' })
+
+    expect(result.content).toBe('')
+  })
+
+  it('uses commentary-only text as provider content when fallback is opted in', async () => {
+    process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1jb21tZW50YXJ5In19.sig'
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/event-stream' }),
+      body: createSseStream([
+        {
+          type: 'response.output_item.added',
+          item: { id: 'msg-commentary', type: 'message', role: 'assistant', phase: 'commentary' },
+        },
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg-commentary',
+          delta: 'VISIBLE_TEXT_OK',
+        },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp-commentary-opt-in',
+            output: [
+              {
+                id: 'msg-commentary',
+                type: 'message',
+                role: 'assistant',
+                phase: 'commentary',
+                content: [],
+              },
+            ],
+          },
+        },
+      ]),
+      text: async () => '',
+    } as any)
+
+    const provider = new OpenAiChatgptProvider()
+    const result = await provider.generate({
+      modelName: 'gpt-5.4-mini',
+      history: [],
+      userContent: 'hello',
+      railwayTurn: { conversationId: 'ephemeral-test', allowCommentaryFallbackText: true },
+    })
+
+    expect(result.content).toBe('VISIBLE_TEXT_OK')
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
     delete process.env.OPENAI_CHATGPT_ACCESS_TOKEN
@@ -205,6 +301,79 @@ describe('OpenAiChatgptProvider', () => {
     )
   })
 
+  it('dedupes reasoning persisted from deltas and completed output items', async () => {
+    process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1yZWFzb24ifX0.sig'
+
+    const shortReasoning = [
+      'Planning file inspection',
+      '',
+      'I’ve decided need to focus mode and inspecting files. It seems like important step wonder what’ll discover during this how will help with my tasks want ensure approach carefully thoroughly, checking everything that\'s relevant I\'ll make keep the process organized not overlook any details could be significant Let’s get started!',
+    ].join('\n')
+    const fullReasoning = [
+      'Planning file inspection',
+      '',
+      'I’ve decided I need to focus on planning mode and inspecting files. It seems like an important step. I wonder what I’ll discover during this inspection and how it will help with my tasks. I want to ensure I approach this carefully and thoroughly, checking everything that\'s relevant. I\'ll make sure to keep the process organized and not overlook any details that could be significant. Let’s get started!',
+    ].join('\n')
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/event-stream' }),
+      body: createSseStream([
+        {
+          type: 'response.reasoning_summary_text.delta',
+          item_id: 'rs-1',
+          summary_index: 0,
+          delta: shortReasoning,
+        },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp-reasoning',
+            output: [
+              {
+                id: 'rs-1',
+                type: 'reasoning',
+                output_index: 0,
+                encrypted_content: 'keep-encrypted-reasoning-metadata',
+                summary: [{ type: 'summary_text', text: fullReasoning }],
+              },
+              {
+                id: 'msg-final',
+                type: 'message',
+                role: 'assistant',
+                phase: 'final_answer',
+                output_index: 1,
+                content: [{ type: 'output_text', text: 'Done.' }],
+              },
+            ],
+          },
+        },
+      ]),
+      text: async () => '',
+    } as any)
+
+    const provider = new OpenAiChatgptProvider()
+    const result = await provider.generate({
+      modelName: 'gpt-5.5',
+      history: [],
+      userContent: 'Inspect files',
+    })
+
+    expect(result.reasoning).toBe(fullReasoning)
+    expect(result.reasoning).not.toContain(`${shortReasoning}\n\n${fullReasoning}`)
+
+    const thinkingBlocks = (result.contentBlocks || []).filter((block: any) => block?.type === 'thinking')
+    expect(thinkingBlocks).toHaveLength(1)
+    expect(thinkingBlocks[0]).toEqual({ type: 'thinking', content: fullReasoning })
+
+    const responsesBlock = (result.contentBlocks || []).find((block: any) => block?.type === 'responses_output_items') as any
+    const reasoningItem = responsesBlock?.items?.find((item: any) => item?.type === 'reasoning')
+    expect(reasoningItem).toEqual(expect.objectContaining({ encrypted_content: 'keep-encrypted-reasoning-metadata' }))
+    expect(reasoningItem?.summary?.[0]?.text).toBeUndefined()
+    expect(JSON.stringify(result.raw?.responses_output_items)).not.toContain(fullReasoning)
+  })
+
   it('uses full replay instead of previous_response_id for Codex tool continuations', async () => {
     process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0zIn19.sig'
 
@@ -364,6 +533,52 @@ describe('OpenAiChatgptProvider', () => {
         userContent: 'hello',
       })
     ).rejects.toThrow('Provider stopped early')
+  })
+
+  it('retries ChatGPT HTTP 429 setup failures three times before surfacing the final usage-limit error', async () => {
+    vi.useFakeTimers()
+    process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC00In19.sig'
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorBody = '{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_at":1782168563}}'
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => ({
+      ok: false,
+      status: 429,
+      statusText: 'Too Many Requests',
+      headers: new Headers({ 'content-type': 'application/json' }),
+      body: new ReadableStream<Uint8Array>({ start(controller) { controller.close() } }),
+      text: async () => errorBody,
+    }) as any)
+
+    const provider = new OpenAiChatgptProvider()
+    const promise = expect(
+      provider.generate({
+        modelName: 'gpt-5.4-mini',
+        history: [],
+        userContent: 'hello',
+      })
+    ).rejects.toThrow('usage_limit_reached')
+
+    await vi.runAllTimersAsync()
+    await promise
+
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[headless-stream-resilience] pre-first-byte retry event',
+      expect.objectContaining({
+        endpoint: '/backend-api/codex/responses',
+        maxRetries: 3,
+        failureClass: 'retryable_status',
+        status: 429,
+      })
+    )
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[Codex HTTP] non-OK response',
+      expect.objectContaining({
+        status: 429,
+        bodyPreview: expect.stringContaining('usage_limit_reached'),
+      })
+    )
   })
 
   it('retries ChatGPT HTTP stream setup three times before succeeding', async () => {

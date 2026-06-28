@@ -1,8 +1,8 @@
 .chat-input-border-anim {
   position: relative;
   isolation: isolate;
-  --chat-input-border-light: #10b981;
-  --chat-input-border-dark: #34d399;
+  --chat-input-border-light: #3b82f6;
+  --chat-input-border-dark: #f97316;
   --chat-input-border-color: var(--chat-input-border-light);
 }
 

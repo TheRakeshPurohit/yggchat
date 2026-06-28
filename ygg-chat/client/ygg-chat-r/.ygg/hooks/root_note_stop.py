@@ -12,7 +12,7 @@ Keep it brief.
 Preserve still-relevant context, remove stale or redundant points, and prefer 3-7 bullets.
 
 Required output format for the note text:
-[note title - short description]
+## note title - short description
 - bullet 1
 - bullet 2
 - bullet 3
@@ -86,7 +86,7 @@ def _truncate_inline(text, limit=180):
 
 def _fallback_note(latest_user_text, latest_assistant_text):
     seed = _truncate_inline(latest_user_text) or _truncate_inline(latest_assistant_text) or 'Branch updated.'
-    return '[branch note - latest turn]\n- ' + seed
+    return '## branch note - latest turn\n- ' + seed
 
 
 def _emit_debug(message):

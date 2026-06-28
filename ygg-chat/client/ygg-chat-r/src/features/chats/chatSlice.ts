@@ -8,6 +8,7 @@ import {
   Attachment,
   ChatState,
   ImageDraft,
+  ImageDraftTarget,
   Message,
   MessageInput,
   OperationMode,
@@ -16,6 +17,7 @@ import {
   StreamCompletedPayload,
   StreamingAbortedPayload,
   StreamState,
+  StreamUndoSummary,
   ToolCallPermissionRequest,
   UserSystemPrompt,
 } from './chatTypes'
@@ -35,6 +37,43 @@ const cloneTools = (tools: ToolDefinition[]): ToolDefinition[] =>
 
 const isElectronEnvironment =
   (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__) || import.meta.env.VITE_ENVIRONMENT === 'electron'
+
+type ImageDraftsAppendedPayload = ImageDraft[] | { drafts: ImageDraft[]; target?: ImageDraftTarget | null }
+type ImageDraftRemovedPayload = number | { index: number; target?: ImageDraftTarget | null }
+
+const DEFAULT_IMAGE_DRAFT_TARGET: ImageDraftTarget = { kind: 'composer' }
+
+const imageDraftTargetsEqual = (
+  a: ImageDraftTarget | null | undefined,
+  b: ImageDraftTarget | null | undefined
+): boolean => {
+  if (!a || !b) return !a && !b
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'composer') return true
+  return String(a.messageId) === String((b as { kind: 'branch'; messageId: MessageId }).messageId)
+}
+
+const normalizeImageDraftAppendPayload = (
+  payload: ImageDraftsAppendedPayload,
+  fallbackTarget: ImageDraftTarget | null
+): { drafts: ImageDraft[]; target: ImageDraftTarget | null } => {
+  if (Array.isArray(payload)) {
+    return { drafts: payload, target: fallbackTarget ?? DEFAULT_IMAGE_DRAFT_TARGET }
+  }
+  return { drafts: payload.drafts, target: payload.target ?? DEFAULT_IMAGE_DRAFT_TARGET }
+}
+
+const mergeArtifacts = (existing: string[] | undefined, incoming: string[]): string[] => {
+  const merged = Array.isArray(existing) ? [...existing] : []
+  const seen = new Set(merged)
+  for (const artifact of incoming) {
+    if (!seen.has(artifact)) {
+      merged.push(artifact)
+      seen.add(artifact)
+    }
+  }
+  return merged
+}
 
 const webHiddenProviders = new Set(['OpenAI (ChatGPT)', 'LM Studio', 'Z.AI / GLM', 'Amazon Bedrock'])
 const communityAllowedProviders = new Set(['LM Studio', 'OpenAI (ChatGPT)', 'OpenRouter', 'Z.AI / GLM'])
@@ -135,6 +174,7 @@ const makeInitialState = (): ChatState => {
       draftMessage: null,
       multiReplyCount: 1,
       imageDrafts: [],
+      imageDraftTarget: null,
       editingBranch: false,
       optimisticMessage: null,
       optimisticBranchMessage: null,
@@ -145,6 +185,14 @@ const makeInitialState = (): ChatState => {
       byId: {},
       primaryStreamId: null,
       lastCompletedId: null,
+    },
+    streamUndo: {
+      byStreamId: {},
+      streamIdsByParentMessageId: {},
+      streamIdsByAssistantMessageId: {},
+      loadingByConversationId: {},
+      restoringByStreamId: {},
+      errorByStreamId: {},
     },
     ui: {
       modelSelectorOpen: false,
@@ -229,25 +277,50 @@ export const chatSlice = createSlice({
     inputCleared: state => {
       state.composition.input = initialState.composition.input
       state.composition.validationError = null
-      state.composition.imageDrafts = []
+      if (!state.composition.imageDraftTarget || state.composition.imageDraftTarget.kind === 'composer') {
+        state.composition.imageDrafts = []
+        state.composition.imageDraftTarget = null
+      }
     },
 
-    imageDraftsAppended: (state, action: PayloadAction<ImageDraft[]>) => {
+    imageDraftTargetSet: (state, action: PayloadAction<ImageDraftTarget | null>) => {
+      if (!imageDraftTargetsEqual(state.composition.imageDraftTarget, action.payload)) {
+        state.composition.imageDrafts = []
+      }
+      state.composition.imageDraftTarget = action.payload
+    },
+
+    imageDraftsAppended: (state, action: PayloadAction<ImageDraftsAppendedPayload>) => {
+      const { drafts, target } = normalizeImageDraftAppendPayload(action.payload, state.composition.imageDraftTarget)
+      if (!imageDraftTargetsEqual(state.composition.imageDraftTarget, target)) {
+        state.composition.imageDrafts = []
+        state.composition.imageDraftTarget = target
+      }
+
       const existing = new Set(state.composition.imageDrafts.map(d => d.dataUrl))
-      for (const draft of action.payload) {
+      for (const draft of drafts) {
         if (!existing.has(draft.dataUrl)) {
           state.composition.imageDrafts.push(draft)
           existing.add(draft.dataUrl)
         }
       }
     },
-    imageDraftsCleared: state => {
+    imageDraftsCleared: (state, action: PayloadAction<{ target?: ImageDraftTarget | null } | undefined>) => {
+      const target = action.payload?.target
+      if (target && !imageDraftTargetsEqual(state.composition.imageDraftTarget, target)) return
       state.composition.imageDrafts = []
+      state.composition.imageDraftTarget = null
     },
-    imageDraftRemoved: (state, action: PayloadAction<number>) => {
-      const index = action.payload
+    imageDraftRemoved: (state, action: PayloadAction<ImageDraftRemovedPayload>) => {
+      const payload = action.payload
+      const index = typeof payload === 'number' ? payload : payload.index
+      const target = typeof payload === 'number' ? undefined : payload.target
+      if (target && !imageDraftTargetsEqual(state.composition.imageDraftTarget, target)) return
       if (index >= 0 && index < state.composition.imageDrafts.length) {
         state.composition.imageDrafts.splice(index, 1)
+      }
+      if (state.composition.imageDrafts.length === 0) {
+        state.composition.imageDraftTarget = null
       }
     },
 
@@ -297,8 +370,16 @@ export const chatSlice = createSlice({
         state.composition.input.content = ''
       }
 
-      if (streamType === 'primary' || streamType === 'branch') {
-        state.composition.imageDrafts = []
+      if (streamType === 'primary') {
+        if (!state.composition.imageDraftTarget || state.composition.imageDraftTarget.kind === 'composer') {
+          state.composition.imageDrafts = []
+          state.composition.imageDraftTarget = null
+        }
+      } else if (streamType === 'branch') {
+        if (!state.composition.imageDraftTarget || state.composition.imageDraftTarget.kind === 'branch') {
+          state.composition.imageDrafts = []
+          state.composition.imageDraftTarget = null
+        }
       }
     },
 
@@ -321,6 +402,7 @@ export const chatSlice = createSlice({
         if (stream.streamType === 'primary') {
           state.composition.sending = false
           state.composition.imageDrafts = []
+          state.composition.imageDraftTarget = null
         }
 
         // Clear primary if this was the primary stream
@@ -331,6 +413,7 @@ export const chatSlice = createSlice({
         // Fallback for backward compatibility when no stream exists
         state.composition.sending = false
         state.composition.imageDrafts = []
+        state.composition.imageDraftTarget = null
       }
     },
 
@@ -407,6 +490,7 @@ export const chatSlice = createSlice({
         stream.events = []
         stream.error = null
         stream.messageId = null
+        stream.currentBranchAnchorMessageId = stream.triggerUserMessageId ?? stream.lineage.originMessageId ?? stream.lineage.rootMessageId ?? null
         stream.liveMessageId = null
         stream.lastCompletedMessageId = null
         stream.finalMessageId = null
@@ -420,6 +504,9 @@ export const chatSlice = createSlice({
         stream.error = null
         stream.liveMessageId = chunk.messageId || null
         stream.streamingMessageId = chunk.messageId || null
+        if (chunk.messageId) {
+          stream.currentBranchAnchorMessageId = chunk.messageId
+        }
         // Keep messageId/lastCompletedMessageId as branch anchors. Chat.tsx uses
         // liveMessageId/streamingMessageId for duplicate suppression instead.
         // Clear previous turn's transient render buffers for the new live answer.
@@ -533,6 +620,7 @@ export const chatSlice = createSlice({
         stream.lastCompletedMessageId = completedMessageId
         if (completedMessageId) {
           stream.branchAnchorMessageId = completedMessageId
+          stream.currentBranchAnchorMessageId = completedMessageId
         }
         stream.liveMessageId = null
         stream.streamingMessageId = null
@@ -578,6 +666,7 @@ export const chatSlice = createSlice({
         stream.messageId = messageId
         stream.lastCompletedMessageId = messageId
         stream.finalMessageId = messageId
+        stream.currentBranchAnchorMessageId = messageId
         stream.liveMessageId = null
         stream.streamingMessageId = null
 
@@ -638,13 +727,101 @@ export const chatSlice = createSlice({
 
     // Update stream lineage after getting target parent ID
     // This is called when we know the actual parent of the streaming message
-    streamLineageUpdated: (state, action: PayloadAction<{ streamId: string; targetParentId: MessageId }>) => {
-      const { streamId, targetParentId } = action.payload
+    streamLineageUpdated: (
+      state,
+      action: PayloadAction<{
+        streamId: string
+        targetParentId?: MessageId | null
+        originMessageId?: MessageId | null
+        rootMessageId?: MessageId | null
+        branchAnchorMessageId?: MessageId | null
+        triggerUserMessageId?: MessageId | null
+        currentBranchAnchorMessageId?: MessageId | null
+      }>
+    ) => {
+      const {
+        streamId,
+        targetParentId,
+        originMessageId,
+        rootMessageId,
+        branchAnchorMessageId,
+        triggerUserMessageId,
+        currentBranchAnchorMessageId,
+      } = action.payload
       const stream = state.streaming.byId[streamId]
       if (stream) {
-        stream.lineage.rootMessageId = targetParentId
-        stream.branchAnchorMessageId = targetParentId
+        if (originMessageId !== undefined) {
+          stream.lineage.originMessageId = originMessageId ?? undefined
+        }
+        const nextTriggerUserMessageId = triggerUserMessageId !== undefined ? triggerUserMessageId : undefined
+        if (nextTriggerUserMessageId !== undefined) {
+          stream.triggerUserMessageId = nextTriggerUserMessageId ?? null
+        } else if (!stream.triggerUserMessageId && originMessageId !== undefined) {
+          stream.triggerUserMessageId = originMessageId ?? null
+        }
+        const nextRootMessageId = rootMessageId !== undefined ? rootMessageId : targetParentId
+        if (nextRootMessageId !== undefined) {
+          stream.lineage.rootMessageId = nextRootMessageId ?? undefined
+        }
+        const nextBranchAnchorMessageId = branchAnchorMessageId !== undefined ? branchAnchorMessageId : targetParentId
+        if (nextBranchAnchorMessageId !== undefined) {
+          stream.branchAnchorMessageId = nextBranchAnchorMessageId ?? null
+        }
+        const nextCurrentBranchAnchorMessageId =
+          currentBranchAnchorMessageId !== undefined ? currentBranchAnchorMessageId : nextBranchAnchorMessageId
+        if (nextCurrentBranchAnchorMessageId !== undefined) {
+          stream.currentBranchAnchorMessageId = nextCurrentBranchAnchorMessageId ?? null
+        }
       }
+    },
+
+    streamUndoConversationLoadingSet: (
+      state,
+      action: PayloadAction<{ conversationId: string; loading: boolean }>
+    ) => {
+      state.streamUndo.loadingByConversationId[action.payload.conversationId] = action.payload.loading
+    },
+
+    streamUndoSummariesReceived: (
+      state,
+      action: PayloadAction<{ conversationId?: string | null; summaries: StreamUndoSummary[] }>
+    ) => {
+      const { conversationId, summaries } = action.payload
+      if (conversationId) {
+        for (const [streamId, summary] of Object.entries(state.streamUndo.byStreamId)) {
+          if (String(summary.conversationId) === String(conversationId)) {
+            delete state.streamUndo.byStreamId[streamId]
+          }
+        }
+      }
+      for (const summary of summaries) {
+        state.streamUndo.byStreamId[summary.streamId] = summary
+      }
+      const index: Record<string, string[]> = {}
+      const assistantIndex: Record<string, string[]> = {}
+      for (const summary of Object.values(state.streamUndo.byStreamId)) {
+        if (summary.status !== 'available' && summary.status !== 'restoring') continue
+        if (summary.parentMessageId) {
+          const key = String(summary.parentMessageId)
+          index[key] = index[key] ?? []
+          if (!index[key].includes(summary.streamId)) index[key].push(summary.streamId)
+        }
+        if (summary.assistantMessageId) {
+          const key = String(summary.assistantMessageId)
+          assistantIndex[key] = assistantIndex[key] ?? []
+          if (!assistantIndex[key].includes(summary.streamId)) assistantIndex[key].push(summary.streamId)
+        }
+      }
+      state.streamUndo.streamIdsByParentMessageId = index
+      state.streamUndo.streamIdsByAssistantMessageId = assistantIndex
+    },
+
+    streamUndoRestoringSet: (state, action: PayloadAction<{ streamId: string; restoring: boolean }>) => {
+      state.streamUndo.restoringByStreamId[action.payload.streamId] = action.payload.restoring
+    },
+
+    streamUndoErrorSet: (state, action: PayloadAction<{ streamId: string; error: string | null }>) => {
+      state.streamUndo.errorByStreamId[action.payload.streamId] = action.payload.error
     },
 
     // UI - minimal
@@ -941,7 +1118,7 @@ export const chatSlice = createSlice({
       const { messageId, artifacts } = action.payload
       const msg = state.conversation.messages.find(m => m.id === messageId)
       if (msg) {
-        msg.artifacts = artifacts
+        msg.artifacts = mergeArtifacts(msg.artifacts, artifacts)
       }
     },
     // Append artifacts to a message (e.g., when user adds image drafts)
@@ -949,12 +1126,7 @@ export const chatSlice = createSlice({
       const { messageId, artifacts } = action.payload
       const msg = state.conversation.messages.find(m => m.id === messageId)
       if (msg) {
-        const existing = Array.isArray(msg.artifacts) ? [...msg.artifacts] : []
-        const existingSet = new Set(existing)
-        const newArtifacts = artifacts.filter(artifact => !existingSet.has(artifact))
-        if (newArtifacts.length > 0) {
-          msg.artifacts = [...existing, ...newArtifacts]
-        }
+        msg.artifacts = mergeArtifacts(msg.artifacts, artifacts)
       }
     },
 

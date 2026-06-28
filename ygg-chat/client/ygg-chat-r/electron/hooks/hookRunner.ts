@@ -6,6 +6,7 @@ import { isWindows, resolveToWindowsPath } from '../utils/wslBridge.js'
 import { ensureManagedHooksInitialized } from './hookStorage.js'
 import type {
   HookEventName,
+  HookExecutionMode,
   HookRunRequest,
   HookRunResult,
   NormalizedHookEntry,
@@ -105,6 +106,23 @@ function pushUnique(values: string[], value: string): void {
   }
 }
 
+function parseExecutionMode(value: unknown): HookExecutionMode | undefined {
+  const mode = toTrimmedString(value)?.toLowerCase()
+  return mode === 'sync' || mode === 'async' ? mode : undefined
+}
+
+function getDefaultExecutionMode(event: HookEventName): HookExecutionMode {
+  // Hooks that can affect current prompt/tool decisions must remain synchronous by default.
+  if (event === 'UserPromptSubmit' || event === 'PreToolUse') return 'sync'
+  return 'async'
+}
+
+function resolveExecutionMode(event: HookEventName, handler: NormalizedHookHandler): HookExecutionMode {
+  // PreToolUse is security/permission-sensitive; force it synchronous even if misconfigured.
+  if (event === 'PreToolUse') return 'sync'
+  return handler.executionMode ?? getDefaultExecutionMode(event)
+}
+
 function appendAdditionalContext(target: string[], value: unknown): void {
   if (typeof value !== 'string') return
   const trimmed = value.trim()
@@ -187,6 +205,7 @@ function normalizeHandler(
 
   const timeoutMs = typeof rawHandler.timeoutMs === 'number' ? rawHandler.timeoutMs : undefined
   const matcher = (rawHandler.matcher as string | string[] | undefined) ?? fallbackMatcher
+  const executionMode = parseExecutionMode(rawHandler.executionMode)
 
   return [
     {
@@ -195,6 +214,7 @@ function normalizeHandler(
       timeoutMs,
       matcher,
       enabled: isEnabled,
+      executionMode,
     },
   ]
 }
@@ -202,23 +222,24 @@ function normalizeHandler(
 function normalizeEventEntries(rawValue: unknown, source: string): NormalizedHookEntry[] {
   const rawEntries = Array.isArray(rawValue) ? rawValue : rawValue == null ? [] : [rawValue]
   const workingDirectory = path.dirname(path.dirname(source))
+  const entries: NormalizedHookEntry[] = []
 
-  return rawEntries
-    .map(rawEntry => {
-      if (!isRecord(rawEntry)) return null
-      const entryMatcher = rawEntry.matcher as string | string[] | undefined
-      const handlers = normalizeHandler(rawEntry, entryMatcher, rawEntry.enabled !== false).map(handler => ({
-        ...handler,
-        workingDirectory,
-      }))
-      if (handlers.length === 0) return null
-      return {
-        matcher: entryMatcher,
-        handlers,
-        source,
-      } satisfies NormalizedHookEntry
+  for (const rawEntry of rawEntries) {
+    if (!isRecord(rawEntry)) continue
+    const entryMatcher = rawEntry.matcher as string | string[] | undefined
+    const handlers = normalizeHandler(rawEntry, entryMatcher, rawEntry.enabled !== false).map(handler => ({
+      ...handler,
+      workingDirectory,
+    }))
+    if (handlers.length === 0) continue
+    entries.push({
+      ...(entryMatcher !== undefined ? { matcher: entryMatcher } : {}),
+      handlers,
+      source,
     })
-    .filter((entry): entry is NormalizedHookEntry => Boolean(entry))
+  }
+
+  return entries
 }
 
 async function resolveConfigSearchCwd(cwd: string | null | undefined): Promise<string | null> {
@@ -292,8 +313,9 @@ async function loadHookEntriesForEvent(event: HookEventName, cwd: string | null 
   logHookRunner('loading hook entries for event', { event, cwd, searchCwd, settingsFiles })
 
   for (const settingsFile of settingsFiles) {
+    let raw: string | null = null
     try {
-      const raw = await fs.promises.readFile(settingsFile, 'utf8')
+      raw = await fs.promises.readFile(settingsFile, 'utf8')
       const parsed = JSON.parse(raw)
       if (!isRecord(parsed) || !isRecord(parsed.hooks)) {
         logHookRunner('settings file has no hooks object', { settingsFile })
@@ -308,7 +330,10 @@ async function loadHookEntriesForEvent(event: HookEventName, cwd: string | null 
       })
       entries.push(...eventEntries)
     } catch (error) {
-      console.warn(`[HookRunner] Failed to load ${settingsFile}:`, error)
+      const details = raw === null
+        ? { settingsFile, error }
+        : { settingsFile, byteLength: Buffer.byteLength(raw, 'utf8'), error }
+      console.warn(`[HookRunner] Failed to load ${settingsFile}:`, details)
     }
   }
 
@@ -357,6 +382,15 @@ function buildHookPayload(req: HookRunRequest): Record<string, unknown> {
       last_user_message_id: req.turn.lastUserMessageId ?? null,
       last_assistant_message_id: req.turn.lastAssistantMessageId ?? null,
     }
+  }
+
+  if (req.project) {
+    payload.project = {
+      project_id: req.project.projectId ?? null,
+      project_name: req.project.projectName ?? null,
+    }
+    payload.project_id = req.project.projectId ?? null
+    payload.project_name = req.project.projectName ?? null
   }
 
   if (req.operation) payload.operation = req.operation
@@ -495,6 +529,36 @@ function mergeHookDecision(
   return next
 }
 
+// Async hooks are fire-and-forget. Their output is logged but cannot affect the
+// current request. Use sync for hooks that block, mutate prompts, update tool
+// inputs, or provide immediate context.
+function launchAsyncCommandHook(handler: NormalizedHookHandler, req: HookRunRequest): void {
+  logHookRunner('launching async command hook', {
+    event: req.event,
+    command: handler.command,
+    cwd: handler.workingDirectory || req.cwd || null,
+    timeoutMs: handler.timeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS,
+  })
+
+  void executeCommandHook(handler, req)
+    .then(decision => {
+      logHookRunner('async command hook completed', {
+        event: req.event,
+        command: handler.command,
+        decisionKeys: Object.keys(decision),
+        ignoredDecision: Object.keys(decision).length > 0,
+      })
+    })
+    .catch(error => {
+      warnHookRunner('async command hook failed', {
+        event: req.event,
+        command: handler.command,
+        cwd: handler.workingDirectory || req.cwd || null,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
+}
+
 async function executeCommandHook(handler: NormalizedHookHandler, req: HookRunRequest): Promise<Partial<HookRunResult>> {
   const payload = buildHookPayload(req)
   const cwd = handler.workingDirectory || req.cwd || undefined
@@ -583,26 +647,44 @@ export async function runHookRequest(req: HookRunRequest): Promise<HookRunResult
     return entry.handlers.filter(handler => handler.enabled !== false && matchesHookMatcher(req.event, handler.matcher, req))
   })
 
+  const handlersWithExecutionMode = matchingHandlers.map(handler => ({
+    handler,
+    executionMode: resolveExecutionMode(req.event, handler),
+  }))
+  const syncHandlers = handlersWithExecutionMode.filter(item => item.executionMode === 'sync').map(item => item.handler)
+  const asyncHandlers = handlersWithExecutionMode.filter(item => item.executionMode === 'async').map(item => item.handler)
+
   logHookRunner('matched handlers', {
     event: req.event,
     entryCount: entries.length,
     handlerCount: matchingHandlers.length,
-    handlers: matchingHandlers.map(handler => ({
+    syncHandlerCount: syncHandlers.length,
+    asyncHandlerCount: asyncHandlers.length,
+    handlers: handlersWithExecutionMode.map(({ handler, executionMode }) => ({
       command: handler.command,
       cwd: handler.workingDirectory || req.cwd || null,
       timeoutMs: handler.timeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS,
       matcher: handler.matcher ?? null,
+      configuredExecutionMode: handler.executionMode ?? null,
+      executionMode,
     })),
   })
 
   let result: HookRunResult = {
     matched: matchingHandlers.length > 0,
     hookCount: 0,
+    asyncHookCount: asyncHandlers.length,
+    launchedAsyncHookCount: 0,
     errors: [],
   }
   const additionalContexts: string[] = []
 
-  for (const handler of matchingHandlers) {
+  for (const handler of asyncHandlers) {
+    launchAsyncCommandHook(handler, req)
+    result.launchedAsyncHookCount = (result.launchedAsyncHookCount ?? 0) + 1
+  }
+
+  for (const handler of syncHandlers) {
     try {
       const decision = await executeCommandHook(handler, req)
       result.hookCount += 1
@@ -627,6 +709,8 @@ export async function runHookRequest(req: HookRunRequest): Promise<HookRunResult
     event: req.event,
     matched: result.matched,
     hookCount: result.hookCount,
+    asyncHookCount: result.asyncHookCount ?? 0,
+    launchedAsyncHookCount: result.launchedAsyncHookCount ?? 0,
     blocked: result.blocked ?? false,
     hasAdditionalContext: Boolean(result.additionalContext),
     errors: result.errors ?? [],

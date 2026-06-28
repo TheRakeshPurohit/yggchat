@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react'
 import { useEffect, useState } from 'react'
 
 export type ThemeMode = 'light' | 'dark'
@@ -17,6 +18,7 @@ export interface ChatMessageRoleTheme {
 
 export interface HeimdallNodeTheme {
   fill: ThemeColorPair
+  visibleFill: ThemeColorPair
   stroke: ThemeColorPair
   visibleStroke: ThemeColorPair
 }
@@ -31,6 +33,10 @@ export interface CustomChatTheme {
     conversationToolbarBg: ThemeColorPair
     settingsSolidColorSectionBg: ThemeColorPair
     appBackgroundColor: ThemeColorPair
+    thinScrollbarThumb: ThemeColorPair
+    thinScrollbarThumbHover: ThemeColorPair
+    thinScrollbarTrack: ThemeColorPair
+    thinScrollbarShadow: ThemeColorPair
     settingsPaneBodyBg: ThemeColorPair
     settingsCustomThemesCardBg: ThemeColorPair
     settingsCustomThemesCardBorder: ThemeColorPair
@@ -167,11 +173,46 @@ export interface CustomChatTheme {
     htmlToolsModalButtonActiveBg: ThemeColorPair
     htmlToolsModalButtonActiveBorder: ThemeColorPair
     htmlToolsModalButtonActiveText: ThemeColorPair
+    markdownText: ThemeColorPair
+    markdownMutedText: ThemeColorPair
+    markdownHeadingText: ThemeColorPair
+    markdownLinkText: ThemeColorPair
+    markdownLinkHoverText: ThemeColorPair
+    markdownListMarkerText: ThemeColorPair
+    markdownHrBorder: ThemeColorPair
+    markdownBlockquoteBg: ThemeColorPair
+    markdownBlockquoteBorder: ThemeColorPair
+    markdownBlockquoteText: ThemeColorPair
+    markdownTableBorder: ThemeColorPair
+    markdownTableHeaderBg: ThemeColorPair
+    markdownTableHeaderText: ThemeColorPair
+    markdownTableRowBorder: ThemeColorPair
     markdownCodeBlockBg: ThemeColorPair
     markdownCodeBlockBorder: ThemeColorPair
     markdownCodeBlockText: ThemeColorPair
+    markdownCodeBlockHeaderBg: ThemeColorPair
+    markdownCodeBlockHeaderText: ThemeColorPair
+    markdownCodeCopyButtonBg: ThemeColorPair
+    markdownCodeCopyButtonBorder: ThemeColorPair
+    markdownCodeCopyButtonText: ThemeColorPair
+    markdownCodeCopyButtonHoverBg: ThemeColorPair
     markdownInlineCodeBg: ThemeColorPair
     markdownInlineCodeText: ThemeColorPair
+    markdownInlineCodeBorder: ThemeColorPair
+    markdownMathText: ThemeColorPair
+    markdownSyntaxBase: ThemeColorPair
+    markdownSyntaxComment: ThemeColorPair
+    markdownSyntaxKeyword: ThemeColorPair
+    markdownSyntaxString: ThemeColorPair
+    markdownSyntaxNumber: ThemeColorPair
+    markdownSyntaxType: ThemeColorPair
+    markdownSyntaxFunction: ThemeColorPair
+    markdownSyntaxVariable: ThemeColorPair
+    markdownSyntaxOperator: ThemeColorPair
+    markdownSyntaxPunctuation: ThemeColorPair
+    markdownSyntaxMeta: ThemeColorPair
+    markdownSyntaxDeletion: ThemeColorPair
+    markdownSyntaxAddition: ThemeColorPair
     messageRoles: Record<ChatThemeRoleKey, ChatMessageRoleTheme>
     heimdallNodes: Record<HeimdallNodeThemeKey, HeimdallNodeTheme>
   }
@@ -227,6 +268,22 @@ export const createDefaultCustomChatTheme = (): CustomChatTheme => ({
     appBackgroundColor: {
       light: '#F7F9FB',
       dark: '#050505',
+    },
+    thinScrollbarThumb: {
+      light: 'transparent',
+      dark: 'transparent',
+    },
+    thinScrollbarThumbHover: {
+      light: '#c5c5c5',
+      dark: '#262626',
+    },
+    thinScrollbarTrack: {
+      light: 'transparent',
+      dark: 'transparent',
+    },
+    thinScrollbarShadow: {
+      light: 'rgba(90, 90, 90, 0.02)',
+      dark: 'rgba(90, 90, 90, 0.02)',
     },
     settingsPaneBodyBg: {
       light: 'oklch(97% 0 0)',
@@ -772,25 +829,165 @@ export const createDefaultCustomChatTheme = (): CustomChatTheme => ({
       light: '#171717',
       dark: '#ffffff',
     },
+    markdownText: {
+      light: '#27272a',
+      dark: '#e7e5e4',
+    },
+    markdownMutedText: {
+      light: '#64748b',
+      dark: '#a8a29e',
+    },
+    markdownHeadingText: {
+      light: '#1f2937',
+      dark: '#f5f5f4',
+    },
+    markdownLinkText: {
+      light: '#2563eb',
+      dark: '#f59e0b',
+    },
+    markdownLinkHoverText: {
+      light: '#1d4ed8',
+      dark: '#fbbf24',
+    },
+    markdownListMarkerText: {
+      light: '#60a5fa',
+      dark: '#d6d3d1',
+    },
+    markdownHrBorder: {
+      light: 'rgba(100, 116, 139, 0.22)',
+      dark: 'rgba(168, 162, 158, 0.22)',
+    },
+    markdownBlockquoteBg: {
+      light: 'rgba(241, 245, 249, 0.9)',
+      dark: 'rgba(41, 37, 36, 0.72)',
+    },
+    markdownBlockquoteBorder: {
+      light: '#93c5fd',
+      dark: '#f59e0b',
+    },
+    markdownBlockquoteText: {
+      light: '#334155',
+      dark: '#e7e5e4',
+    },
+    markdownTableBorder: {
+      light: 'rgba(148, 163, 184, 0.32)',
+      dark: 'rgba(120, 113, 108, 0.42)',
+    },
+    markdownTableHeaderBg: {
+      light: 'rgba(248, 250, 252, 0.95)',
+      dark: 'rgba(28, 25, 23, 0.86)',
+    },
+    markdownTableHeaderText: {
+      light: '#1f2937',
+      dark: '#f5f5f4',
+    },
+    markdownTableRowBorder: {
+      light: 'rgba(203, 213, 225, 0.42)',
+      dark: 'rgba(87, 83, 78, 0.42)',
+    },
     markdownCodeBlockBg: {
-      light: '#f3f4f6',
-      dark: '#171717',
+      light: '#f8fafc',
+      dark: '#171312',
     },
     markdownCodeBlockBorder: {
-      light: 'rgba(0, 0, 0, 0.08)',
-      dark: 'rgba(255, 255, 255, 0.08)',
+      light: 'rgba(148, 163, 184, 0.34)',
+      dark: 'rgba(120, 113, 108, 0.42)',
     },
     markdownCodeBlockText: {
-      light: '#111827',
-      dark: '#f3f4f6',
+      light: '#1f2937',
+      dark: '#f5f5f4',
+    },
+    markdownCodeBlockHeaderBg: {
+      light: 'rgba(226, 232, 240, 0.72)',
+      dark: 'rgba(41, 37, 36, 0.76)',
+    },
+    markdownCodeBlockHeaderText: {
+      light: '#475569',
+      dark: '#d6d3d1',
+    },
+    markdownCodeCopyButtonBg: {
+      light: 'rgba(255, 255, 255, 0.88)',
+      dark: 'rgba(68, 64, 60, 0.72)',
+    },
+    markdownCodeCopyButtonBorder: {
+      light: 'rgba(148, 163, 184, 0.4)',
+      dark: 'rgba(168, 162, 158, 0.24)',
+    },
+    markdownCodeCopyButtonText: {
+      light: '#334155',
+      dark: '#f5f5f4',
+    },
+    markdownCodeCopyButtonHoverBg: {
+      light: 'rgba(219, 234, 254, 0.85)',
+      dark: 'rgba(120, 53, 15, 0.34)',
     },
     markdownInlineCodeBg: {
-      light: '#e5e7eb',
-      dark: '#262626',
+      light: 'rgba(226, 232, 240, 0.85)',
+      dark: 'rgba(68, 64, 60, 0.72)',
     },
     markdownInlineCodeText: {
-      light: '#111827',
-      dark: '#f5f5f5',
+      light: '#1d4ed8',
+      dark: '#fbbf24',
+    },
+    markdownInlineCodeBorder: {
+      light: 'rgba(148, 163, 184, 0.36)',
+      dark: 'rgba(168, 162, 158, 0.24)',
+    },
+    markdownMathText: {
+      light: '#2563eb',
+      dark: '#f59e0b',
+    },
+    markdownSyntaxBase: {
+      light: '#334155',
+      dark: '#e7e5e4',
+    },
+    markdownSyntaxComment: {
+      light: '#94a3b8',
+      dark: '#78716c',
+    },
+    markdownSyntaxKeyword: {
+      light: '#2563eb',
+      dark: '#f59e0b',
+    },
+    markdownSyntaxString: {
+      light: '#1e40af',
+      dark: '#86efac',
+    },
+    markdownSyntaxNumber: {
+      light: '#4f46e5',
+      dark: '#c4b5fd',
+    },
+    markdownSyntaxType: {
+      light: '#3b82f6',
+      dark: '#fdba74',
+    },
+    markdownSyntaxFunction: {
+      light: '#0284c7',
+      dark: '#93c5fd',
+    },
+    markdownSyntaxVariable: {
+      light: '#be123c',
+      dark: '#fda4af',
+    },
+    markdownSyntaxOperator: {
+      light: '#64748b',
+      dark: '#d6d3d1',
+    },
+    markdownSyntaxPunctuation: {
+      light: '#475569',
+      dark: '#a8a29e',
+    },
+    markdownSyntaxMeta: {
+      light: '#2563eb',
+      dark: '#fbbf24',
+    },
+    markdownSyntaxDeletion: {
+      light: '#dc2626',
+      dark: '#f87171',
+    },
+    markdownSyntaxAddition: {
+      light: '#2563eb',
+      dark: '#86efac',
     },
     messageRoles: {
       user: {
@@ -822,16 +1019,19 @@ export const createDefaultCustomChatTheme = (): CustomChatTheme => ({
     heimdallNodes: {
       user: {
         fill: { light: '#f5f5f5', dark: '#171717' },
+        visibleFill: { light: '#dbeafe', dark: 'rgba(249, 115, 22, 0.2)' },
         stroke: { light: '#d4d4d4', dark: '#262626' },
         visibleStroke: { light: '#34d399', dark: '#f97316' },
       },
       assistant: {
         fill: { light: '#f1f5f9', dark: '#171717' },
+        visibleFill: { light: '#dbeafe', dark: 'rgba(249, 115, 22, 0.2)' },
         stroke: { light: '#e5e5e5', dark: '#262626' },
         visibleStroke: { light: '#34d399', dark: '#f97316' },
       },
       ex_agent: {
         fill: { light: '#f8fafc', dark: '#0a0a0a' },
+        visibleFill: { light: '#dbeafe', dark: 'rgba(249, 115, 22, 0.2)' },
         stroke: { light: '#ea580c', dark: '#ea580c' },
         visibleStroke: { light: '#34d399', dark: '#ea580c' },
       },
@@ -873,6 +1073,7 @@ export const sanitizeCustomTheme = (value: unknown): CustomChatTheme => {
 
       acc[sender] = {
         fill: readColorPair(rawNodeTheme.fill, fallback.fill),
+        visibleFill: readColorPair(rawNodeTheme.visibleFill, fallback.visibleFill),
         stroke: readColorPair(rawNodeTheme.stroke, fallback.stroke),
         visibleStroke: readColorPair(rawNodeTheme.visibleStroke, fallback.visibleStroke),
       }
@@ -895,6 +1096,13 @@ export const sanitizeCustomTheme = (value: unknown): CustomChatTheme => {
         defaults.colors.settingsSolidColorSectionBg
       ),
       appBackgroundColor: readColorPair(rawColors.appBackgroundColor, defaults.colors.appBackgroundColor),
+      thinScrollbarThumb: readColorPair(rawColors.thinScrollbarThumb, defaults.colors.thinScrollbarThumb),
+      thinScrollbarThumbHover: readColorPair(
+        rawColors.thinScrollbarThumbHover,
+        defaults.colors.thinScrollbarThumbHover
+      ),
+      thinScrollbarTrack: readColorPair(rawColors.thinScrollbarTrack, defaults.colors.thinScrollbarTrack),
+      thinScrollbarShadow: readColorPair(rawColors.thinScrollbarShadow, defaults.colors.thinScrollbarShadow),
       settingsPaneBodyBg: readColorPair(rawColors.settingsPaneBodyBg, defaults.colors.settingsPaneBodyBg),
       settingsCustomThemesCardBg: readColorPair(
         rawColors.settingsCustomThemesCardBg,
@@ -1310,17 +1518,97 @@ export const sanitizeCustomTheme = (value: unknown): CustomChatTheme => {
         rawColors.htmlToolsModalButtonActiveText,
         defaults.colors.htmlToolsModalButtonActiveText
       ),
+      markdownText: readColorPair(rawColors.markdownText, defaults.colors.markdownText),
+      markdownMutedText: readColorPair(rawColors.markdownMutedText, defaults.colors.markdownMutedText),
+      markdownHeadingText: readColorPair(rawColors.markdownHeadingText, defaults.colors.markdownHeadingText),
+      markdownLinkText: readColorPair(rawColors.markdownLinkText, defaults.colors.markdownLinkText),
+      markdownLinkHoverText: readColorPair(
+        rawColors.markdownLinkHoverText,
+        defaults.colors.markdownLinkHoverText
+      ),
+      markdownListMarkerText: readColorPair(
+        rawColors.markdownListMarkerText,
+        defaults.colors.markdownListMarkerText
+      ),
+      markdownHrBorder: readColorPair(rawColors.markdownHrBorder, defaults.colors.markdownHrBorder),
+      markdownBlockquoteBg: readColorPair(rawColors.markdownBlockquoteBg, defaults.colors.markdownBlockquoteBg),
+      markdownBlockquoteBorder: readColorPair(
+        rawColors.markdownBlockquoteBorder,
+        defaults.colors.markdownBlockquoteBorder
+      ),
+      markdownBlockquoteText: readColorPair(
+        rawColors.markdownBlockquoteText,
+        defaults.colors.markdownBlockquoteText
+      ),
+      markdownTableBorder: readColorPair(rawColors.markdownTableBorder, defaults.colors.markdownTableBorder),
+      markdownTableHeaderBg: readColorPair(
+        rawColors.markdownTableHeaderBg,
+        defaults.colors.markdownTableHeaderBg
+      ),
+      markdownTableHeaderText: readColorPair(
+        rawColors.markdownTableHeaderText,
+        defaults.colors.markdownTableHeaderText
+      ),
+      markdownTableRowBorder: readColorPair(
+        rawColors.markdownTableRowBorder,
+        defaults.colors.markdownTableRowBorder
+      ),
       markdownCodeBlockBg: readColorPair(rawColors.markdownCodeBlockBg, defaults.colors.markdownCodeBlockBg),
       markdownCodeBlockBorder: readColorPair(
         rawColors.markdownCodeBlockBorder,
         defaults.colors.markdownCodeBlockBorder
       ),
       markdownCodeBlockText: readColorPair(rawColors.markdownCodeBlockText, defaults.colors.markdownCodeBlockText),
+      markdownCodeBlockHeaderBg: readColorPair(
+        rawColors.markdownCodeBlockHeaderBg,
+        defaults.colors.markdownCodeBlockHeaderBg
+      ),
+      markdownCodeBlockHeaderText: readColorPair(
+        rawColors.markdownCodeBlockHeaderText,
+        defaults.colors.markdownCodeBlockHeaderText
+      ),
+      markdownCodeCopyButtonBg: readColorPair(
+        rawColors.markdownCodeCopyButtonBg,
+        defaults.colors.markdownCodeCopyButtonBg
+      ),
+      markdownCodeCopyButtonBorder: readColorPair(
+        rawColors.markdownCodeCopyButtonBorder,
+        defaults.colors.markdownCodeCopyButtonBorder
+      ),
+      markdownCodeCopyButtonText: readColorPair(
+        rawColors.markdownCodeCopyButtonText,
+        defaults.colors.markdownCodeCopyButtonText
+      ),
+      markdownCodeCopyButtonHoverBg: readColorPair(
+        rawColors.markdownCodeCopyButtonHoverBg,
+        defaults.colors.markdownCodeCopyButtonHoverBg
+      ),
       markdownInlineCodeBg: readColorPair(rawColors.markdownInlineCodeBg, defaults.colors.markdownInlineCodeBg),
       markdownInlineCodeText: readColorPair(
         rawColors.markdownInlineCodeText,
         defaults.colors.markdownInlineCodeText
       ),
+      markdownInlineCodeBorder: readColorPair(
+        rawColors.markdownInlineCodeBorder,
+        defaults.colors.markdownInlineCodeBorder
+      ),
+      markdownMathText: readColorPair(rawColors.markdownMathText, defaults.colors.markdownMathText),
+      markdownSyntaxBase: readColorPair(rawColors.markdownSyntaxBase, defaults.colors.markdownSyntaxBase),
+      markdownSyntaxComment: readColorPair(rawColors.markdownSyntaxComment, defaults.colors.markdownSyntaxComment),
+      markdownSyntaxKeyword: readColorPair(rawColors.markdownSyntaxKeyword, defaults.colors.markdownSyntaxKeyword),
+      markdownSyntaxString: readColorPair(rawColors.markdownSyntaxString, defaults.colors.markdownSyntaxString),
+      markdownSyntaxNumber: readColorPair(rawColors.markdownSyntaxNumber, defaults.colors.markdownSyntaxNumber),
+      markdownSyntaxType: readColorPair(rawColors.markdownSyntaxType, defaults.colors.markdownSyntaxType),
+      markdownSyntaxFunction: readColorPair(rawColors.markdownSyntaxFunction, defaults.colors.markdownSyntaxFunction),
+      markdownSyntaxVariable: readColorPair(rawColors.markdownSyntaxVariable, defaults.colors.markdownSyntaxVariable),
+      markdownSyntaxOperator: readColorPair(rawColors.markdownSyntaxOperator, defaults.colors.markdownSyntaxOperator),
+      markdownSyntaxPunctuation: readColorPair(
+        rawColors.markdownSyntaxPunctuation,
+        defaults.colors.markdownSyntaxPunctuation
+      ),
+      markdownSyntaxMeta: readColorPair(rawColors.markdownSyntaxMeta, defaults.colors.markdownSyntaxMeta),
+      markdownSyntaxDeletion: readColorPair(rawColors.markdownSyntaxDeletion, defaults.colors.markdownSyntaxDeletion),
+      markdownSyntaxAddition: readColorPair(rawColors.markdownSyntaxAddition, defaults.colors.markdownSyntaxAddition),
       messageRoles,
       heimdallNodes,
     },
@@ -1388,6 +1676,104 @@ export const resetCustomChatTheme = (): void => {
 
 export const getThemeModeColor = (pair: ThemeColorPair, isDarkMode: boolean): string =>
   isDarkMode ? pair.dark : pair.light
+
+type MarkdownThemeCssVariable =
+  | '--thin-scrollbar-thumb'
+  | '--thin-scrollbar-thumb-hover'
+  | '--thin-scrollbar-track'
+  | '--thin-scrollbar-shadow'
+  | '--chat-md-text'
+  | '--chat-md-muted-text'
+  | '--chat-md-heading-text'
+  | '--chat-md-link-text'
+  | '--chat-md-link-hover-text'
+  | '--chat-md-list-marker-text'
+  | '--chat-md-hr-border'
+  | '--chat-md-blockquote-bg'
+  | '--chat-md-blockquote-border'
+  | '--chat-md-blockquote-text'
+  | '--chat-md-table-border'
+  | '--chat-md-table-header-bg'
+  | '--chat-md-table-header-text'
+  | '--chat-md-table-row-border'
+  | '--chat-md-code-block-bg'
+  | '--chat-md-code-block-border'
+  | '--chat-md-code-block-text'
+  | '--chat-md-code-block-header-bg'
+  | '--chat-md-code-block-header-text'
+  | '--chat-md-code-copy-button-bg'
+  | '--chat-md-code-copy-button-border'
+  | '--chat-md-code-copy-button-text'
+  | '--chat-md-code-copy-button-hover-bg'
+  | '--chat-md-inline-code-bg'
+  | '--chat-md-inline-code-text'
+  | '--chat-md-inline-code-border'
+  | '--chat-md-math-text'
+  | '--chat-md-syntax-base'
+  | '--chat-md-syntax-comment'
+  | '--chat-md-syntax-keyword'
+  | '--chat-md-syntax-string'
+  | '--chat-md-syntax-number'
+  | '--chat-md-syntax-type'
+  | '--chat-md-syntax-function'
+  | '--chat-md-syntax-variable'
+  | '--chat-md-syntax-operator'
+  | '--chat-md-syntax-punctuation'
+  | '--chat-md-syntax-meta'
+  | '--chat-md-syntax-deletion'
+  | '--chat-md-syntax-addition'
+
+export type MarkdownThemeCssProperties = CSSProperties & Partial<Record<MarkdownThemeCssVariable, string>>
+
+export const getMarkdownThemeVars = (theme: CustomChatTheme, isDarkMode: boolean): MarkdownThemeCssProperties => {
+  const colors = theme.colors
+  return {
+    '--thin-scrollbar-thumb': getThemeModeColor(colors.thinScrollbarThumb, isDarkMode),
+    '--thin-scrollbar-thumb-hover': getThemeModeColor(colors.thinScrollbarThumbHover, isDarkMode),
+    '--thin-scrollbar-track': getThemeModeColor(colors.thinScrollbarTrack, isDarkMode),
+    '--thin-scrollbar-shadow': getThemeModeColor(colors.thinScrollbarShadow, isDarkMode),
+    '--chat-md-text': getThemeModeColor(colors.markdownText, isDarkMode),
+    '--chat-md-muted-text': getThemeModeColor(colors.markdownMutedText, isDarkMode),
+    '--chat-md-heading-text': getThemeModeColor(colors.markdownHeadingText, isDarkMode),
+    '--chat-md-link-text': getThemeModeColor(colors.markdownLinkText, isDarkMode),
+    '--chat-md-link-hover-text': getThemeModeColor(colors.markdownLinkHoverText, isDarkMode),
+    '--chat-md-list-marker-text': getThemeModeColor(colors.markdownListMarkerText, isDarkMode),
+    '--chat-md-hr-border': getThemeModeColor(colors.markdownHrBorder, isDarkMode),
+    '--chat-md-blockquote-bg': getThemeModeColor(colors.markdownBlockquoteBg, isDarkMode),
+    '--chat-md-blockquote-border': getThemeModeColor(colors.markdownBlockquoteBorder, isDarkMode),
+    '--chat-md-blockquote-text': getThemeModeColor(colors.markdownBlockquoteText, isDarkMode),
+    '--chat-md-table-border': getThemeModeColor(colors.markdownTableBorder, isDarkMode),
+    '--chat-md-table-header-bg': getThemeModeColor(colors.markdownTableHeaderBg, isDarkMode),
+    '--chat-md-table-header-text': getThemeModeColor(colors.markdownTableHeaderText, isDarkMode),
+    '--chat-md-table-row-border': getThemeModeColor(colors.markdownTableRowBorder, isDarkMode),
+    '--chat-md-code-block-bg': getThemeModeColor(colors.markdownCodeBlockBg, isDarkMode),
+    '--chat-md-code-block-border': getThemeModeColor(colors.markdownCodeBlockBorder, isDarkMode),
+    '--chat-md-code-block-text': getThemeModeColor(colors.markdownCodeBlockText, isDarkMode),
+    '--chat-md-code-block-header-bg': getThemeModeColor(colors.markdownCodeBlockHeaderBg, isDarkMode),
+    '--chat-md-code-block-header-text': getThemeModeColor(colors.markdownCodeBlockHeaderText, isDarkMode),
+    '--chat-md-code-copy-button-bg': getThemeModeColor(colors.markdownCodeCopyButtonBg, isDarkMode),
+    '--chat-md-code-copy-button-border': getThemeModeColor(colors.markdownCodeCopyButtonBorder, isDarkMode),
+    '--chat-md-code-copy-button-text': getThemeModeColor(colors.markdownCodeCopyButtonText, isDarkMode),
+    '--chat-md-code-copy-button-hover-bg': getThemeModeColor(colors.markdownCodeCopyButtonHoverBg, isDarkMode),
+    '--chat-md-inline-code-bg': getThemeModeColor(colors.markdownInlineCodeBg, isDarkMode),
+    '--chat-md-inline-code-text': getThemeModeColor(colors.markdownInlineCodeText, isDarkMode),
+    '--chat-md-inline-code-border': getThemeModeColor(colors.markdownInlineCodeBorder, isDarkMode),
+    '--chat-md-math-text': getThemeModeColor(colors.markdownMathText, isDarkMode),
+    '--chat-md-syntax-base': getThemeModeColor(colors.markdownSyntaxBase, isDarkMode),
+    '--chat-md-syntax-comment': getThemeModeColor(colors.markdownSyntaxComment, isDarkMode),
+    '--chat-md-syntax-keyword': getThemeModeColor(colors.markdownSyntaxKeyword, isDarkMode),
+    '--chat-md-syntax-string': getThemeModeColor(colors.markdownSyntaxString, isDarkMode),
+    '--chat-md-syntax-number': getThemeModeColor(colors.markdownSyntaxNumber, isDarkMode),
+    '--chat-md-syntax-type': getThemeModeColor(colors.markdownSyntaxType, isDarkMode),
+    '--chat-md-syntax-function': getThemeModeColor(colors.markdownSyntaxFunction, isDarkMode),
+    '--chat-md-syntax-variable': getThemeModeColor(colors.markdownSyntaxVariable, isDarkMode),
+    '--chat-md-syntax-operator': getThemeModeColor(colors.markdownSyntaxOperator, isDarkMode),
+    '--chat-md-syntax-punctuation': getThemeModeColor(colors.markdownSyntaxPunctuation, isDarkMode),
+    '--chat-md-syntax-meta': getThemeModeColor(colors.markdownSyntaxMeta, isDarkMode),
+    '--chat-md-syntax-deletion': getThemeModeColor(colors.markdownSyntaxDeletion, isDarkMode),
+    '--chat-md-syntax-addition': getThemeModeColor(colors.markdownSyntaxAddition, isDarkMode),
+  }
+}
 
 export const resolveRoleThemeKey = (role: string): ChatThemeRoleKey => {
   switch (role) {

@@ -557,7 +557,8 @@ body {
 }
 
 .mobile-settings-font-zoom,
-.mobile-settings-mode-prompts {
+.mobile-settings-mode-prompts,
+.mobile-settings-thinking-options {
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
   background: color-mix(in srgb, var(--panel) 88%, transparent);
@@ -566,23 +567,34 @@ body {
   gap: 9px;
 }
 
-.mobile-settings-mode-prompts {
+.mobile-settings-mode-prompts,
+.mobile-settings-thinking-options-header {
   grid-template-columns: 1fr auto;
   align-items: center;
   gap: 12px;
 }
 
-.mobile-settings-mode-prompts strong {
+.mobile-settings-thinking-options-header {
+  display: grid;
+}
+
+.mobile-settings-mode-prompts strong,
+.mobile-settings-thinking-options strong {
   display: block;
   color: var(--text);
   font-size: 13px;
 }
 
-.mobile-settings-mode-prompts p {
+.mobile-settings-mode-prompts p,
+.mobile-settings-thinking-options p {
   margin: 4px 0 0;
   color: var(--muted);
   font-size: 11px;
   line-height: 1.35;
+}
+
+.mobile-settings-thinking-effort-field {
+  padding-top: 2px;
 }
 
 .mobile-settings-toggle-row {
@@ -664,6 +676,9 @@ body {
   border-radius: 16px;
   background: color-mix(in srgb, var(--panel) 88%, transparent);
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: min(72dvh, 620px);
 }
 
 .mobile-settings-collapsible-toggle {
@@ -678,6 +693,7 @@ body {
   gap: 12px;
   text-align: left;
   cursor: pointer;
+  flex: 0 0 auto;
 }
 
 .mobile-settings-collapsible-toggle span {
@@ -695,14 +711,20 @@ body {
 }
 
 .mobile-settings-collapsible-body {
-  padding: 0 14px 14px;
+  padding: 12px 14px 14px;
   display: grid;
   gap: 12px;
   border-top: 1px solid var(--border-subtle);
+  overflow-y: auto;
+  min-height: 0;
+  max-height: min(60dvh, 520px);
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .mobile-settings-collapsible-body .ui-textarea {
-  min-height: 88px;
+  min-height: 108px;
+  max-height: 34dvh;
   resize: vertical;
 }
 
@@ -744,6 +766,25 @@ body {
 .mobile-auth-pill.disconnected {
   border-color: color-mix(in srgb, var(--tool-error) 55%, var(--control-border));
   color: color-mix(in srgb, var(--tool-error) 75%, var(--text));
+}
+
+@media (max-width: 430px) {
+  .mobile-settings-mode-prompts,
+  .mobile-settings-thinking-options-header {
+    grid-template-columns: 1fr;
+  }
+
+  .mobile-settings-toggle-row {
+    justify-self: start;
+  }
+
+  .mobile-settings-collapsible {
+    max-height: min(76dvh, 620px);
+  }
+
+  .mobile-settings-collapsible-body {
+    max-height: min(64dvh, 540px);
+  }
 }
 
 @media (min-width: 560px) {

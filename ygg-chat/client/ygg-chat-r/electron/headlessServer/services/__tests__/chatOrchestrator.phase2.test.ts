@@ -103,6 +103,9 @@ function createStatements(db: Database.Database): any {
     `),
     getMessageById: db.prepare('SELECT * FROM messages WHERE id = ?'),
     getMessagesByConversationId: db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC'),
+    upsertStreamingRun: { run: () => {} },
+    getStreamingRunById: { get: () => null },
+    updateStreamingRun: { run: () => {} },
   }
 }
 
@@ -117,7 +120,9 @@ class FakeProviderRouter {
   async generate(_provider: string, input: any): Promise<any> {
     this.calls.push(input)
     if (this.queuedOutputs.length > 0) {
-      return this.queuedOutputs.shift()
+      const next = this.queuedOutputs.shift()
+      if (next instanceof Error) throw next
+      return next
     }
     return { content: `assistant:${input.userContent}` }
   }
@@ -176,6 +181,39 @@ describeIfSqlite('ChatOrchestrator continuation semantics', () => {
     expect(assistant.parent_id).toBe(user.id)
     expect(events.some(evt => evt.type === 'user_message_persisted')).toBe(true)
     expect(events[events.length - 1].type).toBe('complete')
+  })
+
+  it('turns post-retry OpenAI provider errors into a persisted assistant response', async () => {
+    providerRouter.enqueue(
+      new Error(
+        'ChatGPT backend request failed (429): {"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_at":1782168563}}'
+      )
+    )
+
+    const events: any[] = []
+    await orchestrator.runMessage(
+      {
+        operation: 'send',
+        conversationId: 'c1',
+        parentId: null,
+        content: 'hello',
+        provider: 'openaichatgpt',
+        modelName: 'gpt-5.4-mini',
+      },
+      event => events.push(event)
+    )
+
+    const messages = statements.getMessagesByConversationId.all('c1') as any[]
+    const user = messages.find((msg: any) => msg.role === 'user')
+    const assistant = messages.find((msg: any) => msg.role === 'assistant')
+
+    expect(user).toBeTruthy()
+    expect(assistant).toBeTruthy()
+    expect(assistant.parent_id).toBe(user.id)
+    expect(assistant.content).toContain('The usage limit has been reached')
+    expect(events.some(evt => evt.type === 'assistant_message_persisted' && evt.message.id === assistant.id)).toBe(true)
+    expect(events.some(evt => evt.type === 'error')).toBe(false)
+    expect(events[events.length - 1]).toMatchObject({ type: 'complete', providerError: true, message: { id: assistant.id } })
   })
 
   it('repeat regenerates assistant without creating new user', async () => {
@@ -518,5 +556,67 @@ describeIfSqlite('ChatOrchestrator prompt resolution', () => {
     )
 
     expect(providerRouter.calls[0].systemPrompt).toBe('You are ChatGPT.')
+  })
+})
+
+describeIfSqlite('ChatOrchestrator plan mode tool policy', () => {
+  let db: Database.Database
+  let statements: any
+  let providerRouter: FakeProviderRouter
+  let orchestrator: ChatOrchestrator
+
+  beforeEach(() => {
+    if (!BetterSqlite3Ctor) {
+      throw new Error('better-sqlite3 is unavailable in this runtime')
+    }
+
+    db = new BetterSqlite3Ctor(':memory:')
+    createSchema(db)
+    statements = createStatements(db)
+
+    const now = new Date().toISOString()
+    statements.upsertConversation.run('c-tools', null, 'u1', 'Conversation', 'gpt-5.5', null, null, null, null, 'local', now, now)
+
+    providerRouter = new FakeProviderRouter()
+    orchestrator = new ChatOrchestrator({
+      db,
+      statements,
+      providerRouter: providerRouter as any,
+      defaultToolsProvider: () => [
+        { name: 'bash' },
+        { name: 'powershell' },
+        { name: 'edit_file' },
+        { name: 'read_file' },
+        { name: 'mcp__server__tool' },
+      ],
+    })
+  })
+
+  afterEach(() => {
+    if (db) {
+      db.close()
+    }
+  })
+
+  it('filters default runtime tools for plan mode while keeping bash and powershell', async () => {
+    await orchestrator.runMessage(
+      {
+        operation: 'send',
+        conversationId: 'c-tools',
+        parentId: null,
+        content: 'hello',
+        provider: 'openaichatgpt',
+        modelName: 'gpt-5.5',
+        operationMode: 'plan',
+      },
+      () => {}
+    )
+
+    const toolNames = (providerRouter.calls[0].tools || []).map((tool: any) => tool.name)
+    expect(toolNames).toContain('bash')
+    expect(toolNames).toContain('powershell')
+    expect(toolNames).toContain('read_file')
+    expect(toolNames).not.toContain('edit_file')
+    expect(toolNames).not.toContain('mcp__server__tool')
   })
 })

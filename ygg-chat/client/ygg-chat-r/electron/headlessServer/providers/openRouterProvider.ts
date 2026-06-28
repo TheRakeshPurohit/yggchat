@@ -31,6 +31,7 @@ export interface ProviderRailwayTurnInput {
   promptCacheRetention?: 'in_memory' | '24h'
   runId?: string | null
   previousResponseId?: string | null
+  allowCommentaryFallbackText?: boolean
 }
 
 export interface ProviderGenerateInput {

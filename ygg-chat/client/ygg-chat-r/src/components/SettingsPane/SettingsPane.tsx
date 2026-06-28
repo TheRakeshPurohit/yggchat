@@ -1,5 +1,33 @@
 import { useQueryClient } from '@tanstack/react-query'
 import mammoth from 'mammoth'
+import {
+  AlertCircle,
+  Brain,
+  Check,
+  CheckCircle,
+  ChevronDown,
+  Download,
+  FileJson,
+  FolderOpen,
+  GitBranch,
+  LoaderCircle,
+  Maximize2,
+  Palette,
+  Paperclip,
+  Play,
+  Plus,
+  RefreshCw,
+  Save,
+  Server,
+  Sparkles,
+  Square,
+  Star,
+  Store,
+  Trash2,
+  Type,
+  Wrench,
+  X,
+} from 'lucide-react'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { AppStoreModal } from '../../containers/appStore'
 import { fetchMcpTools, selectCurrentConversationId } from '../../features/chats'
@@ -8,6 +36,10 @@ import type { Conversation } from '../../features/conversations/conversationType
 import { selectSelectedProject } from '../../features/projects'
 import { useAppDispatch, useAppSelector } from '../../hooks/redux'
 import { useUserSystemPrompts } from '../../hooks/useUserSystemPrompts'
+import {
+  loadLongTermMemoryContextEnabled,
+  saveLongTermMemoryContextEnabled,
+} from '../../helpers/longTermMemorySettingsStorage'
 import { localApi } from '../../utils/api'
 import { extractTextFromPdf } from '../../utils/pdfUtils'
 import { InputTextArea } from '../InputTextArea/InputTextArea'
@@ -28,6 +60,20 @@ import { ToolsSettings } from './ToolsSettings'
 type SettingsPaneProps = {
   open: boolean
   onClose: () => void
+}
+
+type StreamingThinkingIndicatorPlacement = 'message' | 'input-tab'
+
+const STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY = 'chat:streamingThinkingIndicatorPlacement'
+const STREAMING_THINKING_INDICATOR_PLACEMENT_CHANGE_EVENT = 'streamingThinkingIndicatorPlacementChange'
+
+const getStoredStreamingThinkingIndicatorPlacement = (): StreamingThinkingIndicatorPlacement => {
+  try {
+    const stored = localStorage.getItem(STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY)
+    return stored === 'input-tab' ? 'input-tab' : 'message'
+  } catch {
+    return 'message'
+  }
 }
 
 type ThemeListItem = {
@@ -62,6 +108,7 @@ type ManagedHookListItem = {
   entryIndex: number
   handlerIndex: number
   handlerLocation: 'entry' | 'hooks'
+  executionMode?: 'sync' | 'async'
 }
 
 type HooksListResult = {
@@ -74,6 +121,28 @@ type HookToggleResult = {
   success?: boolean
   error?: string
   hook?: ManagedHookListItem
+}
+
+type SkillInstallCandidate = {
+  name: string
+  path: string
+  url: string
+}
+
+type SkillInstallResult = {
+  success?: boolean
+  skillName?: string
+  skillNames?: string[]
+  error?: string
+  code?: string
+  candidates?: SkillInstallCandidate[]
+}
+
+const formatSkillInstallSuccess = (data: SkillInstallResult) => {
+  if (data.skillNames?.length) {
+    return `Successfully installed ${data.skillNames.length} skills under "${data.skillName}"`
+  }
+  return `Successfully installed "${data.skillName}"`
 }
 
 const HOOK_EVENT_ORDER: ManagedHookListItem['event'][] = [
@@ -140,6 +209,19 @@ const isDocxFile = (file: File) =>
   file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
   file.name.toLowerCase().endsWith('.docx')
 
+const lucideIconProps = { size: 18, strokeWidth: 2.25 }
+
+const iconButtonClass =
+  'inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/70 text-stone-600 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-105 hover:bg-white hover:text-stone-950 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:bg-white/5 dark:text-stone-200 dark:hover:bg-white/10 dark:hover:text-white dark:focus-visible:ring-orange-400/60'
+const pillButtonClass =
+  'inline-flex items-center justify-center gap-2 rounded-full bg-white/65 px-4 py-2 text-sm font-medium text-stone-700 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:bg-white hover:text-stone-950 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white/5 dark:text-stone-200 dark:hover:bg-white/10 dark:hover:text-white dark:focus-visible:ring-orange-400/60'
+const smallPillButtonClass =
+  'inline-flex items-center justify-center gap-1.5 rounded-full bg-white/65 px-3 py-1.5 text-xs font-medium text-stone-700 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:bg-white hover:text-stone-950 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white/5 dark:text-stone-200 dark:hover:bg-white/10 dark:hover:text-white dark:focus-visible:ring-orange-400/60'
+const sectionToggleClass =
+  'group flex w-full items-center justify-between gap-3 rounded-full bg-white/35 px-4 py-3 text-left backdrop-blur-xl transition-all duration-200 hover:bg-white/55 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:bg-white/5 dark:hover:bg-white/10 dark:focus-visible:ring-orange-400/60'
+const inputSurfaceClass =
+  'w-full rounded-2xl border-transparent bg-white/65 px-3 py-2 text-sm text-neutral-900 outline-none backdrop-blur-xl transition focus:bg-white/80 focus:ring-2 focus:ring-blue-400/20 dark:bg-yBlack-900/65 dark:text-neutral-100 dark:focus:bg-yBlack-900/85 dark:focus:ring-orange-400/20'
+
 const extractTextFromDocx = async (file: File): Promise<string> => {
   const arrayBuffer = await file.arrayBuffer()
   const { value: text } = await mammoth.extractRawText({ arrayBuffer })
@@ -166,6 +248,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
   const [attachmentTarget, setAttachmentTarget] = useState<'system' | 'context'>('system')
   const attachmentInputRef = useRef<HTMLInputElement>(null)
   const [promptContextExpanded, setPromptContextExpanded] = useState(false)
+  const [chatSettingsExpanded, setChatSettingsExpanded] = useState(false)
   const [appStoreOpen, setAppStoreOpen] = useState(false)
 
   // Saved custom themes state
@@ -176,6 +259,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
   const [applyingThemeId, setApplyingThemeId] = useState<string | null>(null)
 
   // Skills section state
+  const [toolsExpanded, setToolsExpanded] = useState(false)
   const [skillsExpanded, setSkillsExpanded] = useState(false)
   const [skillUrl, setSkillUrl] = useState('')
   const [hooksExpanded, setHooksExpanded] = useState(false)
@@ -185,6 +269,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
   const [hookActionStatus, setHookActionStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const [skillInstallStatus, setSkillInstallStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [skillInstallMessage, setSkillInstallMessage] = useState('')
+  const [skillInstallCandidates, setSkillInstallCandidates] = useState<SkillInstallCandidate[]>([])
   const [installedSkills, setInstalledSkills] = useState<
     Array<{ name: string; description: string; enabled: boolean }>
   >([])
@@ -225,7 +310,9 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
   const [newServerCommand, setNewServerCommand] = useState('')
   const [newServerArgs, setNewServerArgs] = useState('')
   const [newServerEnvText, setNewServerEnvText] = useState('')
-  const [newServerStdioFraming, setNewServerStdioFraming] = useState<'content-length' | 'newline-json'>('content-length')
+  const [newServerStdioFraming, setNewServerStdioFraming] = useState<'content-length' | 'newline-json'>(
+    'content-length'
+  )
   const [newServerUrl, setNewServerUrl] = useState('')
   const [newServerHeadersText, setNewServerHeadersText] = useState('')
   const [newServerOauthClientId, setNewServerOauthClientId] = useState('')
@@ -263,6 +350,13 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
     }
   })
 
+  const [streamingThinkingIndicatorPlacement, setStreamingThinkingIndicatorPlacement] =
+    useState<StreamingThinkingIndicatorPlacement>(getStoredStreamingThinkingIndicatorPlacement)
+
+  const [longTermMemoryContextEnabled, setLongTermMemoryContextEnabled] = useState<boolean>(() =>
+    loadLongTermMemoryContextEnabled()
+  )
+
   const handleFontSizeChange = useCallback((value: number) => {
     const next = Math.max(-8, Math.min(16, value)) // Clamp between -8 and +16
     setFontSizeOffset(next)
@@ -294,6 +388,26 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
     document.documentElement.classList.toggle('edit-diff-animations-disabled', !enabled)
   }, [])
 
+  const handleStreamingThinkingIndicatorPlacementChange = useCallback(
+    (placement: StreamingThinkingIndicatorPlacement) => {
+      setStreamingThinkingIndicatorPlacement(placement)
+      try {
+        localStorage.setItem(STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY, placement)
+        window.dispatchEvent(
+          new CustomEvent(STREAMING_THINKING_INDICATOR_PLACEMENT_CHANGE_EVENT, { detail: placement })
+        )
+      } catch {
+        // localStorage unavailable; keep in-memory state only
+      }
+    },
+    []
+  )
+
+  const handleLongTermMemoryContextEnabledChange = useCallback((enabled: boolean) => {
+    setLongTermMemoryContextEnabled(enabled)
+    saveLongTermMemoryContextEnabled(enabled)
+  }, [])
+
   // Use the custom hook for system prompt management
   const {
     prompts: userSystemPrompts,
@@ -304,6 +418,9 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
     setShowSavePromptInput,
     savePromptName,
     setSavePromptName,
+    savePromptStorage,
+    setSavePromptStorage,
+    canSaveToCloud,
     savingPrompt,
     saveError,
     isExistingPrompt,
@@ -503,22 +620,56 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
 
     setSkillInstallStatus('loading')
     setSkillInstallMessage('Downloading and installing skill...')
+    setSkillInstallCandidates([])
 
     try {
-      const data = await localApi.post<{ success?: boolean; skillName?: string; error?: string }>(
-        '/skills/install/url',
-        {
-          url,
-        }
-      )
+      const data = await localApi.post<SkillInstallResult>('/skills/install/url', {
+        url,
+      })
 
       if (data.success) {
         setSkillInstallStatus('success')
-        setSkillInstallMessage(`Successfully installed "${data.skillName}"`)
+        setSkillInstallMessage(formatSkillInstallSuccess(data))
         setSkillUrl('')
         // Refresh skills list
         fetchInstalledSkills()
         // Auto-clear success message after 5 seconds
+        setTimeout(() => {
+          setSkillInstallStatus('idle')
+          setSkillInstallMessage('')
+        }, 5000)
+      } else {
+        setSkillInstallStatus('error')
+        setSkillInstallMessage(data.error || 'Installation failed')
+        setSkillInstallCandidates(data.candidates || [])
+      }
+    } catch (error) {
+      setSkillInstallStatus('error')
+      const payload =
+        error && typeof error === 'object' && 'payload' in error
+          ? (error as { payload?: SkillInstallResult }).payload
+          : undefined
+      setSkillInstallMessage(error instanceof Error ? error.message : 'Network error - is the local server running?')
+      setSkillInstallCandidates(Array.isArray(payload?.candidates) ? payload.candidates : [])
+    }
+  }, [skillUrl, fetchInstalledSkills])
+
+  const handleInstallAllSkills = useCallback(async () => {
+    const url = skillUrl.trim()
+    if (!url || skillInstallCandidates.length === 0) return
+
+    setSkillInstallStatus('loading')
+    setSkillInstallMessage('Downloading and installing all skills...')
+
+    try {
+      const data = await localApi.post<SkillInstallResult>('/skills/install/github/all', { source: url })
+
+      if (data.success) {
+        setSkillInstallStatus('success')
+        setSkillInstallMessage(formatSkillInstallSuccess(data))
+        setSkillUrl('')
+        setSkillInstallCandidates([])
+        fetchInstalledSkills()
         setTimeout(() => {
           setSkillInstallStatus('idle')
           setSkillInstallMessage('')
@@ -531,7 +682,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({ open, onClose }) => 
       setSkillInstallStatus('error')
       setSkillInstallMessage(error instanceof Error ? error.message : 'Network error - is the local server running?')
     }
-  }, [skillUrl, fetchInstalledSkills])
+  }, [skillUrl, skillInstallCandidates.length, fetchInstalledSkills])
 
   // Handle skill enable/disable toggle
   const handleToggleSkill = useCallback(async (skillName: string, currentEnabled: boolean) => {
@@ -1060,6 +1211,21 @@ ${block}`
     hooks: managedHooks.filter(hook => hook.event === event),
   })).filter(group => group.hooks.length > 0)
 
+  const settingsSectionCardStyle = savedCustomThemesColors
+    ? {
+        backgroundColor: savedCustomThemesColors.cardBg,
+        borderColor: savedCustomThemesColors.cardBorder,
+      }
+    : undefined
+  const settingsSectionIconStyle = savedCustomThemesColors
+    ? {
+        backgroundColor: savedCustomThemesColors.accentBg,
+        color: savedCustomThemesColors.accentText,
+      }
+    : undefined
+  const settingsSectionTitleStyle = savedCustomThemesColors ? { color: savedCustomThemesColors.titleText } : undefined
+  const settingsSectionBodyStyle = savedCustomThemesColors ? { color: savedCustomThemesColors.bodyText } : undefined
+
   return (
     <div className='fixed inset-0 z-400 flex items-center justify-center'>
       {/* Overlay */}
@@ -1071,7 +1237,7 @@ ${block}`
       {/* Modal */}
       <div className='py-2 w-full max-w-5xl'>
         <div
-          className={`relative z-50 mx-4 rounded-3xl px-12 py-4 lg:py-6 dark:border-1 dark:border-neutral-900 bg-neutral-100 dark:bg-yBlack-900 shadow-lg overflow-y-scroll no-scrollbar transition-all duration-300 ease-in-out ${
+          className={`relative z-50 mx-4 overflow-y-scroll rounded-[2rem] bg-neutral-50/85 px-5 py-4 backdrop-blur-2xl transition-all duration-300 ease-in-out no-scrollbar dark:bg-yBlack-900/90 sm:px-7 lg:py-6 ${
             tools.some(tool => tool.enabled) ? 'h-[80vh]' : 'h-[58vh]'
           }`}
           onClick={e => e.stopPropagation()}
@@ -1080,26 +1246,20 @@ ${block}`
             backgroundColor: settingsPaneBodyBackgroundColor,
           }}
         >
-          <div className='flex justify-between items-center mb-3 py-4'>
+          <div className='sticky top-0 z-10 mb-4 flex items-center justify-between rounded-full bg-white/35 px-4 py-3 backdrop-blur-2xl dark:bg-white/5'>
             <h2 className='text-2xl font-semibold text-stone-800 dark:text-stone-200'>Chat Settings</h2>
             <div className='flex items-center gap-2'>
               <button
                 onClick={() => setAppStoreOpen(true)}
-                className='p-1 rounded-md transition-all duration-200 hover:scale-95 active:scale-100'
+                className={pillButtonClass}
                 aria-label='Open App Store'
                 title='App Store'
               >
-                <span className='relative text-xl font-semibold leading-none text-gray-600 dark:text-neutral-200'>
-                  {' '}
-                  APP STORE{' '}
-                </span>
+                <Store size={16} strokeWidth={2.25} />
+                App Store
               </button>
-              <button
-                onClick={onClose}
-                className='p-1 rounded-md leading-none transition-colors'
-                aria-label='Close settings'
-              >
-                <i className='bx bx-x text-3xl text-gray-600 dark:text-gray-400 active:scale-95'></i>
+              <button onClick={onClose} className={iconButtonClass} aria-label='Close settings'>
+                <X {...lucideIconProps} />
               </button>
             </div>
           </div>
@@ -1121,18 +1281,24 @@ ${block}`
               <button
                 type='button'
                 onClick={() => setPromptContextExpanded(!promptContextExpanded)}
-                className='flex items-center justify-between w-full text-left'
+                className={sectionToggleClass}
               >
                 <span className='text-[16px] font-medium text-stone-700 dark:text-stone-200'>
                   System Prompt and Context
                 </span>
-                <i
-                  className={`bx bx-chevron-down text-xl text-neutral-500 dark:text-neutral-400 transition-transform duration-200 ${promptContextExpanded ? 'rotate-180' : ''}`}
+                <ChevronDown
+                  {...lucideIconProps}
+                  className={`text-neutral-500 transition-transform duration-200 dark:text-neutral-400 ${promptContextExpanded ? 'rotate-180' : ''}`}
                 />
               </button>
 
-              {promptContextExpanded && (
-                <div className='space-y-6 pl-1 pt-2'>
+              <div
+                className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+                  promptContextExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                }`}
+              >
+                <div className='min-h-0 overflow-hidden'>
+                  <div className='space-y-6 pl-1 pt-2'>
                   {/* System Prompt Section */}
                   <div className='space-y-2'>
                     <div className='flex items-center justify-between'>
@@ -1143,9 +1309,9 @@ ${block}`
                           setAttachmentTarget('system')
                           attachmentInputRef.current?.click()
                         }}
-                        className='flex items-center gap-1 text-sm text-blue-600 dark:text-blue-300 hover:underline'
+                        className={smallPillButtonClass}
                       >
-                        <i className='bx bx-paperclip text-lg' aria-hidden='true'></i>
+                        <Paperclip {...lucideIconProps} aria-hidden='true' />
                         Attach File
                       </button>
                     </div>
@@ -1159,19 +1325,22 @@ ${block}`
                             <button
                               key={prompt.id}
                               onClick={() => handleSelectPrompt(prompt)}
-                              className={`flex items-center justify-center gap-2 flex-shrink-0 h-10 px-4 rounded-xl border transition-all duration-150 ${
+                              className={`flex h-10 shrink-0 items-center justify-center gap-2 rounded-full px-4 text-sm font-medium transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-orange-400/60 ${
                                 selectedPromptId === prompt.id
-                                  ? 'bg-sky-600/70 text-white border-transparent'
-                                  : 'bg-neutral-50 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 border-transparent dark:border-transparent hover:bg-neutral-100 dark:hover:bg-neutral-700'
+                                  ? 'bg-blue-50 text-blue-700 dark:bg-orange-500/15 dark:text-orange-100'
+                                  : 'bg-white/55 text-stone-700 hover:bg-white dark:bg-white/5 dark:text-stone-300 dark:hover:bg-white/10'
                               }`}
                               title={prompt.description || prompt.content.substring(0, 100)}
                             >
                               <span className='font-medium text-sm whitespace-nowrap'>{prompt.name}</span>
                               {prompt.is_default && (
                                 <span className=' pt-0.5 text-xs opacity-70'>
-                                  <i className='bx bxs-star text-base'></i>
+                                  <Star size={16} strokeWidth={2.25} fill='currentColor' />
                                 </span>
                               )}
+                              <span className='rounded-full bg-black/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] opacity-70 dark:bg-white/10'>
+                                {prompt.storage_mode === 'local' ? 'Local' : 'Cloud'}
+                              </span>
                             </button>
                           ))}
                         </div>
@@ -1198,7 +1367,7 @@ ${block}`
                       outline={true}
                       showHelp={false}
                       variant='outline'
-                      className='drop-shadow-xl shadow-[0_0px_12px_3px_rgba(0,0,0,0.05),0_0px_2px_0px_rgba(0,0,0,0.1)] dark:shadow-[0_0px_24px_2px_rgba(0,0,0,0.5),0_0px_2px_2px_rgba(0,0,0,0)]'
+                      className='!rounded-[1.5rem] !border-transparent !bg-white/45 dark:!bg-yBlack-900/40'
                     />
 
                     {/* Save as Prompt / Make Default button */}
@@ -1212,9 +1381,9 @@ ${block}`
                               type='button'
                               onClick={handleRemoveDefault}
                               disabled={removingDefault}
-                              className='flex items-center gap-2 text-sm text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 transition-colors disabled:opacity-50'
+                              className={`${smallPillButtonClass} text-red-600 dark:text-red-300`}
                             >
-                              <i className='bx bxs-star text-base'></i>
+                              <Star size={16} strokeWidth={2.25} fill='currentColor' />
                               {removingDefault ? 'Removing...' : 'Remove Default'}
                             </button>
                           ) : (
@@ -1222,9 +1391,9 @@ ${block}`
                               type='button'
                               onClick={handleMakeDefault}
                               disabled={makingDefault}
-                              className='flex items-center gap-2 text-sm text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 transition-colors disabled:opacity-50'
+                              className={`${smallPillButtonClass} text-amber-700 dark:text-orange-200`}
                             >
-                              <i className='bx bx-star text-base'></i>
+                              <Star size={16} strokeWidth={2.25} />
                               {makingDefault ? 'Setting...' : 'Make Default'}
                             </button>
                           ))
@@ -1235,9 +1404,9 @@ ${block}`
                               <button
                                 type='button'
                                 onClick={() => setShowSavePromptInput(true)}
-                                className='flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors'
+                                className={smallPillButtonClass}
                               >
-                                <i className='bx bx-save text-base'></i>
+                                <Save size={16} strokeWidth={2.25} />
                                 Save as Prompt
                               </button>
                             ) : (
@@ -1249,29 +1418,50 @@ ${block}`
                                     onChange={e => setSavePromptName(e.target.value)}
                                     placeholder='Enter prompt name...'
                                     maxLength={100}
-                                    className='flex-1 px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-transparent'
+                                    className={`min-w-0 flex-1 ${inputSurfaceClass}`}
                                     autoFocus
                                     onKeyDown={e => {
                                       if (e.key === 'Enter') handleSaveAsPrompt()
                                       if (e.key === 'Escape') resetSaveUI()
                                     }}
                                   />
+                                  <div className='flex items-center gap-1 rounded-2xl bg-neutral-100 p-1 dark:bg-neutral-800'>
+                                    {(['local', 'cloud'] as const).map(storage => (
+                                      <button
+                                        key={storage}
+                                        type='button'
+                                        onClick={() => setSavePromptStorage(storage)}
+                                        disabled={storage === 'cloud' && !canSaveToCloud}
+                                        className={`rounded-full px-2 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                                          savePromptStorage === storage
+                                            ? 'bg-blue-50 text-blue-700 dark:bg-orange-500/15 dark:text-orange-100'
+                                            : 'text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-100'
+                                        }`}
+                                        title={
+                                          storage === 'local' ? 'Save only on this device' : 'Save to cloud account'
+                                        }
+                                      >
+                                        {storage === 'local' ? 'Local' : 'Cloud'}
+                                      </button>
+                                    ))}
+                                  </div>
                                   <button
                                     type='button'
                                     onClick={handleSaveAsPrompt}
                                     disabled={!savePromptName.trim() || savingPrompt}
-                                    className='px-3 py-2 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
+                                    className={`${smallPillButtonClass} bg-blue-500 text-white hover:bg-blue-600`}
                                   >
                                     {savingPrompt ? 'Saving...' : 'Save'}
                                   </button>
-                                  <button
-                                    type='button'
-                                    onClick={resetSaveUI}
-                                    className='px-2 py-2 text-sm text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition-colors'
-                                  >
-                                    <i className='bx bx-x text-lg'></i>
+                                  <button type='button' onClick={resetSaveUI} className={iconButtonClass}>
+                                    <X size={18} strokeWidth={2.25} />
                                   </button>
                                 </div>
+                                <p className='text-xs text-neutral-500 dark:text-neutral-400'>
+                                  {savePromptStorage === 'local'
+                                    ? 'Local prompts stay on this device.'
+                                    : 'Cloud prompts sync with your account.'}
+                                </p>
                                 {saveError && <p className='text-sm text-red-500 dark:text-red-400'>{saveError}</p>}
                               </div>
                             )}
@@ -1291,9 +1481,9 @@ ${block}`
                           setAttachmentTarget('context')
                           attachmentInputRef.current?.click()
                         }}
-                        className='flex items-center gap-1 text-sm text-blue-600 dark:text-blue-300 hover:underline'
+                        className={smallPillButtonClass}
                       >
-                        <i className='bx bx-paperclip text-lg' aria-hidden='true'></i>
+                        <Paperclip {...lucideIconProps} aria-hidden='true' />
                         Attach File
                       </button>
                     </div>
@@ -1308,11 +1498,12 @@ ${block}`
                       outline={true}
                       showHelp={false}
                       showCharCount={true}
-                      className='drop-shadow-xl shadow-[0_0px_12px_3px_rgba(0,0,0,0.05),0_0px_2px_0px_rgba(0,0,0,0.1)] dark:shadow-[0_0px_24px_2px_rgba(0,0,0,0.5),0_0px_2px_2px_rgba(0,0,0,0)]'
+                      className='!rounded-[1.5rem] !border-transparent !bg-white/45 dark:!bg-yBlack-900/40'
                     />
                   </div>
+                  </div>
                 </div>
-              )}
+              </div>
             </div>
 
             {/* Font Size Section */}
@@ -1331,7 +1522,7 @@ ${block}`
                 <div className='flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-start sm:justify-between'>
                   <div className='flex min-w-0 items-start gap-3'>
                     <div
-                      className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-100 text-sky-600 dark:bg-sky-500/15 dark:text-sky-300'
+                      className='mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-sky-100 text-sky-600 dark:bg-sky-500/15 dark:text-sky-300'
                       style={
                         savedCustomThemesColors
                           ? {
@@ -1341,7 +1532,7 @@ ${block}`
                           : undefined
                       }
                     >
-                      <i className='bx bx-text text-lg' />
+                      <Type {...lucideIconProps} />
                     </div>
                     <div className='min-w-0'>
                       <p
@@ -1398,7 +1589,7 @@ ${block}`
                       step={1}
                       value={fontSizeOffset}
                       onChange={e => handleFontSizeChange(parseInt(e.target.value, 10))}
-                      className='h-2 flex-1 cursor-pointer appearance-none rounded-lg bg-neutral-200 dark:bg-neutral-700'
+                      className='h-2 flex-1 cursor-pointer appearance-none rounded-2xl bg-neutral-200 dark:bg-neutral-700'
                       style={
                         savedCustomThemesColors
                           ? {
@@ -1417,7 +1608,7 @@ ${block}`
                     <button
                       type='button'
                       onClick={() => handleFontSizeChange(0)}
-                      className={`inline-flex shrink-0 items-center rounded-lg px-3 py-1.5 text-sm font-medium text-neutral-700 dark:text-neutral-100 transition-all duration-150 hover:bg-neutral-200 active:scale-[0.98] active:bg-neutral-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-neutral-700 dark:active:bg-neutral-700/90 dark:focus-visible:ring-violet-500/40 ${fontSizeOffset === 0 ? 'invisible' : ''}`}
+                      className={`inline-flex shrink-0 items-center rounded-full bg-white/65 px-3 py-1.5 text-sm font-medium text-neutral-700 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:bg-white active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:bg-white/5 dark:text-neutral-100 dark:hover:bg-white/10 dark:focus-visible:ring-orange-400/60 ${fontSizeOffset === 0 ? 'invisible' : ''}`}
                       style={
                         savedCustomThemesColors
                           ? {
@@ -1435,7 +1626,301 @@ ${block}`
               </div>
             </div>
 
-            {/* Process Step Grouping Section */}
+            {/* Chat Settings Section */}
+            <div
+              className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
+              style={settingsSectionCardStyle}
+            >
+              <button
+                type='button'
+                onClick={() => setChatSettingsExpanded(!chatSettingsExpanded)}
+                className='group flex w-full items-start justify-between gap-3 rounded-2xl px-3 py-3 text-left transition-all duration-150 hover:bg-neutral-100/80 active:scale-[0.99] active:bg-neutral-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-black/10 dark:active:bg-neutral-800/60 dark:focus-visible:ring-violet-500/40'
+              >
+                <div className='flex min-w-0 items-start gap-3'>
+                  <div
+                    className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300'
+                    style={settingsSectionIconStyle}
+                  >
+                    <LoaderCircle {...lucideIconProps} />
+                  </div>
+                  <div className='min-w-0'>
+                    <p
+                      className='text-sm font-medium text-stone-700 dark:text-stone-200'
+                      style={settingsSectionTitleStyle}
+                    >
+                      Chat Settings
+                    </p>
+                    <p
+                      className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-400'
+                      style={settingsSectionBodyStyle}
+                    >
+                      Configure chat rendering, streaming indicators, and composer animations.
+                    </p>
+                  </div>
+                </div>
+                <ChevronDown
+                  {...lucideIconProps}
+                  className={`mt-2 shrink-0 text-neutral-500 transition-transform duration-200 dark:text-neutral-400 ${chatSettingsExpanded ? 'rotate-180' : ''}`}
+                  style={settingsSectionBodyStyle}
+                />
+              </button>
+
+              <div
+                className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+                  chatSettingsExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                }`}
+              >
+                <div className='min-h-0 overflow-hidden'>
+                  <div className='space-y-3 px-3 pb-3 pt-1'>
+                  {/* Process Step Grouping Section */}
+                  <div className='space-y-2'>
+                    <div
+                      className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
+                      style={
+                        savedCustomThemesColors
+                          ? {
+                              backgroundColor: savedCustomThemesColors.cardBg,
+                              borderColor: savedCustomThemesColors.cardBorder,
+                            }
+                          : undefined
+                      }
+                    >
+                      <div className='flex items-start justify-between gap-3 px-3 py-3'>
+                        <div className='flex min-w-0 items-start gap-3'>
+                          <div
+                            className='mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300'
+                            style={
+                              savedCustomThemesColors
+                                ? {
+                                    backgroundColor: savedCustomThemesColors.accentBg,
+                                    color: savedCustomThemesColors.accentText,
+                                  }
+                                : undefined
+                            }
+                          >
+                            <GitBranch {...lucideIconProps} />
+                          </div>
+                          <div className='min-w-0 pr-3'>
+                            <p
+                              className='text-sm font-medium text-stone-700 dark:text-neutral-100'
+                              style={savedCustomThemesColors ? { color: savedCustomThemesColors.titleText } : undefined}
+                            >
+                              Group continuous reasoning/tool steps
+                            </p>
+                            <p
+                              className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-100'
+                              style={savedCustomThemesColors ? { color: savedCustomThemesColors.bodyText } : undefined}
+                            >
+                              Collapse long chains of agent reasoning and tool calls into one expandable section.
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type='button'
+                          onClick={() => handleGroupToolReasoningRunsChange(!groupToolReasoningRuns)}
+                          className={iconButtonClass}
+                          style={
+                            savedCustomThemesColors
+                              ? {
+                                  backgroundColor: savedCustomThemesColors.buttonBg,
+                                  color: savedCustomThemesColors.buttonText,
+                                }
+                              : undefined
+                          }
+                          title={groupToolReasoningRuns ? 'Disable grouping' : 'Enable grouping'}
+                          aria-pressed={groupToolReasoningRuns}
+                        >
+                          {groupToolReasoningRuns ? (
+                            <Check
+                              {...lucideIconProps}
+                              style={
+                                savedCustomThemesColors ? { color: savedCustomThemesColors.primaryButtonBg } : undefined
+                              }
+                            />
+                          ) : (
+                            <X {...lucideIconProps} />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Edit Diff Expansion Animation Section */}
+                  <div className='space-y-2'>
+                    <div
+                      className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
+                      style={
+                        savedCustomThemesColors
+                          ? {
+                              backgroundColor: savedCustomThemesColors.cardBg,
+                              borderColor: savedCustomThemesColors.cardBorder,
+                            }
+                          : undefined
+                      }
+                    >
+                      <div className='flex items-start justify-between gap-3 px-3 py-3'>
+                        <div className='flex min-w-0 items-start gap-3'>
+                          <div
+                            className='mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300'
+                            style={
+                              savedCustomThemesColors
+                                ? {
+                                    backgroundColor: savedCustomThemesColors.accentBg,
+                                    color: savedCustomThemesColors.accentText,
+                                  }
+                                : undefined
+                            }
+                          >
+                            <Maximize2 {...lucideIconProps} />
+                          </div>
+                          <div className='min-w-0 pr-3'>
+                            <p
+                              className='text-sm font-medium text-stone-700 dark:text-neutral-100'
+                              style={savedCustomThemesColors ? { color: savedCustomThemesColors.titleText } : undefined}
+                            >
+                              Edit diff expansion animation
+                            </p>
+                            <p
+                              className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-100'
+                              style={savedCustomThemesColors ? { color: savedCustomThemesColors.bodyText } : undefined}
+                            >
+                              Animate edit diff expansion. Keep disabled for best scrolling performance in large
+                              virtualized chats.
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type='button'
+                          onClick={() => handleEditDiffAnimationsEnabledChange(!editDiffAnimationsEnabled)}
+                          className={iconButtonClass}
+                          style={
+                            savedCustomThemesColors
+                              ? {
+                                  backgroundColor: savedCustomThemesColors.buttonBg,
+                                  color: savedCustomThemesColors.buttonText,
+                                }
+                              : undefined
+                          }
+                          title={
+                            editDiffAnimationsEnabled
+                              ? 'Disable edit diff expansion animation'
+                              : 'Enable edit diff expansion animation'
+                          }
+                          aria-pressed={editDiffAnimationsEnabled}
+                        >
+                          {editDiffAnimationsEnabled ? (
+                            <Check
+                              {...lucideIconProps}
+                              style={
+                                savedCustomThemesColors ? { color: savedCustomThemesColors.primaryButtonBg } : undefined
+                              }
+                            />
+                          ) : (
+                            <X {...lucideIconProps} />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Streaming Thinking Indicator Section */}
+                  <div className='space-y-2'>
+                    <div
+                      className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
+                      style={
+                        savedCustomThemesColors
+                          ? {
+                              backgroundColor: savedCustomThemesColors.cardBg,
+                              borderColor: savedCustomThemesColors.cardBorder,
+                            }
+                          : undefined
+                      }
+                    >
+                      <div className='flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-start sm:justify-between'>
+                        <div className='flex min-w-0 items-start gap-3'>
+                          <div
+                            className='mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300'
+                            style={
+                              savedCustomThemesColors
+                                ? {
+                                    backgroundColor: savedCustomThemesColors.accentBg,
+                                    color: savedCustomThemesColors.accentText,
+                                  }
+                                : undefined
+                            }
+                          >
+                            <LoaderCircle {...lucideIconProps} />
+                          </div>
+                          <div className='min-w-0 pr-3'>
+                            <p
+                              className='text-sm font-medium text-stone-700 dark:text-neutral-100'
+                              style={savedCustomThemesColors ? { color: savedCustomThemesColors.titleText } : undefined}
+                            >
+                              Streaming thinking indicator
+                            </p>
+                            <p
+                              className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-100'
+                              style={savedCustomThemesColors ? { color: savedCustomThemesColors.bodyText } : undefined}
+                            >
+                              Choose where the animated thinking text appears while a response is running.
+                            </p>
+                          </div>
+                        </div>
+                        <div className='flex shrink-0 flex-wrap items-center gap-2'>
+                          {[
+                            { value: 'message' as const, label: 'Message row' },
+                            { value: 'input-tab' as const, label: 'Input tab' },
+                          ].map(option => {
+                            const selected = streamingThinkingIndicatorPlacement === option.value
+                            return (
+                              <button
+                                key={option.value}
+                                type='button'
+                                onClick={() => handleStreamingThinkingIndicatorPlacementChange(option.value)}
+                                className={`rounded-2xl px-3 py-1.5 text-xs font-medium transition-all duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:focus-visible:ring-violet-500/40 ${
+                                  selected
+                                    ? 'bg-blue-50 text-blue-700 dark:bg-orange-500/15 dark:text-orange-100'
+                                    : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200 dark:bg-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-700'
+                                }`}
+                                style={
+                                  savedCustomThemesColors
+                                    ? selected
+                                      ? {
+                                          backgroundColor: savedCustomThemesColors.primaryButtonBg,
+                                          color: savedCustomThemesColors.primaryButtonText,
+                                        }
+                                      : {
+                                          backgroundColor: savedCustomThemesColors.buttonBg,
+                                          color: savedCustomThemesColors.buttonText,
+                                        }
+                                    : undefined
+                                }
+                                aria-pressed={selected}
+                              >
+                                {option.label}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Send Button Animation Section */}
+                  <div className='space-y-2'>
+                    <SendButtonAnimationSettings sectionThemeColors={savedCustomThemesColors} />
+                  </div>
+
+                  {/* Chat Input Border Animation Section */}
+                  <div className='space-y-2'>
+                    <ChatInputBorderAnimationSettings sectionThemeColors={savedCustomThemesColors} />
+                  </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Long-term Memory Section */}
             <div className='space-y-2'>
               <div
                 className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
@@ -1451,7 +1936,7 @@ ${block}`
                 <div className='flex items-start justify-between gap-3 px-3 py-3'>
                   <div className='flex min-w-0 items-start gap-3'>
                     <div
-                      className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300'
+                      className='mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-600 dark:bg-amber-500/15 dark:text-amber-300'
                       style={
                         savedCustomThemesColors
                           ? {
@@ -1461,27 +1946,29 @@ ${block}`
                           : undefined
                       }
                     >
-                      <i className='bx bx-git-branch text-lg' />
+                      <Brain {...lucideIconProps} />
                     </div>
                     <div className='min-w-0 pr-3'>
                       <p
                         className='text-sm font-medium text-stone-700 dark:text-neutral-100'
                         style={savedCustomThemesColors ? { color: savedCustomThemesColors.titleText } : undefined}
                       >
-                        Group continuous reasoning/tool steps
+                        Include memory context
                       </p>
                       <p
                         className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-100'
                         style={savedCustomThemesColors ? { color: savedCustomThemesColors.bodyText } : undefined}
                       >
-                        Collapse long chains of agent reasoning and tool calls into one expandable section.
+                        Adds <code>.ygg/memory/memory.md</code>, <code>.ygg/memory/recent_memory.md</code>, and the
+                        active project&apos;s <code>project_memory.md</code> to new model requests after the system
+                        prompt. Disabling this does not delete memory or stop the Stop hook from updating the files.
                       </p>
                     </div>
                   </div>
                   <button
                     type='button'
-                    onClick={() => handleGroupToolReasoningRunsChange(!groupToolReasoningRuns)}
-                    className='rounded-lg p-1.5 text-neutral-500 dark:text-neutral-100 transition-all duration-150 hover:bg-neutral-200/90 active:scale-95 active:bg-neutral-300/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-neutral-700/80 dark:active:bg-neutral-700 dark:focus-visible:ring-violet-500/40'
+                    onClick={() => handleLongTermMemoryContextEnabledChange(!longTermMemoryContextEnabled)}
+                    className={iconButtonClass}
                     style={
                       savedCustomThemesColors
                         ? {
@@ -1490,101 +1977,20 @@ ${block}`
                           }
                         : undefined
                     }
-                    title={groupToolReasoningRuns ? 'Disable grouping' : 'Enable grouping'}
-                    aria-pressed={groupToolReasoningRuns}
+                    title={longTermMemoryContextEnabled ? 'Disable memory context' : 'Enable memory context'}
+                    aria-pressed={longTermMemoryContextEnabled}
                   >
-                    <i
-                      className={`bx ${groupToolReasoningRuns ? 'bx-toggle-right' : 'bx-toggle-left'} text-2xl`}
-                      style={
-                        groupToolReasoningRuns && savedCustomThemesColors
-                          ? { color: savedCustomThemesColors.primaryButtonBg }
-                          : undefined
-                      }
-                    ></i>
+                    {longTermMemoryContextEnabled ? (
+                      <Check
+                        {...lucideIconProps}
+                        style={savedCustomThemesColors ? { color: savedCustomThemesColors.primaryButtonBg } : undefined}
+                      />
+                    ) : (
+                      <X {...lucideIconProps} />
+                    )}
                   </button>
                 </div>
               </div>
-            </div>
-
-            {/* Edit Diff Expansion Animation Section */}
-            <div className='space-y-2'>
-              <div
-                className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
-                style={
-                  savedCustomThemesColors
-                    ? {
-                        backgroundColor: savedCustomThemesColors.cardBg,
-                        borderColor: savedCustomThemesColors.cardBorder,
-                      }
-                    : undefined
-                }
-              >
-                <div className='flex items-start justify-between gap-3 px-3 py-3'>
-                  <div className='flex min-w-0 items-start gap-3'>
-                    <div
-                      className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300'
-                      style={
-                        savedCustomThemesColors
-                          ? {
-                              backgroundColor: savedCustomThemesColors.accentBg,
-                              color: savedCustomThemesColors.accentText,
-                            }
-                          : undefined
-                      }
-                    >
-                      <i className='bx bx-expand-vertical text-lg' />
-                    </div>
-                    <div className='min-w-0 pr-3'>
-                      <p
-                        className='text-sm font-medium text-stone-700 dark:text-neutral-100'
-                        style={savedCustomThemesColors ? { color: savedCustomThemesColors.titleText } : undefined}
-                      >
-                        Edit diff expansion animation
-                      </p>
-                      <p
-                        className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-100'
-                        style={savedCustomThemesColors ? { color: savedCustomThemesColors.bodyText } : undefined}
-                      >
-                        Animate edit diff expansion. Keep disabled for best scrolling performance in large virtualized chats.
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    type='button'
-                    onClick={() => handleEditDiffAnimationsEnabledChange(!editDiffAnimationsEnabled)}
-                    className='rounded-lg p-1.5 text-neutral-500 dark:text-neutral-100 transition-all duration-150 hover:bg-neutral-200/90 active:scale-95 active:bg-neutral-300/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-neutral-700/80 dark:active:bg-neutral-700 dark:focus-visible:ring-violet-500/40'
-                    style={
-                      savedCustomThemesColors
-                        ? {
-                            backgroundColor: savedCustomThemesColors.buttonBg,
-                            color: savedCustomThemesColors.buttonText,
-                          }
-                        : undefined
-                    }
-                    title={editDiffAnimationsEnabled ? 'Disable edit diff expansion animation' : 'Enable edit diff expansion animation'}
-                    aria-pressed={editDiffAnimationsEnabled}
-                  >
-                    <i
-                      className={`bx ${editDiffAnimationsEnabled ? 'bx-toggle-right' : 'bx-toggle-left'} text-2xl`}
-                      style={
-                        editDiffAnimationsEnabled && savedCustomThemesColors
-                          ? { color: savedCustomThemesColors.primaryButtonBg }
-                          : undefined
-                      }
-                    ></i>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Send Button Animation Section */}
-            <div className='space-y-2'>
-              <SendButtonAnimationSettings sectionThemeColors={savedCustomThemesColors} />
-            </div>
-
-            {/* Chat Input Border Animation Section */}
-            <div className='space-y-2'>
-              <ChatInputBorderAnimationSettings sectionThemeColors={savedCustomThemesColors} />
             </div>
 
             {/* Custom Theme Section */}
@@ -1607,7 +2013,7 @@ ${block}`
                 >
                   <div className='flex min-w-0 items-start gap-3'>
                     <div
-                      className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300'
+                      className='mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300'
                       style={
                         savedCustomThemesColors
                           ? {
@@ -1617,7 +2023,7 @@ ${block}`
                           : undefined
                       }
                     >
-                      <i className='bx bx-palette text-lg' />
+                      <Palette {...lucideIconProps} />
                     </div>
                     <div className='min-w-0'>
                       <p
@@ -1648,17 +2054,23 @@ ${block}`
                       </p>
                     </div>
                   </div>
-                  <i
-                    className={`bx bx-chevron-down mt-2 shrink-0 text-2xl text-neutral-500 dark:text-neutral-400 transition-transform duration-200 ${savedThemesExpanded ? 'rotate-180' : ''}`}
+                  <ChevronDown
+                    {...lucideIconProps}
+                    className={`mt-2 shrink-0 text-neutral-500 transition-transform duration-200 dark:text-neutral-400 ${savedThemesExpanded ? 'rotate-180' : ''}`}
                     style={savedCustomThemesColors ? { color: savedCustomThemesColors.bodyText } : undefined}
                   />
                 </button>
 
-                {savedThemesExpanded && (
-                  <div
-                    className='space-y-3 px-3 pb-3 pt-1'
-                    style={savedCustomThemesColors ? { borderColor: savedCustomThemesColors.panelBorder } : undefined}
-                  >
+                <div
+                  className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+                    savedThemesExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                  }`}
+                >
+                  <div className='min-h-0 overflow-hidden'>
+                    <div
+                      className='space-y-3 px-3 pb-3 pt-1'
+                      style={savedCustomThemesColors ? { borderColor: savedCustomThemesColors.panelBorder } : undefined}
+                    >
                     <div
                       className='flex flex-wrap items-center justify-between gap-3 rounded-xl bg-neutral-100/70 px-3 py-3 dark:bg-neutral-900/25'
                       style={
@@ -1702,12 +2114,13 @@ ${block}`
                       <button
                         type='button'
                         onClick={() => setCustomChatThemeEnabled(!customThemeEnabled)}
-                        className='rounded-lg p-1.5 transition-all duration-150 hover:bg-neutral-200/90 active:scale-95 active:bg-neutral-300/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-neutral-700/80 dark:active:bg-neutral-700 dark:focus-visible:ring-violet-500/40'
+                        className='rounded-2xl p-1.5 transition-all duration-150 hover:bg-neutral-200/90 active:scale-95 active:bg-neutral-300/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-neutral-700/80 dark:active:bg-neutral-700 dark:focus-visible:ring-violet-500/40'
                         title={customThemeEnabled ? 'Disable custom theme' : 'Enable custom theme'}
                         aria-pressed={customThemeEnabled}
                       >
-                        <i
-                          className={`bx ${customThemeEnabled ? 'bx-toggle-right text-green-500' : 'bx-toggle-left text-neutral-400'} text-2xl`}
+                        <Check
+                          {...lucideIconProps}
+                          className={customThemeEnabled ? 'text-green-500' : 'text-neutral-400'}
                         />
                       </button>
                     </div>
@@ -1725,7 +2138,7 @@ ${block}`
                         type='button'
                         onClick={fetchSavedThemes}
                         disabled={savedThemesLoading}
-                        className='inline-flex items-center gap-1.5 rounded-lg bg-neutral-100 px-3 py-1.5 text-xs font-medium text-neutral-700 transition-all duration-150 hover:bg-neutral-200 active:scale-[0.98] active:bg-neutral-300 disabled:opacity-50 dark:bg-neutral-800/80 dark:text-neutral-200 dark:hover:bg-neutral-700 dark:active:bg-neutral-700/90'
+                        className='inline-flex items-center gap-1.5 rounded-full bg-neutral-100 px-3 py-1.5 text-xs font-medium text-neutral-700 transition-all duration-150 hover:bg-neutral-200 active:scale-[0.98] active:bg-neutral-300 disabled:opacity-50 dark:bg-neutral-800/80 dark:text-neutral-200 dark:hover:bg-neutral-700 dark:active:bg-neutral-700/90'
                         style={
                           savedCustomThemesColors
                             ? {
@@ -1736,22 +2149,24 @@ ${block}`
                             : undefined
                         }
                       >
-                        <i
-                          className={`bx ${savedThemesLoading ? 'bx-loader-alt animate-spin' : 'bx-refresh'} text-sm`}
-                        />
+                        {savedThemesLoading ? (
+                          <LoaderCircle size={14} strokeWidth={2.25} className='animate-spin' />
+                        ) : (
+                          <RefreshCw size={14} strokeWidth={2.25} />
+                        )}
                         {savedThemesLoading ? 'Refreshing…' : 'Refresh'}
                       </button>
                     </div>
 
                     {savedThemesError && (
-                      <div className='rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:bg-rose-950/30 dark:text-rose-300'>
+                      <div className='rounded-2xl bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:bg-rose-950/30 dark:text-rose-300'>
                         {savedThemesError}
                       </div>
                     )}
 
                     {savedThemesLoading && savedThemes.length === 0 && !savedThemesError ? (
-                      <div className='flex items-center gap-2 rounded-lg bg-neutral-100/80 px-3 py-3 text-sm text-neutral-500 dark:bg-neutral-900/30 dark:text-neutral-400'>
-                        <i className='bx bx-loader-alt animate-spin text-base' />
+                      <div className='flex items-center gap-2 rounded-2xl bg-neutral-100/80 px-3 py-3 text-sm text-neutral-500 dark:bg-neutral-900/30 dark:text-neutral-400'>
+                        <LoaderCircle size={16} strokeWidth={2.25} className='animate-spin' />
                         Loading saved themes...
                       </div>
                     ) : savedThemes.length === 0 && !savedThemesError ? (
@@ -1767,7 +2182,7 @@ ${block}`
                         }
                       >
                         <div className='mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-neutral-200/80 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400'>
-                          <i className='bx bx-folder-open text-lg' />
+                          <FolderOpen {...lucideIconProps} />
                         </div>
                         <p
                           className='text-sm font-medium text-neutral-700 dark:text-neutral-200'
@@ -1802,8 +2217,8 @@ ${block}`
                             >
                               <div className='min-w-0 flex-1'>
                                 <div className='flex items-start gap-3'>
-                                  <div className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/80 text-neutral-500 dark:bg-neutral-900/70 dark:text-neutral-300'>
-                                    <i className='bx bx-file-blank text-lg' />
+                                  <div className='mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/80 text-neutral-500 dark:bg-neutral-900/70 dark:text-neutral-300'>
+                                    <FileJson {...lucideIconProps} />
                                   </div>
                                   <div className='min-w-0 flex-1'>
                                     <div className='flex flex-wrap items-center gap-2'>
@@ -1850,7 +2265,7 @@ ${block}`
                                 type='button'
                                 onClick={() => handleApplySavedTheme(themeItem.id)}
                                 disabled={applyingThemeId === themeItem.id}
-                                className='inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-blue-500 px-3 py-2 text-xs font-medium text-white transition-all duration-150 hover:bg-blue-600 active:scale-[0.98] active:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 disabled:opacity-50 dark:focus-visible:ring-blue-500/40'
+                                className='inline-flex shrink-0 items-center justify-center gap-1.5 rounded-full bg-blue-500 px-3 py-2 text-xs font-medium text-white transition-all duration-150 hover:bg-blue-600 active:scale-[0.98] active:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 disabled:opacity-50 dark:focus-visible:ring-blue-500/40'
                                 style={
                                   savedCustomThemesColors
                                     ? {
@@ -1860,9 +2275,11 @@ ${block}`
                                     : undefined
                                 }
                               >
-                                <i
-                                  className={`bx ${applyingThemeId === themeItem.id ? 'bx-loader-alt animate-spin' : 'bx-check'} text-sm`}
-                                />
+                                {applyingThemeId === themeItem.id ? (
+                                  <LoaderCircle size={14} strokeWidth={2.25} className='animate-spin' />
+                                ) : (
+                                  <Check size={14} strokeWidth={2.25} />
+                                )}
                                 {applyingThemeId === themeItem.id ? 'Applying…' : 'Apply'}
                               </button>
                             </div>
@@ -1870,32 +2287,112 @@ ${block}`
                         </div>
                       </div>
                     )}
+
+                    <ThemeManager />
+                    </div>
                   </div>
-                )}
+                </div>
               </div>
-              <ThemeManager />
             </div>
 
             {/* Tools Section */}
-            <div>
-              <ToolsSettings />
+            <div
+              className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
+              style={settingsSectionCardStyle}
+            >
+              <button
+                type='button'
+                onClick={() => setToolsExpanded(!toolsExpanded)}
+                className='group flex w-full items-start justify-between gap-3 rounded-2xl px-3 py-3 text-left transition-all duration-150 hover:bg-neutral-100/80 active:scale-[0.99] active:bg-neutral-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-black/10 dark:active:bg-neutral-800/60 dark:focus-visible:ring-violet-500/40'
+              >
+                <div className='flex min-w-0 items-start gap-3'>
+                  <div
+                    className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300'
+                    style={settingsSectionIconStyle}
+                  >
+                    <Wrench {...lucideIconProps} />
+                  </div>
+                  <div className='min-w-0'>
+                    <p
+                      className='text-sm font-medium text-stone-700 dark:text-stone-200'
+                      style={settingsSectionTitleStyle}
+                    >
+                      Tools
+                    </p>
+                    <p
+                      className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-400'
+                      style={settingsSectionBodyStyle}
+                    >
+                      Configure tool access and availability for chats.
+                    </p>
+                  </div>
+                </div>
+                <ChevronDown
+                  {...lucideIconProps}
+                  className={`mt-2 shrink-0 text-neutral-500 transition-transform duration-200 dark:text-neutral-400 ${toolsExpanded ? 'rotate-180' : ''}`}
+                  style={settingsSectionBodyStyle}
+                />
+              </button>
+
+              <div
+                className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+                  toolsExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                }`}
+              >
+                <div className='min-h-0 overflow-hidden'>
+                  <div className='px-3 pb-3 pt-1'>
+                    <ToolsSettings />
+                  </div>
+                </div>
+              </div>
             </div>
 
             {!isWebMode && (
-              <div className='space-y-2'>
+              <div
+                className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
+                style={settingsSectionCardStyle}
+              >
                 <button
                   type='button'
                   onClick={() => setHooksExpanded(!hooksExpanded)}
-                  className='flex items-center justify-between w-full text-left'
+                  className='group flex w-full items-start justify-between gap-3 rounded-2xl px-3 py-3 text-left transition-all duration-150 hover:bg-neutral-100/80 active:scale-[0.99] active:bg-neutral-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-black/10 dark:active:bg-neutral-800/60 dark:focus-visible:ring-violet-500/40'
                 >
-                  <span className='text-[16px] font-medium text-stone-700 dark:text-stone-200'>Hooks</span>
-                  <i
-                    className={`bx bx-chevron-down text-xl text-neutral-500 dark:text-neutral-400 transition-transform duration-200 ${hooksExpanded ? 'rotate-180' : ''}`}
+                  <div className='flex min-w-0 items-start gap-3'>
+                    <div
+                      className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-100 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300'
+                      style={settingsSectionIconStyle}
+                    >
+                      <GitBranch {...lucideIconProps} />
+                    </div>
+                    <div className='min-w-0'>
+                      <p
+                        className='text-sm font-medium text-stone-700 dark:text-stone-200'
+                        style={settingsSectionTitleStyle}
+                      >
+                        Hooks
+                      </p>
+                      <p
+                        className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-400'
+                        style={settingsSectionBodyStyle}
+                      >
+                        Manage project and runtime automation hooks.
+                      </p>
+                    </div>
+                  </div>
+                  <ChevronDown
+                    {...lucideIconProps}
+                    className={`mt-2 shrink-0 text-neutral-500 transition-transform duration-200 dark:text-neutral-400 ${hooksExpanded ? 'rotate-180' : ''}`}
+                    style={settingsSectionBodyStyle}
                   />
                 </button>
 
-                {hooksExpanded && (
-                  <div className='space-y-4 pl-1 pt-2'>
+                <div
+                  className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+                    hooksExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                  }`}
+                >
+                  <div className='min-h-0 overflow-hidden'>
+                    <div className='space-y-4 px-3 pb-3 pt-1'>
                     <div className='flex items-center justify-between gap-3'>
                       <p className='text-sm text-neutral-600 dark:text-neutral-400'>
                         Enable or disable individual managed hooks from your .ygg settings files.
@@ -1904,7 +2401,7 @@ ${block}`
                         type='button'
                         onClick={fetchManagedHooks}
                         disabled={hooksLoading}
-                        className='px-2.5 py-1.5 rounded-md text-xs border border-neutral-300 dark:border-neutral-600 text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-700 disabled:opacity-50'
+                        className={smallPillButtonClass}
                       >
                         {hooksLoading ? 'Refreshing…' : 'Refresh'}
                       </button>
@@ -1912,22 +2409,24 @@ ${block}`
 
                     {hookActionStatus && (
                       <div
-                        className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg ${
+                        className={`flex items-center gap-2 text-sm px-3 py-2 rounded-2xl ${
                           hookActionStatus.type === 'success'
                             ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
                             : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400'
                         }`}
                       >
-                        <i
-                          className={`bx ${hookActionStatus.type === 'success' ? 'bx-check-circle' : 'bx-error-circle'} text-base`}
-                        ></i>
+                        {hookActionStatus.type === 'success' ? (
+                          <CheckCircle size={16} strokeWidth={2.25} />
+                        ) : (
+                          <AlertCircle size={16} strokeWidth={2.25} />
+                        )}
                         {hookActionStatus.message}
                       </div>
                     )}
 
                     {hooksLoading ? (
                       <div className='flex items-center gap-2 text-sm text-neutral-500 dark:text-neutral-400'>
-                        <i className='bx bx-loader-alt animate-spin'></i>
+                        <LoaderCircle size={16} strokeWidth={2.25} className='animate-spin' />
                         Loading hooks...
                       </div>
                     ) : managedHooks.length === 0 ? (
@@ -1943,7 +2442,7 @@ ${block}`
                               {group.hooks.map(hook => (
                                 <div
                                   key={hook.id}
-                                  className='flex items-center justify-between p-3 rounded-lg bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700 gap-3'
+                                  className='flex items-center justify-between gap-3 rounded-2xl bg-neutral-50/70 p-3 dark:bg-neutral-800/50'
                                 >
                                   <div className='flex-1 min-w-0'>
                                     <div className='flex items-center gap-2 flex-wrap'>
@@ -1959,6 +2458,22 @@ ${block}`
                                       >
                                         {hook.enabled ? 'Enabled' : 'Disabled'}
                                       </span>
+                                      <span
+                                        className={`text-xs px-1.5 py-0.5 rounded ${
+                                          hook.executionMode === 'async'
+                                            ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
+                                            : hook.executionMode === 'sync'
+                                              ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300'
+                                              : 'bg-neutral-200 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400'
+                                        }`}
+                                        title={
+                                          hook.executionMode
+                                            ? 'Explicit hook execution mode'
+                                            : 'Default hook execution mode'
+                                        }
+                                      >
+                                        {hook.executionMode ?? 'default mode'}
+                                      </span>
                                     </div>
                                     <p className='text-xs text-neutral-500 dark:text-neutral-400 mt-1 break-all'>
                                       {hook.sourceFileName}
@@ -1966,18 +2481,20 @@ ${block}`
                                         ? ` · Matcher: ${Array.isArray(hook.matcher) ? hook.matcher.join(', ') : hook.matcher}`
                                         : ''}
                                       {typeof hook.timeoutMs === 'number' ? ` · Timeout: ${hook.timeoutMs}ms` : ''}
+                                      {hook.executionMode ? ` · Mode: ${hook.executionMode}` : ''}
                                     </p>
                                   </div>
                                   <button
                                     type='button'
                                     onClick={() => handleToggleHook(hook)}
                                     disabled={updatingHooks.has(hook.id)}
-                                    className='p-1.5 rounded hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors disabled:opacity-50'
+                                    className={iconButtonClass}
                                     title={hook.enabled ? 'Disable hook' : 'Enable hook'}
                                   >
-                                    <i
-                                      className={`bx ${hook.enabled ? 'bx-toggle-right text-green-500' : 'bx-toggle-left text-neutral-400'} text-xl`}
-                                    ></i>
+                                    <Check
+                                      {...lucideIconProps}
+                                      className={hook.enabled ? 'text-green-500' : 'text-neutral-400'}
+                                    />
                                   </button>
                                 </div>
                               ))}
@@ -1986,26 +2503,58 @@ ${block}`
                         ))}
                       </div>
                     )}
+                    </div>
                   </div>
-                )}
+                </div>
               </div>
             )}
 
             {/* Skills Section */}
-            <div className='space-y-2'>
+            <div
+              className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
+              style={settingsSectionCardStyle}
+            >
               <button
                 type='button'
                 onClick={() => setSkillsExpanded(!skillsExpanded)}
-                className='flex items-center justify-between w-full text-left'
+                className='group flex w-full items-start justify-between gap-3 rounded-2xl px-3 py-3 text-left transition-all duration-150 hover:bg-neutral-100/80 active:scale-[0.99] active:bg-neutral-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-black/10 dark:active:bg-neutral-800/60 dark:focus-visible:ring-violet-500/40'
               >
-                <span className='text-[16px] font-medium text-stone-700 dark:text-stone-200'>Skills</span>
-                <i
-                  className={`bx bx-chevron-down text-xl text-neutral-500 dark:text-neutral-400 transition-transform duration-200 ${skillsExpanded ? 'rotate-180' : ''}`}
+                <div className='flex min-w-0 items-start gap-3'>
+                  <div
+                    className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-100 text-amber-600 dark:bg-amber-500/15 dark:text-amber-300'
+                    style={settingsSectionIconStyle}
+                  >
+                    <Sparkles {...lucideIconProps} />
+                  </div>
+                  <div className='min-w-0'>
+                    <p
+                      className='text-sm font-medium text-stone-700 dark:text-stone-200'
+                      style={settingsSectionTitleStyle}
+                    >
+                      Skills
+                    </p>
+                    <p
+                      className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-400'
+                      style={settingsSectionBodyStyle}
+                    >
+                      Install and toggle reusable agent capabilities.
+                    </p>
+                  </div>
+                </div>
+                <ChevronDown
+                  {...lucideIconProps}
+                  className={`mt-2 shrink-0 text-neutral-500 transition-transform duration-200 dark:text-neutral-400 ${skillsExpanded ? 'rotate-180' : ''}`}
+                  style={settingsSectionBodyStyle}
                 />
               </button>
 
-              {skillsExpanded && (
-                <div className='space-y-4 pl-1 pt-2'>
+              <div
+                className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+                  skillsExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                }`}
+              >
+                <div className='min-h-0 overflow-hidden'>
+                  <div className='space-y-4 px-3 pb-3 pt-1'>
                   <p className='text-sm text-neutral-600 dark:text-neutral-400'>
                     Install skills from{' '}
                     <a
@@ -2016,7 +2565,7 @@ ${block}`
                     >
                       ClawdHub
                     </a>{' '}
-                    or GitHub. Paste the skill page URL below.
+                    or GitHub. Paste a skill page, skill folder, or repository URL below.
                   </p>
 
                   {/* URL Input and Install Button */}
@@ -2026,7 +2575,7 @@ ${block}`
                       value={skillUrl}
                       onChange={e => setSkillUrl(e.target.value)}
                       placeholder='https://clawdhub.com/owner/skill-name'
-                      className='flex-1 px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                      className={`min-w-0 flex-1 ${inputSurfaceClass}`}
                       disabled={skillInstallStatus === 'loading'}
                       onKeyDown={e => {
                         if (e.key === 'Enter' && skillUrl.trim()) {
@@ -2038,16 +2587,16 @@ ${block}`
                       type='button'
                       onClick={handleInstallSkill}
                       disabled={!skillUrl.trim() || skillInstallStatus === 'loading'}
-                      className='px-4 py-2 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2'
+                      className={`${pillButtonClass} bg-blue-500 text-white hover:bg-blue-600`}
                     >
                       {skillInstallStatus === 'loading' ? (
                         <>
-                          <i className='bx bx-loader-alt animate-spin text-base'></i>
+                          <LoaderCircle size={16} strokeWidth={2.25} className='animate-spin' />
                           Installing...
                         </>
                       ) : (
                         <>
-                          <i className='bx bx-download text-base'></i>
+                          <Download size={16} strokeWidth={2.25} />
                           Install
                         </>
                       )}
@@ -2057,7 +2606,7 @@ ${block}`
                   {/* Status Message */}
                   {skillInstallMessage && (
                     <div
-                      className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg ${
+                      className={`flex items-center gap-2 text-sm px-3 py-2 rounded-2xl ${
                         skillInstallStatus === 'success'
                           ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
                           : skillInstallStatus === 'error'
@@ -2065,22 +2614,55 @@ ${block}`
                             : 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400'
                       }`}
                     >
-                      <i
-                        className={`bx ${
-                          skillInstallStatus === 'success'
-                            ? 'bx-check-circle'
-                            : skillInstallStatus === 'error'
-                              ? 'bx-error-circle'
-                              : 'bx-loader-alt animate-spin'
-                        } text-base`}
-                      ></i>
-                      {skillInstallMessage}
+                      {skillInstallStatus === 'success' ? (
+                        <CheckCircle size={16} strokeWidth={2.25} />
+                      ) : skillInstallStatus === 'error' ? (
+                        <AlertCircle size={16} strokeWidth={2.25} />
+                      ) : (
+                        <LoaderCircle size={16} strokeWidth={2.25} className='animate-spin' />
+                      )}
+                      <span>{skillInstallMessage}</span>
+                    </div>
+                  )}
+
+                  {skillInstallCandidates.length > 0 && (
+                    <div className='space-y-2 rounded-2xl border border-red-200 dark:border-red-800/60 bg-red-50 dark:bg-red-950/20 px-3 py-2'>
+                      <div className='flex flex-wrap items-center justify-between gap-2'>
+                        <p className='text-xs font-medium text-red-700 dark:text-red-300'>
+                          Choose a specific skill, or install them all as a grouped repo:
+                        </p>
+                        <button
+                          type='button'
+                          onClick={handleInstallAllSkills}
+                          disabled={skillInstallStatus === 'loading'}
+                          className='rounded-full bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed'
+                        >
+                          Install all under repo name
+                        </button>
+                      </div>
+                      <div className='flex flex-wrap gap-2'>
+                        {skillInstallCandidates.map(candidate => (
+                          <button
+                            key={candidate.url}
+                            type='button'
+                            onClick={() => {
+                              setSkillUrl(candidate.url)
+                              setSkillInstallCandidates([])
+                              setSkillInstallMessage(`Ready to install ${candidate.name}`)
+                            }}
+                            className='rounded-full bg-white dark:bg-neutral-800 px-2 py-1 text-xs text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/40'
+                          >
+                            {candidate.name}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
 
                   {/* Help text */}
                   <p className='text-xs text-neutral-500 dark:text-neutral-500'>
-                    Supported URLs: ClawdHub pages (clawdhub.com/owner/skill), GitHub repos
+                    Supported URLs: ClawdHub pages, GitHub skill folders, or GitHub repos. Multi-skill repos can be
+                    installed individually or grouped under the repo name.
                   </p>
 
                   {/* Installed Skills List */}
@@ -2091,7 +2673,7 @@ ${block}`
 
                     {skillsLoading ? (
                       <div className='flex items-center gap-2 text-sm text-neutral-500 dark:text-neutral-400'>
-                        <i className='bx bx-loader-alt animate-spin'></i>
+                        <LoaderCircle size={16} strokeWidth={2.25} className='animate-spin' />
                         Loading skills...
                       </div>
                     ) : installedSkills.length === 0 ? (
@@ -2103,7 +2685,7 @@ ${block}`
                         {installedSkills.map(skill => (
                           <div
                             key={skill.name}
-                            className='flex items-center justify-between p-3 rounded-lg bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700'
+                            className='flex items-center justify-between gap-3 rounded-2xl bg-neutral-50/70 p-3 dark:bg-neutral-800/50'
                           >
                             <div className='flex-1 min-w-0'>
                               <div className='flex items-center gap-2'>
@@ -2128,20 +2710,21 @@ ${block}`
                               <button
                                 type='button'
                                 onClick={() => handleToggleSkill(skill.name, skill.enabled)}
-                                className='p-1.5 rounded hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors'
+                                className={iconButtonClass}
                                 title={skill.enabled ? 'Disable skill' : 'Enable skill'}
                               >
-                                <i
-                                  className={`bx ${skill.enabled ? 'bx-toggle-right text-green-500' : 'bx-toggle-left text-neutral-400'} text-xl`}
-                                ></i>
+                                <Check
+                                  {...lucideIconProps}
+                                  className={skill.enabled ? 'text-green-500' : 'text-neutral-400'}
+                                />
                               </button>
                               <button
                                 type='button'
                                 onClick={() => handleUninstallSkill(skill.name)}
-                                className='p-1.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors text-neutral-400 hover:text-red-500'
+                                className={`${iconButtonClass} hover:text-red-500 dark:hover:text-red-300`}
                                 title='Uninstall skill'
                               >
-                                <i className='bx bx-trash text-lg'></i>
+                                <Trash2 {...lucideIconProps} />
                               </button>
                             </div>
                           </div>
@@ -2149,31 +2732,63 @@ ${block}`
                       </div>
                     )}
                   </div>
+                  </div>
                 </div>
-              )}
+              </div>
             </div>
 
             {/* MCP Servers Section */}
-            <div className='space-y-2'>
+            <div
+              className='overflow-hidden rounded-2xl bg-neutral-50/70 dark:bg-neutral-900/10'
+              style={settingsSectionCardStyle}
+            >
               <button
                 type='button'
                 onClick={() => setMcpExpanded(!mcpExpanded)}
-                className='flex items-center justify-between w-full text-left'
+                className='group flex w-full items-start justify-between gap-3 rounded-2xl px-3 py-3 text-left transition-all duration-150 hover:bg-neutral-100/80 active:scale-[0.99] active:bg-neutral-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 dark:hover:bg-black/10 dark:active:bg-neutral-800/60 dark:focus-visible:ring-violet-500/40'
               >
-                <span className='text-[16px] font-medium text-stone-700 dark:text-stone-200'>MCP Servers</span>
-                <i
-                  className={`bx bx-chevron-down text-xl text-neutral-500 dark:text-neutral-400 transition-transform duration-200 ${mcpExpanded ? 'rotate-180' : ''}`}
+                <div className='flex min-w-0 items-start gap-3'>
+                  <div
+                    className='mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300'
+                    style={settingsSectionIconStyle}
+                  >
+                    <Server {...lucideIconProps} />
+                  </div>
+                  <div className='min-w-0'>
+                    <p
+                      className='text-sm font-medium text-stone-700 dark:text-stone-200'
+                      style={settingsSectionTitleStyle}
+                    >
+                      MCP Servers
+                    </p>
+                    <p
+                      className='mt-0.5 text-xs text-neutral-500 dark:text-neutral-400'
+                      style={settingsSectionBodyStyle}
+                    >
+                      Connect external tool servers for agent workflows.
+                    </p>
+                  </div>
+                </div>
+                <ChevronDown
+                  {...lucideIconProps}
+                  className={`mt-2 shrink-0 text-neutral-500 transition-transform duration-200 dark:text-neutral-400 ${mcpExpanded ? 'rotate-180' : ''}`}
+                  style={settingsSectionBodyStyle}
                 />
               </button>
 
-              {mcpExpanded && (
-                <div className='space-y-4 pl-1 pt-2'>
+              <div
+                className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+                  mcpExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                }`}
+              >
+                <div className='min-h-0 overflow-hidden'>
+                  <div className='space-y-4 px-3 pb-3 pt-1'>
                   <p className='text-sm text-neutral-600 dark:text-neutral-400'>
                     Connect to MCP (Model Context Protocol) servers to add external tools. MCP servers provide tools
                     that the AI can use directly.
                   </p>
 
-                  <div className='flex items-center justify-between rounded-lg border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800/50 px-3 py-2'>
+                  <div className='flex items-center justify-between rounded-2xl bg-neutral-50/70 px-3 py-2 dark:bg-neutral-800/50'>
                     <div>
                       <p className='text-sm font-medium text-neutral-700 dark:text-neutral-200'>
                         Lazy start MCP servers
@@ -2185,27 +2800,27 @@ ${block}`
                     <button
                       type='button'
                       onClick={handleToggleMcpLazyStart}
-                      className='p-1.5 rounded hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors'
+                      className={iconButtonClass}
                       title={mcpLazyStart ? 'Disable lazy start' : 'Enable lazy start'}
                     >
-                      <i
-                        className={`bx ${mcpLazyStart ? 'bx-toggle-right text-green-500' : 'bx-toggle-left text-neutral-400'} text-xl`}
-                      ></i>
+                      <Check {...lucideIconProps} className={mcpLazyStart ? 'text-green-500' : 'text-neutral-400'} />
                     </button>
                   </div>
 
                   {/* Status Message */}
                   {mcpActionStatus && (
                     <div
-                      className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg ${
+                      className={`flex items-center gap-2 text-sm px-3 py-2 rounded-2xl ${
                         mcpActionStatus.type === 'success'
                           ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
                           : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400'
                       }`}
                     >
-                      <i
-                        className={`bx ${mcpActionStatus.type === 'success' ? 'bx-check-circle' : 'bx-error-circle'} text-base`}
-                      ></i>
+                      {mcpActionStatus.type === 'success' ? (
+                        <CheckCircle size={16} strokeWidth={2.25} />
+                      ) : (
+                        <AlertCircle size={16} strokeWidth={2.25} />
+                      )}
                       {mcpActionStatus.message}
                     </div>
                   )}
@@ -2213,28 +2828,26 @@ ${block}`
                   {/* Add Server Button / Form */}
                   {!mcpAddMode ? (
                     <div className='flex flex-wrap items-center gap-3'>
-                      <button
-                        type='button'
-                        onClick={() => setMcpAddMode(true)}
-                        className='flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors'
-                      >
-                        <i className='bx bx-plus text-base'></i>
+                      <button type='button' onClick={() => setMcpAddMode(true)} className={smallPillButtonClass}>
+                        <Plus size={16} strokeWidth={2.25} />
                         Add MCP Server
                       </button>
                       <button
                         type='button'
                         onClick={handleRefreshMcpTools}
                         disabled={mcpRefreshing}
-                        className='flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-300 hover:text-neutral-800 dark:hover:text-neutral-100 transition-colors disabled:opacity-60'
+                        className={smallPillButtonClass}
                       >
-                        <i
-                          className={`bx ${mcpRefreshing ? 'bx-loader-circle animate-spin' : 'bx-refresh'} text-base`}
-                        />
+                        {mcpRefreshing ? (
+                          <LoaderCircle size={16} strokeWidth={2.25} className='animate-spin' />
+                        ) : (
+                          <RefreshCw size={16} strokeWidth={2.25} />
+                        )}
                         Refresh MCP Tools
                       </button>
                     </div>
                   ) : (
-                    <div className='space-y-3 p-3 rounded-lg bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700'>
+                    <div className='space-y-3 rounded-2xl bg-neutral-50/70 p-3 dark:bg-neutral-800/50'>
                       <div className='space-y-2'>
                         <label className='text-xs font-medium text-neutral-600 dark:text-neutral-400'>
                           Server Name
@@ -2244,7 +2857,7 @@ ${block}`
                           value={newServerName}
                           onChange={e => setNewServerName(e.target.value)}
                           placeholder='my-server'
-                          className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                          className={inputSurfaceClass}
                         />
                       </div>
 
@@ -2254,10 +2867,10 @@ ${block}`
                           <button
                             type='button'
                             onClick={() => setNewServerTransport('stdio')}
-                            className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${
+                            className={`rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-orange-400/60 ${
                               newServerTransport === 'stdio'
-                                ? 'bg-blue-500 text-white border-blue-500'
-                                : 'bg-white dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 border-neutral-300 dark:border-neutral-600'
+                                ? 'bg-blue-50 text-blue-700 dark:bg-orange-500/15 dark:text-orange-100'
+                                : 'bg-white/65 text-neutral-700 hover:bg-white dark:bg-white/5 dark:text-neutral-300 dark:hover:bg-white/10'
                             }`}
                           >
                             Local (stdio)
@@ -2265,10 +2878,10 @@ ${block}`
                           <button
                             type='button'
                             onClick={() => setNewServerTransport('http')}
-                            className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${
+                            className={`rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-orange-400/60 ${
                               newServerTransport === 'http'
-                                ? 'bg-blue-500 text-white border-blue-500'
-                                : 'bg-white dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 border-neutral-300 dark:border-neutral-600'
+                                ? 'bg-blue-50 text-blue-700 dark:bg-orange-500/15 dark:text-orange-100'
+                                : 'bg-white/65 text-neutral-700 hover:bg-white dark:bg-white/5 dark:text-neutral-300 dark:hover:bg-white/10'
                             }`}
                           >
                             Remote (HTTP)
@@ -2287,7 +2900,7 @@ ${block}`
                               value={newServerCommand}
                               onChange={e => setNewServerCommand(e.target.value)}
                               placeholder='npx'
-                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                              className={inputSurfaceClass}
                             />
                           </div>
                           <div className='space-y-2'>
@@ -2299,7 +2912,7 @@ ${block}`
                               value={newServerArgs}
                               onChange={e => setNewServerArgs(e.target.value)}
                               placeholder='-y @anthropic/mcp-server-filesystem /path/to/dir'
-                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                              className={inputSurfaceClass}
                             />
                           </div>
                           <div className='space-y-2'>
@@ -2311,7 +2924,7 @@ ${block}`
                               onChange={e => setNewServerEnvText(e.target.value)}
                               placeholder='{"BLENDER_HOST":"localhost","BLENDER_PORT":"9876"}'
                               rows={3}
-                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                              className={inputSurfaceClass}
                             />
                             <p className='text-[11px] text-neutral-500 dark:text-neutral-400'>
                               Example: {`{"BLENDER_HOST":"localhost","BLENDER_PORT":"9876"}`}
@@ -2323,8 +2936,10 @@ ${block}`
                             </label>
                             <select
                               value={newServerStdioFraming}
-                              onChange={e => setNewServerStdioFraming(e.target.value as 'content-length' | 'newline-json')}
-                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                              onChange={e =>
+                                setNewServerStdioFraming(e.target.value as 'content-length' | 'newline-json')
+                              }
+                              className={inputSurfaceClass}
                             >
                               <option value='content-length'>content-length (standard MCP)</option>
                               <option value='newline-json'>newline-json (Blender MCP compatibility)</option>
@@ -2342,7 +2957,7 @@ ${block}`
                               value={newServerUrl}
                               onChange={e => setNewServerUrl(e.target.value)}
                               placeholder='https://mcp.example.com/mcp'
-                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                              className={inputSurfaceClass}
                             />
                           </div>
                           <div className='space-y-2'>
@@ -2354,7 +2969,7 @@ ${block}`
                               onChange={e => setNewServerHeadersText(e.target.value)}
                               placeholder='{"Authorization":"Bearer <token>"}'
                               rows={3}
-                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                              className={inputSurfaceClass}
                             />
                             <p className='text-[11px] text-neutral-500 dark:text-neutral-400'>
                               Example: {`{"Authorization":"Bearer <token>","x-api-key":"abc123"}`}
@@ -2370,7 +2985,7 @@ ${block}`
                               value={newServerOauthClientId}
                               onChange={e => setNewServerOauthClientId(e.target.value)}
                               placeholder='github-oauth-client-id'
-                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                              className={inputSurfaceClass}
                             />
                           </div>
 
@@ -2383,7 +2998,7 @@ ${block}`
                               value={newServerOauthClientSecret}
                               onChange={e => setNewServerOauthClientSecret(e.target.value)}
                               placeholder='Only needed for client_secret_post'
-                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                              className={inputSurfaceClass}
                             />
                           </div>
 
@@ -2396,7 +3011,7 @@ ${block}`
                               value={newServerOauthScopes}
                               onChange={e => setNewServerOauthScopes(e.target.value)}
                               placeholder='repo read:user user:email'
-                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                              className={inputSurfaceClass}
                             />
                             <p className='text-[11px] text-neutral-500 dark:text-neutral-400'>
                               Space or comma separated. Leave blank to use server defaults/challenges.
@@ -2412,7 +3027,7 @@ ${block}`
                               onChange={e =>
                                 setNewServerOauthTokenAuthMethod(e.target.value as 'client_secret_post' | 'none')
                               }
-                              className='w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                              className={inputSurfaceClass}
                             >
                               <option value='client_secret_post'>client_secret_post</option>
                               <option value='none'>none (public client)</option>
@@ -2429,7 +3044,7 @@ ${block}`
                             !newServerName.trim() ||
                             (newServerTransport === 'stdio' ? !newServerCommand.trim() : !newServerUrl.trim())
                           }
-                          className='px-3 py-1.5 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
+                          className='px-3 py-1.5 text-sm bg-blue-500 text-white rounded-2xl hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
                         >
                           Add Server
                         </button>
@@ -2450,7 +3065,7 @@ ${block}`
                             setNewServerOauthScopes('')
                             setNewServerOauthTokenAuthMethod('client_secret_post')
                           }}
-                          className='px-3 py-1.5 text-sm text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition-colors'
+                          className={smallPillButtonClass}
                         >
                           Cancel
                         </button>
@@ -2461,9 +3076,9 @@ ${block}`
                   {/* Help text */}
                   <p className='text-xs text-neutral-500 dark:text-neutral-500'>
                     Examples: Local stdio → Command "C:\\mcp\\blender-mcp-venv\\Scripts\\blender-mcp.exe" + env JSON
-                    {` {"BLENDER_HOST":"localhost","BLENDER_PORT":"9876"} `} + stdio framing "newline-json" for Blender MCP.
-                    Remote HTTP → URL "https://mcp.example.com/mcp" + optional headers JSON (Authorization, API keys,
-                    etc.).
+                    {` {"BLENDER_HOST":"localhost","BLENDER_PORT":"9876"} `} + stdio framing "newline-json" for Blender
+                    MCP. Remote HTTP → URL "https://mcp.example.com/mcp" + optional headers JSON (Authorization, API
+                    keys, etc.).
                   </p>
 
                   {/* Connected Servers List */}
@@ -2474,7 +3089,7 @@ ${block}`
 
                     {mcpLoading ? (
                       <div className='flex items-center gap-2 text-sm text-neutral-500 dark:text-neutral-400'>
-                        <i className='bx bx-loader-alt animate-spin'></i>
+                        <LoaderCircle size={16} strokeWidth={2.25} className='animate-spin' />
                         Loading servers...
                       </div>
                     ) : mcpServers.length === 0 ? (
@@ -2486,7 +3101,7 @@ ${block}`
                         {mcpServers.map(server => (
                           <div
                             key={server.name}
-                            className='flex items-center justify-between p-3 rounded-lg bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700'
+                            className='flex items-center justify-between gap-3 rounded-2xl bg-neutral-50/70 p-3 dark:bg-neutral-800/50'
                           >
                             <div className='flex-1 min-w-0'>
                               <div className='flex items-center gap-2'>
@@ -2550,26 +3165,24 @@ ${block}`
                               <button
                                 type='button'
                                 onClick={() => handleToggleMcpServer(server.name, server.status)}
-                                className='p-1.5 rounded hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors'
+                                className={iconButtonClass}
                                 title={server.status === 'connected' ? 'Stop server' : 'Start server'}
                               >
-                                <i
-                                  className={`bx ${
-                                    server.status === 'connected'
-                                      ? 'bx-stop text-red-500'
-                                      : server.status === 'connecting'
-                                        ? 'bx-loader-alt animate-spin text-yellow-500'
-                                        : 'bx-play text-green-500'
-                                  } text-xl`}
-                                ></i>
+                                {server.status === 'connected' ? (
+                                  <Square {...lucideIconProps} className='text-red-500' />
+                                ) : server.status === 'connecting' ? (
+                                  <LoaderCircle {...lucideIconProps} className='animate-spin text-yellow-500' />
+                                ) : (
+                                  <Play {...lucideIconProps} className='text-green-500' />
+                                )}
                               </button>
                               <button
                                 type='button'
                                 onClick={() => handleRemoveMcpServer(server.name)}
-                                className='p-1.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors text-neutral-400 hover:text-red-500'
+                                className={`${iconButtonClass} hover:text-red-500 dark:hover:text-red-300`}
                                 title='Remove server'
                               >
-                                <i className='bx bx-trash text-lg'></i>
+                                <Trash2 {...lucideIconProps} />
                               </button>
                             </div>
                           </div>
@@ -2577,8 +3190,9 @@ ${block}`
                       </div>
                     )}
                   </div>
+                  </div>
                 </div>
-              )}
+              </div>
             </div>
           </div>
         </div>

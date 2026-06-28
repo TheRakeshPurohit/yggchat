@@ -5,6 +5,7 @@ declare const __BUILD_TARGET__: 'web' | 'electron' | 'local'
 declare const __IS_ELECTRON__: boolean
 declare const __IS_WEB__: boolean
 declare const __IS_LOCAL__: boolean
+declare const __YGG_CODEX_DEV_LOGS__: boolean
 
 interface ImportMetaEnv {
   readonly VITE_API_URL?: string
@@ -136,6 +137,9 @@ interface ElectronAPI {
       args?: Record<string, any>
     ) => Promise<{ success: boolean; result?: any; error?: string }>
     clearCache: (toolPath?: string) => Promise<{ success: boolean; cleared?: number; error?: string }>
+  }
+  dev?: {
+    codexDevLogsEnabled?: boolean
   }
   platform: string
 }

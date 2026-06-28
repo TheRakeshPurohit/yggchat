@@ -116,7 +116,7 @@ export interface StreamChunk {
   }
   // free tier update data
   remaining?: number
-  // Hermes ACP permission request correlation id
+  // tool permission request correlation id
   requestId?: string
   // CC-specific chunk type (from Claude Code SDK streaming events)
   chunkType?:
@@ -182,6 +182,12 @@ export interface StreamState {
   events: StreamEvent[]
   // Legacy/latest completed message id. Kept as a branch-selection anchor.
   messageId: MessageId | null
+  // Stable user message that started this stream/run. Unlike branch anchors, this
+  // must not move when assistant/tool-loop turns complete.
+  triggerUserMessageId: MessageId | null
+  // Best current branch-row anchor for diagnostics/view matching. This can move
+  // from the triggering user message to live/completed assistant messages.
+  currentBranchAnchorMessageId: MessageId | null
   // Explicit message tracking for multi-turn/tool streams.
   branchAnchorMessageId: MessageId | null
   liveMessageId: MessageId | null
@@ -243,6 +249,30 @@ export interface StreamingAbortedPayload {
   error?: string
 }
 
+export type StreamUndoStatus = 'available' | 'restoring' | 'restored' | 'invalidated' | 'failed'
+
+export interface StreamUndoSummary {
+  streamId: string
+  conversationId: string | null
+  parentMessageId: string | null
+  assistantMessageId?: string | null
+  status: StreamUndoStatus
+  createdAt: string
+  updatedAt: string
+  restoredAt?: string | null
+  fileCount: number
+  files: Array<{ path: string; absolutePath: string; sizeBytes: number; operationCount: number }>
+}
+
+export interface StreamUndoState {
+  byStreamId: Record<string, StreamUndoSummary>
+  streamIdsByParentMessageId: Record<string, string[]>
+  streamIdsByAssistantMessageId: Record<string, string[]>
+  loadingByConversationId: Record<string, boolean>
+  restoringByStreamId: Record<string, boolean>
+  errorByStreamId: Record<string, string | null>
+}
+
 export interface Model extends BaseModel {}
 
 export interface Provider {
@@ -266,6 +296,10 @@ export interface ImageDraft {
   size: number
 }
 
+export type ImageDraftTarget =
+  | { kind: 'composer' }
+  | { kind: 'branch'; messageId: MessageId }
+
 export interface MessageInput {
   content: string
   modelOverride?: string
@@ -280,6 +314,7 @@ export interface CompositionState {
   draftMessage: String | null
   multiReplyCount: number
   imageDrafts: ImageDraft[] // base64-encoded images + metadata from drag/drop
+  imageDraftTarget: ImageDraftTarget | null // explicit owner for imageDrafts; never infer from focused message
   editingBranch: boolean // true when user is editing a branch; controls UI like hiding image drafts
   optimisticMessage: Message | null // temp message for instant UI feedback in web mode only
   optimisticBranchMessage: Message | null // temp branched message for instant UI feedback in web mode only
@@ -332,6 +367,7 @@ export interface ChatState {
   providerState: ProviderState
   composition: CompositionState
   streaming: StreamingRootState
+  streamUndo: StreamUndoState
   ui: {
     modelSelectorOpen: boolean
   }
@@ -366,6 +402,8 @@ export interface SendMessagePayload {
   reasoningConfig?: ReasoningConfig
   serviceTier?: OpenAIServiceTier
   cwd?: string | null
+  // Captured at send time: 'plan' = Chat Mode, 'execute' = Agent Mode.
+  operationMode?: OperationMode
 }
 
 export interface EditMessagePayload {
@@ -377,6 +415,8 @@ export interface EditMessagePayload {
   think: boolean
   serviceTier?: OpenAIServiceTier
   cwd?: string | null
+  // Captured at send time: 'plan' = Chat Mode, 'execute' = Agent Mode.
+  operationMode?: OperationMode
 }
 
 export interface BranchMessagePayload {
@@ -388,6 +428,8 @@ export interface BranchMessagePayload {
   think: boolean
   serviceTier?: OpenAIServiceTier
   cwd?: string | null
+  // Captured at send time: 'plan' = Chat Mode, 'execute' = Agent Mode.
+  operationMode?: OperationMode
 }
 
 export interface CCSessionInfo {
@@ -417,21 +459,6 @@ export interface SendCCBranchPayload extends Omit<SendCCMessagePayload, 'parentI
   parentId: MessageId
 }
 
-export interface SendHermesMessagePayload {
-  conversationId: ConversationId
-  message: string
-  cwd?: string
-  resume?: boolean
-  parentId?: MessageId | null
-  sessionId?: string
-  forkSession?: boolean
-  model?: string
-  maxIterations?: number
-}
-
-export interface SendHermesBranchPayload extends SendHermesMessagePayload {
-  parentId: MessageId
-}
 
 export interface ModelSelectionPayload {
   model: Model

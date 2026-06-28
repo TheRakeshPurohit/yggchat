@@ -54,6 +54,7 @@ export type CodexGenerateInput = {
   runId?: string
   signal?: AbortSignal
   emit?: ProviderStreamEventHandler
+  allowCommentaryFallbackText?: boolean
 }
 
 export type CodexResponseUsage = {
@@ -89,6 +90,7 @@ export type CodexResponseParseOptions = {
   onTextDelta?: (delta: string) => void
   reader?: ReadableStreamDefaultReader<Uint8Array> | null
   firstRead?: ReadableStreamReadResult<Uint8Array> | null
+  allowCommentaryFallbackText?: boolean
 }
 
 export type CodexRequestDiagnostics = {

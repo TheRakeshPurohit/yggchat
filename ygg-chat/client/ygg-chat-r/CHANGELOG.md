@@ -12,6 +12,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+## [0.2.3] - 2026-06-14
+
+### Added
+
+- Added multi-edit support to the `todo_list` tool so multiple checklist items can be updated in one tool call.
+- Added an Electron runtime memory viewer in Settings, including markdown rendering for global, recent, and project memory files.
+
+### Changed
+
+- Improved `read_files` output with a normalized combined content view, structured per-file metadata, and consistent error reporting.
+- Improved `@file` mention search ranking so exact filename matches appear ahead of directory and broader path matches.
+- Updated the chat input panel styling by removing the outer drop shadow.
+
+### Fixed
+
+- Fixed extra bottom padding on assistant messages that made streamed reasoning blocks appear taller than persisted messages.
+- Fixed subagent responses leaking literal `<thinking>` blocks back into parent model output.
+- Fixed headless OpenAI ChatGPT requests by ensuring non-empty instructions are always sent.
+- Fixed tool cwd handling so empty, `.`, and `/` cwd values resolve to the current tool process working directory.
+- Fixed virtualized chat scrolling so large final streaming responses after tool execution no longer drag the viewport while the user is reading.
+- Reverted Linux rounded-corner transparency styling to avoid square native windows with rounded inner content artifacts.
+
 ## [0.2.2] - 2026-06-12
 
 ### Added

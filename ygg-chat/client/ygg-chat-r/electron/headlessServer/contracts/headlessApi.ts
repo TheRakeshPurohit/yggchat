@@ -31,6 +31,7 @@ export interface HeadlessMessageRequest {
   rootPath?: string | null
   operationMode?: 'plan' | 'execute'
   includeOperationModePrompt?: boolean
+  planModeVerbosity?: 'concise' | 'normal' | 'detailed'
   streamId?: string | null
   toolTimeoutMs?: number
 }
@@ -43,6 +44,7 @@ export type HeadlessStreamEvent =
       parentId: string | null
       provider: string
       modelName: string
+      streamId?: string | null
     }
   | { type: 'user_message_persisted'; message: any }
   | { type: 'provider_routed'; provider: string; modelName: string }
@@ -66,5 +68,15 @@ export type HeadlessStreamEvent =
   | { type: 'chunk'; part: 'tool_call'; toolCall: any }
   | { type: 'chunk'; part: 'tool_result'; toolResult: any }
   | { type: 'assistant_message_persisted'; message: any }
-  | { type: 'complete'; message: any }
-  | { type: 'error'; error: string }
+  | { type: 'complete'; message: any; providerError?: boolean }
+  | {
+      type: 'error'
+      error: string
+      provider?: string
+      modelName?: string
+      retryExhausted?: boolean
+      status?: number
+      errorType?: string
+      resetAt?: number
+      assistantMessage?: any
+    }

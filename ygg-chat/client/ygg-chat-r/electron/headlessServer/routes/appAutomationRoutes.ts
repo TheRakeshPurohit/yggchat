@@ -410,7 +410,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
 
   app.post('/api/app/projects', (req, res) => {
     try {
-      const { id, name, user_id, context, system_prompt } = req.body
+      const { id, name, user_id, context, system_prompt, cwd } = req.body
       if (!user_id) {
         res.status(400).json({ error: 'user_id required' })
         return
@@ -427,6 +427,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
         user_id,
         context || null,
         system_prompt || null,
+        cwd || null,
         'local',
         now,
         now
@@ -457,7 +458,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
   app.patch('/api/app/projects/:id', (req, res) => {
     try {
       const { id } = req.params
-      const { name, context, system_prompt } = req.body
+      const { name, context, system_prompt, cwd } = req.body
 
       const existing = statements.getProjectById.get(id) as any
       if (!existing) {
@@ -471,6 +472,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
           name = COALESCE(?, name),
           context = ?,
           system_prompt = ?,
+          cwd = ?,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `
@@ -478,6 +480,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
         name || existing.name,
         context !== undefined ? context : existing.context,
         system_prompt !== undefined ? system_prompt : existing.system_prompt,
+        cwd !== undefined ? cwd : existing.cwd,
         id
       )
 
@@ -517,23 +520,53 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
       const rawProjectId = (req.query.projectId as string) || (req.query.project_id as string) || undefined
       const noProjectOnly = rawProjectId === '__none__' || rawProjectId === 'null'
       const projectId = noProjectOnly ? undefined : rawProjectId
+      const limitParam = req.query.limit as string | undefined
+      const cursorParam = req.query.cursor as string | undefined
 
       if (!userId) {
         res.status(400).json({ error: 'userId required' })
         return
       }
 
-      const conversations = noProjectOnly
-        ? db.prepare('SELECT * FROM conversations WHERE user_id = ? AND project_id IS NULL ORDER BY updated_at DESC').all(userId)
-        : projectId
-          ? typeof statements.getLocalConversationsByUserAndProject?.all === 'function'
-            ? statements.getLocalConversationsByUserAndProject.all(userId, projectId)
-            : db
-                .prepare('SELECT * FROM conversations WHERE user_id = ? AND project_id = ? ORDER BY updated_at DESC')
-                .all(userId, projectId)
-          : typeof statements.getLocalConversations?.all === 'function'
-            ? statements.getLocalConversations.all(userId)
-            : db.prepare('SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC').all(userId)
+      const selectConversations = (limit?: number, offset?: number) => {
+        const limitClause = typeof limit === 'number' ? ' LIMIT ? OFFSET ?' : ''
+        const paginationArgs = typeof limit === 'number' ? [limit, offset || 0] : []
+
+        if (noProjectOnly) {
+          return db
+            .prepare(`SELECT * FROM conversations WHERE user_id = ? AND project_id IS NULL ORDER BY updated_at DESC${limitClause}`)
+            .all(userId, ...paginationArgs)
+        }
+
+        if (projectId) {
+          return db
+            .prepare(`SELECT * FROM conversations WHERE user_id = ? AND project_id = ? ORDER BY updated_at DESC${limitClause}`)
+            .all(userId, projectId, ...paginationArgs)
+        }
+
+        return db
+          .prepare(`SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC${limitClause}`)
+          .all(userId, ...paginationArgs)
+      }
+
+      if (limitParam) {
+        const parsedLimit = Number(limitParam)
+        const parsedOffset = cursorParam ? Number(cursorParam) : 0
+        const limit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(200, Math.floor(parsedLimit))) : 50
+        const offset = Number.isFinite(parsedOffset) ? Math.max(0, Math.floor(parsedOffset)) : 0
+        const rows = selectConversations(limit + 1, offset)
+        const hasMore = rows.length > limit
+        const conversations = hasMore ? rows.slice(0, limit) : rows
+
+        res.json({
+          conversations,
+          nextCursor: hasMore ? String(offset + limit) : null,
+          hasMore,
+        })
+        return
+      }
+
+      const conversations = selectConversations()
 
       res.json(conversations)
     } catch (error) {
@@ -666,6 +699,8 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
 
       const conversationId = id || uuidv4()
       const now = new Date().toISOString()
+      const project = project_id ? (statements.getProjectById.get(project_id) as any) : null
+      const inheritedCwd = cwd !== undefined ? cwd : project?.cwd || null
 
       statements.upsertConversation.run(
         conversationId,
@@ -676,7 +711,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
         system_prompt || null,
         conversation_context || null,
         null,
-        cwd || null,
+        inheritedCwd || null,
         'local',
         now,
         now
@@ -864,7 +899,9 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
       const { id: conversationId } = req.params
       const { messages } = req.body as {
         messages: Array<{
-          role: 'user' | 'assistant'
+          source_id?: string
+          parent_source_id?: string | null
+          role: 'user' | 'assistant' | 'system' | 'ex_agent' | 'tool'
           content: string
           thinking_block?: string
           model_name?: string
@@ -889,13 +926,50 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
       const createdMessages: any[] = []
       let lastMessageId: string | null = null
       const now = new Date().toISOString()
+      const sourceIdToNewId = new Map<string, string>()
+      const hasStructuredParents = messages.some(msg => msg.source_id != null || msg.parent_source_id !== undefined)
 
-      for (const msg of messages) {
-        const messageId = uuidv4()
+      messages.forEach((msg, index) => {
+        const sourceKey = msg.source_id != null ? String(msg.source_id) : `__legacy_${index}`
+        sourceIdToNewId.set(sourceKey, uuidv4())
+      })
+
+      const entries = messages.map((msg, index) => ({ msg, index }))
+      const orderedEntries: typeof entries = []
+
+      if (hasStructuredParents) {
+        const entryBySourceKey = new Map(entries.map(entry => [entry.msg.source_id != null ? String(entry.msg.source_id) : `__legacy_${entry.index}`, entry]))
+        const visitedEntries = new Set<string>()
+
+        const visitEntry = (entry: (typeof entries)[number]) => {
+          const sourceKey = entry.msg.source_id != null ? String(entry.msg.source_id) : `__legacy_${entry.index}`
+          if (visitedEntries.has(sourceKey)) return
+
+          const parentEntry = entry.msg.parent_source_id != null ? entryBySourceKey.get(String(entry.msg.parent_source_id)) : null
+          if (parentEntry) visitEntry(parentEntry)
+
+          visitedEntries.add(sourceKey)
+          orderedEntries.push(entry)
+        }
+
+        entries.forEach(visitEntry)
+      } else {
+        orderedEntries.push(...entries)
+      }
+
+      for (const { msg, index } of orderedEntries) {
+        const sourceKey = msg.source_id != null ? String(msg.source_id) : `__legacy_${index}`
+        const messageId = sourceIdToNewId.get(sourceKey) || uuidv4()
+        const parentId = hasStructuredParents
+          ? msg.parent_source_id != null
+            ? sourceIdToNewId.get(String(msg.parent_source_id)) || null
+            : null
+          : lastMessageId
+
         statements.upsertMessage.run(
           messageId,
           conversationId,
-          lastMessageId,
+          parentId,
           '[]',
           msg.role,
           msg.content,
@@ -923,7 +997,7 @@ export function registerAppAutomationRoutes(app: Express, deps: AppAutomationRou
         createdMessages.push({
           id: messageId,
           conversation_id: conversationId,
-          parent_id: lastMessageId,
+          parent_id: parentId,
           children_ids: [],
           role: msg.role,
           content: msg.content,

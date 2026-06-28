@@ -72,7 +72,7 @@ export const getStoredChatInputBorderLightColor = (): string => {
   } catch {
     // Ignore localStorage errors
   }
-  return '#10b981'
+  return '#3b82f6'
 }
 
 export const getStoredChatInputBorderDarkColor = (): string => {
@@ -82,7 +82,7 @@ export const getStoredChatInputBorderDarkColor = (): string => {
   } catch {
     // Ignore localStorage errors
   }
-  return '#34d399'
+  return '#f97316'
 }
 
 export const saveChatInputBorderAnimation = (animation: ChatInputBorderAnimationType): void => {

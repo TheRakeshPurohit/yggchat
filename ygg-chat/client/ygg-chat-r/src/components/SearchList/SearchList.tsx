@@ -13,6 +13,7 @@ export type SearchResultItem = {
 }
 
 type Variant = 'neutral' | 'secondary'
+type InputRounding = 'default' | 'full'
 
 type DropdownPosition = {
   top: number
@@ -30,13 +31,10 @@ export interface SearchListProps {
   onResultClick: (conversationId: ConversationId, messageId: string) => void
   placeholder?: string
   className?: string
+  inputClassName?: string
+  inputRounding?: InputRounding
   dropdownVariant?: Variant
   dropdownZIndex?: number
-}
-
-const variantBorderClass: Record<Variant, string> = {
-  neutral: 'dark:border-neutral-600',
-  secondary: 'dark:border-secondary-600',
 }
 
 const SearchList: React.FC<SearchListProps> = ({
@@ -48,7 +46,8 @@ const SearchList: React.FC<SearchListProps> = ({
   onResultClick,
   placeholder = 'Search messages...',
   className = '',
-  dropdownVariant = 'neutral',
+  inputClassName = '',
+  inputRounding = 'default',
   dropdownZIndex = 50,
 }) => {
   const [isOpen, setIsOpen] = useState(false)
@@ -141,12 +140,42 @@ const SearchList: React.FC<SearchListProps> = ({
     }
   }
 
-  const borderVariantClass = variantBorderClass[dropdownVariant]
+  const searchInput =
+    inputRounding === 'full' ? (
+      <div className='relative w-full'>
+        <input
+          type='text'
+          value={value}
+          onChange={event => onChange(event.target.value)}
+          onKeyDown={handleEnterKey}
+          placeholder={placeholder}
+          className={`w-full rounded-[9999px] pr-10 transition-all duration-200 ${inputClassName}`}
+        />
+        <button
+          type='button'
+          onClick={handleSearchClick}
+          aria-label='Search'
+          className='absolute right-3 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center text-neutral-500 transition-colors hover:text-neutral-700 focus:outline-none dark:text-neutral-300 dark:hover:text-neutral-100'
+        >
+          <i className='bx bx-search block text-lg leading-none' aria-hidden='true'></i>
+        </button>
+      </div>
+    ) : (
+      <TextField
+        placeholder={placeholder}
+        value={value}
+        onChange={onChange}
+        onKeyDown={handleEnterKey}
+        showSearchIcon
+        onSearchClick={handleSearchClick}
+        className={inputClassName}
+      />
+    )
 
   const dropdownContent = isOpen ? (
     loading ? (
       <div
-        className='fixed p-4 md:p-3 lg:p-2.5 xl:p-2 text-sm md:text-xs lg:text-xs xl:text-[10px]'
+        className='fixed p-4 md:p-3 lg:p-2.5 xl:p-2 text-sm md:text-xs lg:text-xs xl:text-[10px] text-neutral-600 dark:text-neutral-300'
         style={{
           zIndex: dropdownZIndex,
           top: `${dropdownPosition.top}px`,
@@ -159,7 +188,7 @@ const SearchList: React.FC<SearchListProps> = ({
     ) : results.length > 0 ? (
       <ul
         ref={dropdownRef}
-        className={`fixed overflow-y-auto bg-neutral-100/80 dark:bg-yBlack-900/30 ${borderVariantClass} rounded backdrop-blur-sm shadow-lg dark:bg-transparent thin-scrollbar`}
+        className='fixed overflow-y-auto rounded-2xl bg-white/75 dark:bg-neutral-950/70 backdrop-blur-2xl shadow-xl thin-scrollbar p-1'
         style={{
           zIndex: dropdownZIndex,
           colorScheme: 'dark',
@@ -172,7 +201,7 @@ const SearchList: React.FC<SearchListProps> = ({
         {results.map(res => (
           <li
             key={`${res.conversationId}-${res.messageId}`}
-            className='p-3 hover:bg-neutral-100 rounded-lg dark:hover:bg-yBlack-700 cursor-pointer text-sm dark:text-neutral-200'
+            className='p-3 hover:bg-black/5 rounded-xl dark:hover:bg-white/10 cursor-pointer text-sm dark:text-neutral-200 transition-colors'
             title={res.conversationTitle}
             onClick={() => {
               onResultClick(res.conversationId, res.messageId)
@@ -197,19 +226,8 @@ const SearchList: React.FC<SearchListProps> = ({
   ) : null
 
   return (
-    <div
-      ref={containerRef}
-      className={`relative drop-shadow-xl shadow-[0_1px_10px_-2px_rgba(0,0,0,0.01),0_1px_10px_-2px_rgba(0,0,0,0.01)] dark:shadow-[1px_4px_16px_-6px_rgba(0,0,0,0.45),1px_4px_16px_-4px_rgba(0,0,0,0.02)] ${className}`}
-    >
-      <TextField
-        placeholder={placeholder}
-        value={value}
-        onChange={onChange}
-        onKeyDown={handleEnterKey}
-        showSearchIcon
-        onSearchClick={handleSearchClick}
-      />
-
+    <div ref={containerRef} className={`relative ${className}`}>
+      {searchInput}
       {dropdownContent && typeof document !== 'undefined' ? createPortal(dropdownContent, document.body) : null}
     </div>
   )

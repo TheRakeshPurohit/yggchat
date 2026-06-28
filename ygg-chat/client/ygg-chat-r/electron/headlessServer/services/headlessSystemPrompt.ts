@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export type HeadlessOperationMode = 'plan' | 'execute'
+export type HeadlessPlanModeVerbosity = 'concise' | 'normal' | 'detailed'
 
 const DEFAULT_HEADLESS_INSTRUCTIONS = 'You are ChatGPT.'
 
@@ -15,6 +16,24 @@ let defaultAgentModePrompt: string | null = null
 const appendPromptPart = (parts: string[], value?: string | null) => {
   const trimmed = typeof value === 'string' ? value.trim() : ''
   if (trimmed) parts.push(trimmed)
+}
+
+const normalizePlanModeVerbosity = (value?: string | null): HeadlessPlanModeVerbosity => {
+  return value === 'normal' || value === 'detailed' ? value : 'concise'
+}
+
+export function buildHeadlessPlanModeResponseStylePrompt(verbosity?: HeadlessPlanModeVerbosity | null): string {
+  const resolvedVerbosity = normalizePlanModeVerbosity(verbosity)
+
+  switch (resolvedVerbosity) {
+    case 'detailed':
+      return '## Plan Response Style\n\nUse detailed plans when helpful, but stay focused and avoid unrelated explanation.'
+    case 'normal':
+      return '## Plan Response Style\n\nUse a balanced plan with enough detail to implement the change. Avoid unnecessary verbosity.'
+    case 'concise':
+    default:
+      return '## Plan Response Style\n\nUse short, concise plans. Prefer brief bullets and avoid unnecessary detail.'
+  }
 }
 
 const candidatePromptPaths = (relativePath: string): string[] => {
@@ -63,6 +82,7 @@ export interface BuildHeadlessSystemPromptInput {
   requestPrompt?: string | null
   projectPrompt?: string | null
   conversationPrompt?: string | null
+  planModeVerbosity?: HeadlessPlanModeVerbosity | null
 }
 
 export function buildHeadlessSystemPrompt({
@@ -71,11 +91,16 @@ export function buildHeadlessSystemPrompt({
   requestPrompt,
   projectPrompt,
   conversationPrompt,
+  planModeVerbosity,
 }: BuildHeadlessSystemPromptInput): string {
   const parts: string[] = []
+  const resolvedOperationMode = operationMode ?? 'execute'
 
   if (includeOperationModePrompt !== false) {
-    appendPromptPart(parts, getHeadlessOperationModePrompt(operationMode ?? 'execute'))
+    appendPromptPart(parts, getHeadlessOperationModePrompt(resolvedOperationMode))
+    if (resolvedOperationMode === 'plan') {
+      appendPromptPart(parts, buildHeadlessPlanModeResponseStylePrompt(planModeVerbosity))
+    }
   }
   appendPromptPart(parts, requestPrompt)
   appendPromptPart(parts, projectPrompt)

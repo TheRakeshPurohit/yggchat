@@ -40,7 +40,9 @@ type ToolHandler = (
     operationMode?: 'plan' | 'execute'
     conversationId?: string | null
     messageId?: string | null
+    parentMessageId?: string | null
     streamId?: string | null
+    toolCallId?: string | null
   }
 ) => Promise<any>
 
@@ -225,7 +227,9 @@ export class ToolOrchestrator {
       metadata: JSON.parse(row.metadata || '{}'),
       conversationId: row.conversation_id,
       messageId: row.message_id,
+      parentMessageId: null,
       streamId: row.stream_id,
+      toolCallId: null,
       createdAt: row.created_at,
       startedAt: row.started_at,
       completedAt: row.completed_at,
@@ -298,6 +302,8 @@ export class ToolOrchestrator {
       messageId: job.messageId,
       streamId: job.streamId,
       error: job.error,
+      parentMessageId: job.parentMessageId,
+      toolCallId: job.toolCallId,
     }
   }
 
@@ -327,7 +333,9 @@ export class ToolOrchestrator {
       metadata: options.metadata ?? {},
       conversationId: options.conversationId ?? null,
       messageId: options.messageId ?? null,
+      parentMessageId: options.parentMessageId ?? null,
       streamId: options.streamId ?? null,
+      toolCallId: options.toolCallId ?? null,
       createdAt: now,
       startedAt: null,
       completedAt: null,
@@ -428,7 +436,9 @@ export class ToolOrchestrator {
           operationMode: job.operationMode,
           conversationId: job.conversationId,
           messageId: job.messageId,
+          parentMessageId: job.parentMessageId,
           streamId: job.streamId,
+          toolCallId: job.toolCallId,
         }),
         timeoutPromise,
       ])

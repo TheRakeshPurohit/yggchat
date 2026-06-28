@@ -7,6 +7,7 @@ import type {
 } from '../providers/openRouterProvider.js'
 import type { ProviderTokenStore } from '../providers/tokenStore.js'
 import { ProviderRouter, normalizeProviderRoute } from './providerRouter.js'
+import { sanitizeToolResultContentForModel } from '../providers/toolResultSanitizer.js'
 import type { ToolExecutor } from './toolLoopService.js'
 
 interface SubagentOrchestratorDeps {
@@ -143,11 +144,18 @@ function toToolResultContent(result: any): string {
   }
 }
 
-function formatSubagentBody(content: string, reasoning?: string): string {
-  if (reasoning && reasoning.trim()) {
-    return `<thinking>\n${reasoning}\n</thinking>\n\n${content || ''}`.trim()
+function toModelToolResultContent(content: string, toolName?: string | null): string {
+  const sanitized = sanitizeToolResultContentForModel(content, toolName ?? null)
+  if (typeof sanitized === 'string') return sanitized
+  try {
+    return JSON.stringify(sanitized ?? null)
+  } catch {
+    return String(sanitized)
   }
-  return content || ''
+}
+
+function formatSubagentBody(content: string, _reasoning?: string): string {
+  return (content || '').replace(/<thinking>[\s\S]*?<\/thinking>\s*/gi, '').trim()
 }
 
 function sanitizeTools(tools: ProviderToolDefinition[] | undefined): ProviderToolDefinition[] | undefined {
@@ -353,7 +361,7 @@ export class SubagentOrchestrator {
         history.push({
           role: 'tool',
           tool_call_id: toolCall.id,
-          content: toolResultContent,
+          content: toModelToolResultContent(toolResultContent, toolCall.name),
         })
       }
 

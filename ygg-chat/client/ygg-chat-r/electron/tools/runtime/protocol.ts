@@ -3,7 +3,9 @@ export interface ToolExecutionOptions {
   operationMode?: 'plan' | 'execute'
   conversationId?: string | null
   messageId?: string | null
+  parentMessageId?: string | null
   streamId?: string | null
+  toolCallId?: string | null
 }
 
 export interface UtilityExecuteToolRequest {

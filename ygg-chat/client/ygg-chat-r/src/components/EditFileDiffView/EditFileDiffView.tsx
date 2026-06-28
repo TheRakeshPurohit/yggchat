@@ -137,7 +137,7 @@ const InlineDiffLine: React.FC<InlineDiffLineProps> = ({ type, content, oldLineN
     'w-10 flex-shrink-0 text-right pr-2 text-neutral-400 dark:text-neutral-600 select-none border-r border-neutral-200 dark:border-neutral-700'
 
   return (
-    <div className={`flex ${bgClass} font-mono text-[10px] leading-snug`}>
+    <div className={`flex ${bgClass} font-mono text-[0.625em] leading-snug`}>
       <span className={lineCellClass}>{oldLineNumber ?? ''}</span>
       <span className={lineCellClass}>{newLineNumber ?? ''}</span>
       <span className='w-4 flex-shrink-0 text-center'>{prefixIcon}</span>
@@ -192,7 +192,7 @@ const InlineDiffView: React.FC<InlineDiffViewProps> = ({ original, replacement, 
 
   return (
     <div className='overflow-x-auto max-h-[300px] overflow-y-auto'>
-      <div className='sticky top-0 z-10 flex font-mono text-[9px] uppercase tracking-wide text-neutral-500 dark:text-neutral-400 bg-neutral-100 dark:bg-neutral-800 border-b border-neutral-200 dark:border-neutral-700'>
+      <div className='sticky top-0 z-10 flex font-mono text-[0.5625em] uppercase tracking-wide text-neutral-500 dark:text-neutral-400 bg-neutral-100 dark:bg-neutral-800 border-b border-neutral-200 dark:border-neutral-700'>
         <span className='w-10 flex-shrink-0 text-right pr-2 border-r border-neutral-200 dark:border-neutral-700'>
           old
         </span>
@@ -240,7 +240,7 @@ const EditFileDiffViewComponent: React.FC<EditFileDiffViewProps> = ({ args, resu
   }, [args.path, args.replacement, expanded, isAppendOperation, viewMode])
 
   const codeBlockStyles =
-    '[&_pre]:!m-0 [&_pre]:!p-2 [&_pre]:!bg-transparent [&_pre]:!border-0 [&_code]:!text-[10px] [&_code]:!leading-snug [&_code]:!font-mono [&_code]:!bg-transparent [&_.hljs]:!bg-transparent [&_pre_code]:!p-0'
+    '[&_pre]:!m-0 [&_pre]:!p-2 [&_pre]:!bg-transparent [&_pre]:!border-0 [&_code]:!text-[0.625em] [&_code]:!leading-snug [&_code]:!font-mono [&_code]:!bg-transparent [&_.hljs]:!bg-transparent [&_pre_code]:!p-0'
 
   return (
     <div className={`leading-none overflow-hidden ${className}`}>
@@ -249,12 +249,12 @@ const EditFileDiffViewComponent: React.FC<EditFileDiffViewProps> = ({ args, resu
         onClick={() => setExpanded(prev => !prev)}
       >
         <div className='flex min-w-0 flex-1 items-center gap-2'>
-          <span className='text-[9px] font-bold uppercase tracking-wide rounded text-blue-600 dark:text-blue-400'>
+          <span className='text-[0.5625em] font-bold uppercase tracking-wide rounded text-blue-600 dark:text-blue-400'>
             {args.operation || 'replace'}
           </span>
 
           <span
-            className='flex min-w-0 items-center gap-1 text-[10px] font-mono overflow-left text-neutral-600 dark:text-neutral-500'
+            className='flex min-w-0 items-center gap-1 text-[0.625em] font-mono overflow-left text-neutral-600 dark:text-neutral-500'
             title={args.path}
           >
             <span className='block min-w-0 max-w-[150px] sm:max-w-[250px] md:max-w-[350px] lg:max-w-[600px] truncate'>
@@ -265,7 +265,7 @@ const EditFileDiffViewComponent: React.FC<EditFileDiffViewProps> = ({ args, resu
 
         <div className='flex shrink-0 items-center gap-1'>
           {hasChanges && parsedResult.replacements > 1 && (
-            <span className='px-1.5 py-0.5 text-[9px] ml-1 font-medium rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'>
+            <span className='px-1.5 py-0.5 text-[0.5625em] ml-1 font-medium rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'>
               {parsedResult.replacements}
             </span>
           )}
@@ -273,21 +273,21 @@ const EditFileDiffViewComponent: React.FC<EditFileDiffViewProps> = ({ args, resu
           {expanded && !isAppendOperation && (
             <div className='flex items-center rounded p-0.5' onClick={e => e.stopPropagation()}>
               <button
-                className={`px-1 py-0.5 rounded text-[10px] transition-all ${viewMode === 'inline' ? 'bg-white dark:bg-neutral-700 text-neutral-800 dark:text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300'}`}
+                className={`px-1 py-0.5 rounded text-[0.625em] transition-all ${viewMode === 'inline' ? 'bg-white dark:bg-neutral-700 text-neutral-800 dark:text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300'}`}
                 onClick={() => setViewMode('inline')}
                 title='Inline diff (git-style merged)'
               >
                 <i className='bx bx-git-compare' />
               </button>
               <button
-                className={`px-1 py-0.5 rounded text-[10px] transition-all ${viewMode === 'unified' ? 'bg-white dark:bg-neutral-600 text-neutral-800 dark:text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300'}`}
+                className={`px-1 py-0.5 rounded text-[0.625em] transition-all ${viewMode === 'unified' ? 'bg-white dark:bg-neutral-600 text-neutral-800 dark:text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300'}`}
                 onClick={() => setViewMode('unified')}
                 title='Unified view (stacked)'
               >
                 <i className='bx bx-align-left' />
               </button>
               <button
-                className={`px-1 py-0.5 rounded text-[10px] transition-all ${viewMode === 'split' ? 'bg-white dark:bg-neutral-600 text-neutral-800 dark:text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300'}`}
+                className={`px-1 py-0.5 rounded text-[0.625em] transition-all ${viewMode === 'split' ? 'bg-white dark:bg-neutral-600 text-neutral-800 dark:text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300'}`}
                 onClick={() => setViewMode('split')}
                 title='Split view (side-by-side)'
               >
@@ -323,7 +323,7 @@ const EditFileDiffViewComponent: React.FC<EditFileDiffViewProps> = ({ args, resu
             <div className='space-y-1'>
               <div className='rounded-[10px] overflow-hidden'>
                 <div className='flex items-center gap-1 px-2 py-0.5 bg-red-100 dark:bg-red-500/10 border-b border-red-200 dark:border-red-500/20'>
-                  <i className='bx bx-minus text-[10px] text-red-600 dark:text-red-400' />
+                  <i className='bx bx-minus text-[0.625em] text-red-600 dark:text-red-400' />
                 </div>
                 <div className={`bg-red-50 dark:bg-red-500/5 ${codeBlockStyles} overflow-x-auto`}>
                   <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
@@ -334,7 +334,7 @@ const EditFileDiffViewComponent: React.FC<EditFileDiffViewProps> = ({ args, resu
 
               <div className='rounded-[10px] overflow-hidden'>
                 <div className='flex items-center gap-1 px-2 py-0.5 bg-emerald-100 dark:bg-emerald-500/10 border-b border-emerald-200 dark:border-emerald-500/20'>
-                  <i className='bx bx-plus text-[10px] text-emerald-600 dark:text-emerald-400' />
+                  <i className='bx bx-plus text-[0.625em] text-emerald-600 dark:text-emerald-400' />
                 </div>
                 <div className={`bg-emerald-50 dark:bg-emerald-500/5 ${codeBlockStyles} overflow-x-auto`}>
                   <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
@@ -347,8 +347,8 @@ const EditFileDiffViewComponent: React.FC<EditFileDiffViewProps> = ({ args, resu
             <div className='grid grid-cols-2 gap-1'>
               <div className='rounded-[10px] overflow-hidden'>
                 <div className='flex items-center gap-1 px-2 py-0.5 bg-red-100 dark:bg-red-500/10 border-b border-red-200 dark:border-red-500/20'>
-                  <i className='bx bx-minus text-[10px] text-red-600 dark:text-red-400' />
-                  <span className='text-[9px] font-medium text-red-700 dark:text-red-400/80'>Original</span>
+                  <i className='bx bx-minus text-[0.625em] text-red-600 dark:text-red-400' />
+                  <span className='text-[0.5625em] font-medium text-red-700 dark:text-red-400/80'>Original</span>
                 </div>
                 <div
                   className={`bg-red-50 dark:bg-red-500/5 ${codeBlockStyles} overflow-x-auto max-h-[250px] overflow-y-auto`}
@@ -361,8 +361,8 @@ const EditFileDiffViewComponent: React.FC<EditFileDiffViewProps> = ({ args, resu
 
               <div className='rounded-[10px] overflow-hidden'>
                 <div className='flex items-center gap-1 px-2 py-0.5 bg-emerald-100 dark:bg-emerald-500/10 border-b border-emerald-200 dark:border-emerald-500/20'>
-                  <i className='bx bx-plus text-[10px] text-emerald-600 dark:text-emerald-400' />
-                  <span className='text-[9px] font-medium text-emerald-700 dark:text-emerald-400/80'>Replacement</span>
+                  <i className='bx bx-plus text-[0.625em] text-emerald-600 dark:text-emerald-400' />
+                  <span className='text-[0.5625em] font-medium text-emerald-700 dark:text-emerald-400/80'>Replacement</span>
                 </div>
                 <div
                   className={`bg-emerald-50 dark:bg-emerald-500/5 ${codeBlockStyles} overflow-x-auto max-h-[250px] overflow-y-auto`}
@@ -377,11 +377,11 @@ const EditFileDiffViewComponent: React.FC<EditFileDiffViewProps> = ({ args, resu
         </div>
       )}
       {expanded && !isSuccess && parsedResult.message && (
-        <div className='rounded-[10px] flex items-center gap-1.5 px-2 py-1 text-[9px] border font-mono bg-red-50 dark:bg-red-500/5 border-red-200 dark:border-red-500/20 text-red-700 dark:text-red-400/90'>
-          <i className='bx bx-x text-xs' />
+        <div className='rounded-[10px] flex items-center gap-1.5 px-2 py-1 text-[0.5625em] border font-mono bg-red-50 dark:bg-red-500/5 border-red-200 dark:border-red-500/20 text-red-700 dark:text-red-400/90'>
+          <i className='bx bx-x text-[0.75em]' />
           <span className='flex-1 truncate'>{parsedResult.message}</span>
           {parsedResult.matchStrategy && parsedResult.matchStrategy !== 'exact' && (
-            <span className='px-1 py-0.5 text-[8px] uppercase rounded bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400'>
+            <span className='px-1 py-0.5 text-[0.5em] uppercase rounded bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400'>
               {parsedResult.matchStrategy}
             </span>
           )}

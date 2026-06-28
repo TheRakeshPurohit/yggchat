@@ -1,7 +1,17 @@
 import type { OperationMode } from './chatTypes'
 import sysPromptConfig from './sys_prompt.json'
 import { getActiveChatModePrompt, getAgentModePrompt } from '../../helpers/operationModePromptStorage'
-import type { ToolDefinition } from './toolDefinitions'
+import {
+  loadPlanModeResponseSettings,
+  normalizePlanModeVerbosity,
+  type PlanModeVerbosity,
+} from '../../helpers/planModeResponseSettingsStorage'
+export {
+  CHAT_MODE_ALLOWED_TOOL_NAMES,
+  CHAT_MODE_BLOCKED_TOOL_NAMES,
+  assertToolAllowedForOperationMode,
+  filterToolsForOperationMode,
+} from '../../../../../shared/operationModeToolPolicy'
 
 const appendPromptPart = (parts: string[], value?: string | null) => {
   const trimmed = typeof value === 'string' ? value.trim() : ''
@@ -15,10 +25,25 @@ export interface BuildOperationModeSystemPromptInput {
   conversationPrompt?: string | null
   basePrompt?: string | null
   includeCustomToolsPrompt?: boolean
+  planModeVerbosity?: PlanModeVerbosity | null
 }
 
 export function getOperationModeSystemPrompt(operationMode: OperationMode): string {
   return operationMode === 'plan' ? getActiveChatModePrompt().prompt : getAgentModePrompt().prompt
+}
+
+export function buildPlanModeResponseStylePrompt(verbosity?: PlanModeVerbosity | null): string {
+  const resolvedVerbosity = normalizePlanModeVerbosity(verbosity ?? loadPlanModeResponseSettings().verbosity)
+
+  switch (resolvedVerbosity) {
+    case 'detailed':
+      return '## Plan Response Style\n\nUse detailed plans when helpful, but stay focused and avoid unrelated explanation.'
+    case 'normal':
+      return '## Plan Response Style\n\nUse a balanced plan with enough detail to implement the change. Avoid unnecessary verbosity.'
+    case 'concise':
+    default:
+      return '## Plan Response Style\n\nUse short, concise plans. Prefer brief bullets and avoid unnecessary detail.'
+  }
 }
 
 export function buildOperationModeSystemPrompt({
@@ -28,10 +53,14 @@ export function buildOperationModeSystemPrompt({
   conversationPrompt,
   basePrompt,
   includeCustomToolsPrompt = true,
+  planModeVerbosity,
 }: BuildOperationModeSystemPromptInput): string {
   const parts: string[] = []
 
   appendPromptPart(parts, getOperationModeSystemPrompt(operationMode))
+  if (operationMode === 'plan') {
+    appendPromptPart(parts, buildPlanModeResponseStylePrompt(planModeVerbosity))
+  }
   appendPromptPart(parts, basePrompt)
   appendPromptPart(parts, defaultUserPrompt)
   appendPromptPart(parts, projectPrompt)
@@ -44,56 +73,3 @@ export function buildOperationModeSystemPrompt({
   return parts.join('\n\n')
 }
 
-const CHAT_MODE_ALLOWED_TOOL_NAMES = new Set([
-  'browse_web',
-  'brave_search',
-  'fetch_chats',
-  'fetch_notes',
-  'finance',
-  'glob',
-  'internalLink',
-  'multi_call',
-  'plan_md',
-  'read_file',
-  'read_file_continuation',
-  'read_files',
-  'ripgrep',
-  'sports',
-  'time',
-  'view_image',
-  'weather',
-  'subagent',
-])
-
-const CHAT_MODE_BLOCKED_TOOL_NAMES = new Set([
-  'bash',
-  'powershell',
-  'create_file',
-  'edit_file',
-  'multi_edit',
-  'delete_file',
-  'custom_tool_manager',
-  'theme_manager',
-  'todo_list',
-  'mcp_manager',
-  'skill_manager',
-  'html_renderer',
-])
-
-export function filterToolsForOperationMode<T extends ToolDefinition>(tools: T[], operationMode: OperationMode): T[] {
-  if (operationMode !== 'plan') return tools
-  return tools.filter(tool => !tool.isCustom && !tool.isMcp && CHAT_MODE_ALLOWED_TOOL_NAMES.has(tool.name))
-}
-
-export function assertToolAllowedForOperationMode(toolCall: any, operationMode: OperationMode): void {
-  if (operationMode !== 'plan') return
-
-  const toolName = typeof toolCall?.name === 'string' ? toolCall.name : ''
-  if (!toolName) return
-
-  if (CHAT_MODE_BLOCKED_TOOL_NAMES.has(toolName) || toolName.startsWith('mcp__')) {
-    throw new Error(
-      `Tool "${toolName}" is not available in Chat Mode. Switch to Agent Mode to run tools that can modify files, system state, or app state.`
-    )
-  }
-}

@@ -407,7 +407,7 @@ describe('editFile replace and replace_first behavior', () => {
     await harness.writeFile(
       'escaped-string-literal.ts',
       [
-        'const hermesMsgId = uuidv4()',
+        'const assistantMsgId = uuidv4()',
         "const textContent = textParts.join('\\n\\n').trim()",
         '',
         'statements.upsertMessage.run(',
@@ -416,13 +416,13 @@ describe('editFile replace and replace_first behavior', () => {
 
     const result = await editFile('escaped-string-literal.ts', 'replace_first', {
       searchPattern: [
-        'const hermesMsgId = uuidv4()',
+        'const assistantMsgId = uuidv4()',
         "const textContent = textParts.join('\\n\\n').trim()",
         '',
         'statements.upsertMessage.run(',
       ].join('\n'),
       replacement: [
-        'const hermesMsgId = uuidv4()',
+        'const assistantMsgId = uuidv4()',
         "const textContent = textParts.join('\\n\\n').trim()",
         "const thinkingContent = reasoningParts.join('').trim()",
         '',

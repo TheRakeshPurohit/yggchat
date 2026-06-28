@@ -1,13 +1,16 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
-import { selectCcCwd, selectFocusedChatMessageId } from '../../features/chats/chatSelectors'
+import { selectCcCwd } from '../../features/chats/chatSelectors'
 import { chatSliceActions } from '../../features/chats/chatSlice'
+import type { ImageDraftTarget } from '../../features/chats/chatTypes'
 import { addSelectedFileForChat } from '../../features/ideContext'
 import { selectMentionableFiles, type MentionableFileOption } from '../../features/ideContext/ideContextSelectors'
 import { useIdeContext } from '../../hooks/useIdeContext'
 import { type DirectoryFileEntry, useDirectoryFileSearch, useDirectoryFiles } from '../../hooks/useQueries'
 import type { RootState } from '../../store/store'
 import { readLocalMentionFile } from '../../utils/readLocalMentionFile'
+import { rankFileMatches } from '../../../shared/fileMatchRanking'
+import { CHAT_NORMAL_TEXT_SIZE_CLASS, getChatFontSizeOffsetStyle } from '../ChatMessage/chatMessageShared'
 
 type textAreaState = 'default' | 'error' | 'disabled'
 type textAreaWidth = 'w-1/6' | 'w-1/4' | 'w-1/2' | 'w-3/4' | 'w-3/5' | 'w-5/6' | 'w-full' | 'max-w-3xl'
@@ -30,6 +33,9 @@ interface TextAreaProps {
   showCharCount?: boolean
   fillAvailableHeight?: boolean
   fallbackFileSearchRoot?: string | null
+  enableImageAttachments?: boolean
+  imageDraftTarget?: ImageDraftTarget
+  fontSizeOffset?: number
 }
 
 const allowedMentionChar = /[A-Za-z0-9._\/\-]/
@@ -100,11 +106,14 @@ export const TextArea: React.FC<TextAreaProps> = ({
   showCharCount = false,
   fillAvailableHeight = false,
   fallbackFileSearchRoot = null,
+  enableImageAttachments = false,
+  imageDraftTarget = { kind: 'composer' },
+  fontSizeOffset = 0,
   ...rest
 }) => {
   const dispatch = useDispatch()
-  const focusedMessageId = useSelector(selectFocusedChatMessageId)
   const imageDrafts = useSelector((s: RootState) => s.chat.composition.imageDrafts)
+  const currentImageDraftTarget = useSelector((s: RootState) => s.chat.composition.imageDraftTarget)
   const mentionableFiles = useSelector(selectMentionableFiles)
   const selectedFilesForChat = useSelector((s: RootState) => s.ideContext.selectedFilesForChat)
   const extensionConnected = useSelector((s: RootState) => s.ideContext.extensionConnected)
@@ -116,6 +125,13 @@ export const TextArea: React.FC<TextAreaProps> = ({
     const selectedPaths = new Set(selectedFilesForChat.map(f => f.path))
     setLocalMentionableFiles(mentionableFiles.filter(f => !selectedPaths.has(f.path)))
   }, [mentionableFiles, selectedFilesForChat])
+  const imageDraftTargetMatches =
+    currentImageDraftTarget?.kind === imageDraftTarget.kind &&
+    (imageDraftTarget.kind === 'composer' ||
+      (currentImageDraftTarget?.kind === 'branch' &&
+        String(currentImageDraftTarget.messageId) === String(imageDraftTarget.messageId)))
+  const visibleImageDrafts = enableImageAttachments && imageDraftTargetMatches ? imageDrafts : []
+
   const effectiveFallbackFileSearchRoot =
     (typeof fallbackFileSearchRoot === 'string' && fallbackFileSearchRoot.trim()) ||
     (typeof chatCwd === 'string' && chatCwd.trim()) ||
@@ -160,7 +176,8 @@ export const TextArea: React.FC<TextAreaProps> = ({
   )
   const fallbackMentionableFiles = useMemo(() => {
     const source = activeMentionTerm ? fallbackFileSearchData?.files || [] : fallbackDirectoryData?.files || []
-    return source.map(toMentionableOption).filter(file => !selectedMentionedPaths.has(file.path))
+    const options = source.map(toMentionableOption).filter(file => !selectedMentionedPaths.has(file.path))
+    return activeMentionTerm ? rankFileMatches(options, activeMentionTerm) : options
   }, [activeMentionTerm, fallbackDirectoryData?.files, fallbackFileSearchData?.files, selectedMentionedPaths])
   const isFallbackMentionLoading = shouldUseLocalFileFallback
     ? activeMentionTerm
@@ -267,7 +284,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
     e.preventDefault()
     e.stopPropagation()
     setDragOver(false)
-    if (state === 'disabled') return
+    if (state === 'disabled' || !enableImageAttachments) return
 
     const files = Array.from(e.dataTransfer?.files || [])
     const images = files.filter(f => f.type.startsWith('image/'))
@@ -282,21 +299,13 @@ export const TextArea: React.FC<TextAreaProps> = ({
       }))
     )
       .then(drafts => {
-        dispatch(chatSliceActions.imageDraftsAppended(drafts))
-        if (focusedMessageId != null) {
-          dispatch(
-            chatSliceActions.messageArtifactsAppended({
-              messageId: focusedMessageId,
-              artifacts: drafts.map(d => d.dataUrl),
-            })
-          )
-        }
+        dispatch(chatSliceActions.imageDraftsAppended({ drafts, target: imageDraftTarget }))
       })
       .catch(err => console.error('Failed to read dropped images', err))
   }
 
   const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (state === 'disabled') return
+    if (state === 'disabled' || !enableImageAttachments) return
 
     const items = Array.from(e.clipboardData?.items || [])
     const imageItems = items.filter(item => item.type.startsWith('image/'))
@@ -327,15 +336,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
         }>
 
         if (drafts.length > 0) {
-          dispatch(chatSliceActions.imageDraftsAppended(drafts))
-          if (focusedMessageId != null) {
-            dispatch(
-              chatSliceActions.messageArtifactsAppended({
-                messageId: focusedMessageId,
-                artifacts: drafts.map(d => d.dataUrl),
-              })
-            )
-          }
+          dispatch(chatSliceActions.imageDraftsAppended({ drafts, target: imageDraftTarget }))
         }
       })
       .catch(err => console.error('Failed to read pasted images', err))
@@ -496,14 +497,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
       return
     }
 
-    const term = activeMention.term.toLowerCase()
-    const filtered = localMentionableFiles.filter(file => {
-      const nameMatches = file.name.toLowerCase().includes(term)
-      const relativePathMatches = file.relativePath.toLowerCase().includes(term)
-      const relativeDirectoryMatches = file.relativeDirectoryPath.toLowerCase().includes(term)
-      const absolutePathMatches = file.path.toLowerCase().includes(term)
-      return nameMatches || relativePathMatches || relativeDirectoryMatches || absolutePathMatches
-    })
+    const filtered = rankFileMatches(localMentionableFiles, activeMention.term)
     setFilteredFiles(filtered)
     setSelectedFileIndex(0)
     setShowFileList(filtered.length > 0)
@@ -548,7 +542,13 @@ export const TextArea: React.FC<TextAreaProps> = ({
     }
   }, [showFileList])
 
-  const baseStyles = `${width} resize-none px-4 py-3 rounded-xl transition-all duration-200 overflow-hidden border-1 border-neutral-300 dark:border-neutral-600 bg-neutral-50 dark:bg-neutral-900 text-[16px] sm:text-[14px] md:text-[14px] lg:text-[13px] 2xl:text-[14px] `
+  const textareaStyle = fillAvailableHeight
+    ? getChatFontSizeOffsetStyle(fontSizeOffset)
+    : {
+        minHeight: `${minRows * 24 + 16}px`,
+        ...getChatFontSizeOffsetStyle(fontSizeOffset),
+      }
+  const baseStyles = `${width} resize-none px-4 py-3 rounded-xl transition-all duration-200 overflow-hidden border-1 border-neutral-300 dark:border-neutral-600 bg-neutral-50 dark:bg-neutral-900 ${CHAT_NORMAL_TEXT_SIZE_CLASS} `
   const labelClasses = state === 'disabled' ? 'opacity-40' : ''
   // focus:border-gray-500 focus:ring-2 focus:ring-gray-500 focus:ring-opacity-50 dark:focus:ring-2 dark:focus:ring-secondary-600
   const stateStyles = {
@@ -587,13 +587,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
           aria-invalid={state === 'error'}
           aria-describedby={state === 'error' && errorMessage ? errorId : undefined}
           autoFocus={autoFocus}
-          style={
-            fillAvailableHeight
-              ? undefined
-              : {
-                  minHeight: `${minRows * 24 + 16}px`,
-                }
-          }
+          style={textareaStyle}
           {...rest}
         />
 
@@ -653,15 +647,24 @@ export const TextArea: React.FC<TextAreaProps> = ({
       </div>
 
       {/* Image draft previews */}
-      {imageDrafts && imageDrafts.length > 0 && (
+      {visibleImageDrafts.length > 0 && (
         <div className='mt-2 px-2 flex flex-wrap gap-2'>
-          {imageDrafts.map((img, idx) => (
+          {visibleImageDrafts.map((img, idx) => (
             <div
               key={idx}
-              className='w-16 h-16 rounded-md overflow-hidden border border-gray-600 bg-neutral-800'
+              className='relative w-16 h-16 rounded-md overflow-hidden border border-gray-600 bg-neutral-800 group'
               title={img.name}
             >
               <img src={img.dataUrl} alt={img.name || `image-${idx}`} className='w-full h-full object-cover' />
+              <button
+                type='button'
+                onClick={() => dispatch(chatSliceActions.imageDraftRemoved({ index: idx, target: imageDraftTarget }))}
+                className='absolute top-0 right-0 w-5 h-5 bg-red-400 hover:bg-red-700 text-white rounded-bl-md opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-xs font-bold'
+                aria-label='Remove image'
+                title='Remove image'
+              >
+                ×
+              </button>
             </div>
           ))}
         </div>

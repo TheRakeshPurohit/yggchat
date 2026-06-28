@@ -1,11 +1,13 @@
 import { Analytics } from '@vercel/analytics/react'
 import { AnimatePresence } from 'framer-motion'
 import { useCallback, useEffect, useRef } from 'react'
+import { getThemeModeColor, useCustomChatTheme, useHtmlDarkMode } from './components/ThemeManager/themeConfig'
 import { BrowserRouter, HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import './App.css'
 import { HtmlIframeRegistryProvider, useHtmlIframeRegistry } from './components/HtmlIframeRegistry/HtmlIframeRegistry'
 import { GlobalNotifications } from './components/GlobalNotifications/GlobalNotifications'
 import { HtmlToolsModal } from './components/HtmlToolsModal/HtmlToolsModal'
+import { RunningAgentsFloatingButton } from './components/RunningAgentsFloatingButton'
 import { LiquidGlassSVG } from './components/LiquidGlassSVG'
 import ProtectedRoute from './components/ProtectedRoute'
 import { TitleBar } from './components/TitleBar/TitleBar'
@@ -65,6 +67,7 @@ const RIGHTBAR_HIDDEN_ROUTES = new Set([
   '/faq',
   '/paymentplan',
   '/blog',
+  '/settings',
   '/terms',
   '/refund-policy',
   '/privacy',
@@ -89,6 +92,7 @@ const HtmlToolsShell = ({ enabled }: { enabled: boolean }) => {
   const registry = useHtmlIframeRegistry()
   const currentUser = useAppSelector(selectCurrentUser)
   const isMobile = useIsMobile()
+  const { data: notes = [] } = useResearchNotes()
   const isHiddenRoute = TOOL_VIEWER_HIDDEN_ROUTES.has(location.pathname)
   const canShow = Boolean(enabled && registry && currentUser && !isHiddenRoute)
   const bootstrappedUserIdRef = useRef<string | null>(null)
@@ -116,27 +120,24 @@ const HtmlToolsShell = ({ enabled }: { enabled: boolean }) => {
 
   const isHomepageFullscreen = registry.isHomepageFullscreen
 
+  const toggleAppsModal = () => {
+    if (registry.isModalOpen) {
+      registry.closeModal()
+      return
+    }
+    registry.openModal()
+  }
+
   return (
     <>
       <HtmlToolsModal />
       {!isHomepageFullscreen && (
-        <button
-          type='button'
-          onClick={() => {
-            if (registry.isModalOpen) {
-              registry.closeModal()
-              return
-            }
-            registry.openModal()
-          }}
-          className={`fixed ${isMobile ? 'bottom-32 right-5' : 'bottom-6 right-6'} z-[1500] rounded-full border border-neutral-200/80 dark:border-neutral-700/70 bg-white/90 dark:bg-yBlack-900/90 px-4 py-3 text-sm font-semibold text-neutral-800 dark:text-neutral-100 shadow-lg transition hover:scale-[1.02] hover:shadow-xl`}
-          aria-label={registry.isModalOpen ? 'Close HTML tools' : 'Open HTML tools'}
-        >
-          <span className='flex items-center gap-2'>
-            {/* <i className='bx bx-window-open text-lg' aria-hidden='true'></i> */}
-            {registry.isModalOpen ? 'Close' : 'Apps'}
-          </span>
-        </button>
+        <RunningAgentsFloatingButton
+          notes={notes}
+          onOpenApps={toggleAppsModal}
+          appsOpen={registry.isModalOpen}
+          className={isMobile ? 'bottom-32 right-5' : 'bottom-6 right-14'}
+        />
       )}
     </>
   )
@@ -261,6 +262,42 @@ function AnimatedRoutes() {
   )
 }
 
+const GlobalCustomThemeCssVariables = () => {
+  const { theme: customTheme, enabled: customThemeEnabled } = useCustomChatTheme()
+  const isDarkMode = useHtmlDarkMode()
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+
+    const rootStyle = document.documentElement.style
+    const variableNames = [
+      '--thin-scrollbar-thumb',
+      '--thin-scrollbar-thumb-hover',
+      '--thin-scrollbar-track',
+      '--thin-scrollbar-shadow',
+    ]
+
+    if (!customThemeEnabled) {
+      variableNames.forEach(name => rootStyle.removeProperty(name))
+      return
+    }
+
+    rootStyle.setProperty('--thin-scrollbar-thumb', getThemeModeColor(customTheme.colors.thinScrollbarThumb, isDarkMode))
+    rootStyle.setProperty(
+      '--thin-scrollbar-thumb-hover',
+      getThemeModeColor(customTheme.colors.thinScrollbarThumbHover, isDarkMode)
+    )
+    rootStyle.setProperty('--thin-scrollbar-track', getThemeModeColor(customTheme.colors.thinScrollbarTrack, isDarkMode))
+    rootStyle.setProperty('--thin-scrollbar-shadow', getThemeModeColor(customTheme.colors.thinScrollbarShadow, isDarkMode))
+
+    return () => {
+      variableNames.forEach(name => rootStyle.removeProperty(name))
+    }
+  }, [customTheme, customThemeEnabled, isDarkMode])
+
+  return null
+}
+
 function App() {
   const currentUser = useAppSelector(selectCurrentUser)
   const resetKey = currentUser?.id ?? null
@@ -269,6 +306,8 @@ function App() {
     <>
       {/* Custom title bar for Windows Electron */}
       <TitleBar />
+      {/* Persistent custom theme CSS variables */}
+      <GlobalCustomThemeCssVariables />
       {/* Persistent app background across all routes */}
       <VideoBackground />
       {/* SVG filters for liquid glass effect */}

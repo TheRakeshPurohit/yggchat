@@ -12,13 +12,48 @@ import {
   loadSubagentToolSettings,
 } from '../../helpers/subagentToolSettings'
 import { getAllTools } from './toolDefinitions'
+import { createStreamingRun, finishStreamingRun } from './streamRunTracking'
 
-const DEFAULT_SUBAGENT_MODEL = 'openai/gpt-5.3-codex'
+const DEFAULT_SUBAGENT_MODEL = 'openai/gpt-5.4-mini'
 const MAX_PARALLEL_SUBAGENTS = 3
 const MAX_SUBAGENT_DEPTH = 2
 const isElectronEnvironment = environment === 'electron' || (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__)
 const normalizeProviderSlug = (providerName: string | null | undefined): string =>
   (providerName || '').toLowerCase().replace(/\s+/g, '')
+
+const normalizeOpenAIChatGPTModelId = (modelName: string | null | undefined): string | null => {
+  const raw = typeof modelName === 'string' ? modelName.trim() : ''
+  if (!raw) return null
+
+  const stripped = raw.replace(/^(openai|openaichatgpt)\//i, '')
+  const slug = stripped.toLowerCase().replace(/\s+/g, '-')
+
+  if (slug.includes('gpt-5.5-pro')) return 'gpt-5.5-pro'
+  if (slug.includes('gpt-5.5')) return 'gpt-5.5'
+  if (slug.includes('gpt-5.4-mini')) return 'gpt-5.4-mini'
+  if (slug.includes('gpt-5.4-pro')) return 'gpt-5.4-pro'
+  if (slug.includes('gpt-5.4')) return 'gpt-5.4'
+  if (slug.includes('gpt-5.3-codex')) return 'gpt-5.3-codex'
+
+  // Retired/stale ChatGPT selections should not leak display names to the backend.
+  if (slug.includes('gpt-5.2') || slug.includes('gpt-5.1') || slug.includes('gpt-5-codex') || slug.includes('codex-mini-latest')) {
+    return 'gpt-5.3-codex'
+  }
+
+  if (slug.includes('gpt-5')) return 'gpt-5.5'
+  if (slug.includes('gpt-4o')) return 'gpt-5.4-mini'
+
+  return stripped || null
+}
+
+const normalizeSubagentModelForProvider = (
+  modelName: string | null | undefined,
+  providerName: string | null | undefined
+): string | null => {
+  const raw = typeof modelName === 'string' ? modelName.trim() : ''
+  if (!raw) return null
+  return resolveInheritedSubagentProvider(providerName) === 'openaichatgpt' ? normalizeOpenAIChatGPTModelId(raw) : raw
+}
 
 export interface SubagentRuntimeContext {
   dispatch: any
@@ -30,6 +65,7 @@ export interface SubagentRuntimeContext {
   callerProvider?: string | null
   queryClient?: QueryClient | null
   subagentDepth?: number
+  operationMode: OperationMode
   executeLocalTool: (
     toolCall: any,
     rootPath: string | null,
@@ -94,7 +130,9 @@ type ModelsCacheEntry = {
 const resolveModelFromCache = (queryClient: QueryClient | null | undefined, providerName: string | null | undefined): string | null => {
   if (!queryClient || !providerName) return null
   const modelsData = queryClient.getQueryData<ModelsCacheEntry>(['models', providerName])
-  return modelsData?.selected?.name || modelsData?.default?.name || null
+  const selected = modelsData?.selected
+  const defaultModel = modelsData?.default
+  return selected?.id || selected?.name || defaultModel?.id || defaultModel?.name || null
 }
 
 const resolveSubagentDefaults = (
@@ -108,13 +146,16 @@ const resolveSubagentDefaults = (
   const configuredModel = settings.defaultModel?.trim() || null
   const providerNameForResolution = configuredProvider || callerProviderName || null
 
+  const resolvedProvider = resolveInheritedSubagentProvider(providerNameForResolution)
+  const rawModel =
+    normalizedRequestedModel ||
+    configuredModel ||
+    resolveModelFromCache(queryClient, providerNameForResolution) ||
+    DEFAULT_SUBAGENT_MODEL
+
   return {
-    model:
-      normalizedRequestedModel ||
-      configuredModel ||
-      resolveModelFromCache(queryClient, providerNameForResolution) ||
-      DEFAULT_SUBAGENT_MODEL,
-    provider: resolveInheritedSubagentProvider(providerNameForResolution),
+    model: normalizeSubagentModelForProvider(rawModel, providerNameForResolution) || rawModel,
+    provider: resolvedProvider,
   }
 }
 
@@ -134,6 +175,9 @@ const getRuntimeToolCallName = (toolCall: any): string =>
       : ''
 
 const isSubagentToolCall = (toolCall: any): boolean => getRuntimeToolCallName(toolCall) === 'subagent'
+
+const stripSubagentThinkingBlocks = (text: string): string =>
+  text.replace(/<thinking>[\s\S]*?<\/thinking>\s*/gi, '').trim()
 
 const runWithConcurrencyLimit = async <T, R>(
   items: T[],
@@ -205,12 +249,8 @@ export const executeSimpleSubagentCall = async (
       }
 
       const fullText = typeof localPayload?.message?.content === 'string' ? localPayload.message.content : ''
-      const reasoning = typeof localPayload?.reasoning === 'string' ? localPayload.reasoning : ''
 
-      if (reasoning) {
-        return `<thinking>\n${reasoning}\n</thinking>\n\n${fullText}`
-      }
-      return fullText || 'Subagent returned empty response'
+      return stripSubagentThinkingBlocks(fullText) || 'Subagent returned empty response'
     }
     const response = await createStreamingRequest('/generate/ephemeral', accessToken, {
       method: 'POST',
@@ -238,7 +278,6 @@ export const executeSimpleSubagentCall = async (
 
     const decoder = new TextDecoder()
     let fullText = ''
-    let reasoning = ''
     let sseBuffer = ''
 
     while (true) {
@@ -259,8 +298,6 @@ export const executeSimpleSubagentCall = async (
             const parsed = JSON.parse(data)
             if (parsed.text) {
               fullText += parsed.text
-            } else if (parsed.reasoning) {
-              reasoning += parsed.reasoning
             }
           } catch {
             if (data.trim()) {
@@ -271,10 +308,7 @@ export const executeSimpleSubagentCall = async (
       }
     }
 
-    if (reasoning) {
-      return `<thinking>\n${reasoning}\n</thinking>\n\n${fullText}`
-    }
-    return fullText || 'Subagent returned empty response'
+    return stripSubagentThinkingBlocks(fullText) || 'Subagent returned empty response'
   } catch (error) {
     console.error('[executeSimpleSubagentCall] Error:', error)
     throw error instanceof Error ? error : new Error(String(error))
@@ -520,6 +554,20 @@ export const executeSubagentCall = async (
     modelName: resolvedModel,
     systemPrompt: effectiveSystemPrompt,
   })
+  if (streamId) {
+    void createStreamingRun({
+      streamId,
+      conversationId,
+      parentMessageId,
+      streamType: 'subagent',
+      provider: resolvedProvider || null,
+      modelName: resolvedModel,
+      operation: 'subagent',
+      source: 'subagent',
+      toolCallId: typeof toolCall?.id === 'string' ? toolCall.id : null,
+      metadata: { subagent_run_id: subagentSessionId },
+    })
+  }
   await appendSubagentMessage(subagentSessionId, {
     role: 'user',
     content: prompt,
@@ -527,6 +575,7 @@ export const executeSubagentCall = async (
   })
 
   let finalResponse = ''
+  let finalToolResult = ''
   
   const subagentAbortController = new AbortController()
   const unregisterAbortController = registerSubagentAbortController(streamId, subagentAbortController)
@@ -753,6 +802,7 @@ export const executeSubagentCall = async (
       // If no client tool calls AND no server tool results, this is the final response
       if (turnToolCalls.length === 0 && serverToolResults.length === 0) {
         finalResponse = turnReasoning ? `<thinking>\n${turnReasoning}\n</thinking>\n\n${turnText}` : turnText
+        finalToolResult = stripSubagentThinkingBlocks(turnText)
 
         // Build content_blocks for final message (text only, no tool calls/results)
         const finalContentBlocks = buildContentBlocks([])
@@ -771,6 +821,11 @@ export const executeSubagentCall = async (
           final_response: finalResponse,
           turns_used: turnsUsed,
           tool_calls_used: toolCallsUsed,
+        })
+        void finishStreamingRun(streamId, {
+          status: 'completed',
+          endReason: 'completed',
+          metadata: { subagent_run_id: subagentSessionId },
         })
         break
       }
@@ -811,7 +866,8 @@ export const executeSubagentCall = async (
           })
         }
 
-          finalResponse = turnText
+        finalResponse = turnText
+        finalToolResult = stripSubagentThinkingBlocks(turnText)
 
         // Continue to next turn - model will process the tool results
         continue
@@ -840,16 +896,18 @@ export const executeSubagentCall = async (
             throw new Error('Subagent aborted')
           }
 
-          // Read live settings per tool call so toggles apply mid-stream.
+          // Read live permission settings per tool call so auto-approve toggles apply mid-stream.
+          // Operation mode is captured from the parent stream so branch-local Chat/Agent safety
+          // does not change when the global UI mode changes while this subagent is running.
           const liveState = getState()
           const parentAutoApprove = liveState.chat.toolAutoApprove
-          const liveOperationMode = liveState.chat.operationMode
+          const capturedOperationMode = context.operationMode
           const shouldAutoApprove = inheritAutoApprove && parentAutoApprove
 
           let result: string
           if (shouldAutoApprove) {
             // Execute directly without permission check
-            result = await context.executeLocalTool(tc, rootPath, liveOperationMode, {
+            result = await context.executeLocalTool(tc, rootPath, capturedOperationMode, {
               conversationId,
               messageId: assistantMessageId,
               streamId,
@@ -861,7 +919,7 @@ export const executeSubagentCall = async (
             })
           } else {
             // Show permission dialog. This path is intentionally not parallelized.
-            result = await context.executeToolWithPermissionCheck(dispatch, getState, tc, rootPath, liveOperationMode, {
+            result = await context.executeToolWithPermissionCheck(dispatch, getState, tc, rootPath, capturedOperationMode, {
               conversationId,
               messageId: assistantMessageId,
               streamId,
@@ -969,10 +1027,12 @@ export const executeSubagentCall = async (
       }
 
       finalResponse = turnText
+      finalToolResult = stripSubagentThinkingBlocks(turnText)
     }
   } catch (error) {
     if (subagentAbortController.signal.aborted) {
       await updateSubagentRun(subagentSessionId, { status: 'aborted', error: 'Subagent aborted', turns_used: turnsUsed, tool_calls_used: toolCallsUsed })
+      void finishStreamingRun(streamId, { status: 'aborted', endReason: 'aborted', error: 'Subagent aborted', metadata: { subagent_run_id: subagentSessionId } })
       throw new Error('Subagent aborted')
     }
     console.error('[subagent] Error in subagent execution:', error)
@@ -981,6 +1041,12 @@ export const executeSubagentCall = async (
       error: error instanceof Error ? error.message : String(error),
       turns_used: turnsUsed,
       tool_calls_used: toolCallsUsed,
+    })
+    void finishStreamingRun(streamId, {
+      status: 'error',
+      endReason: 'error',
+      error: error instanceof Error ? error.message : String(error),
+      metadata: { subagent_run_id: subagentSessionId },
     })
     throw error
   } finally {
@@ -1132,6 +1198,7 @@ export const executeSubagentCall = async (
     finalResponse = finalizeReasoning
       ? `<thinking>\n${finalizeReasoning}\n</thinking>\n\n${finalizeText}`
       : finalizeText
+    finalToolResult = stripSubagentThinkingBlocks(finalizeText)
   }
 
   await updateSubagentRun(subagentSessionId, {
@@ -1140,8 +1207,13 @@ export const executeSubagentCall = async (
     turns_used: turnsUsed,
     tool_calls_used: toolCallsUsed,
   })
+  void finishStreamingRun(streamId, {
+    status: 'completed',
+    endReason: 'completed',
+    metadata: { subagent_run_id: subagentSessionId },
+  })
 
-  return finalResponse || 'No response generated'
+  return finalToolResult || 'No response generated'
   // legacy summary removed\n\n${finalResponse || 'No response generated'}\n\n---\nTurns: ${turnsUsed}/${maxTurns} | Tool calls: ${totalToolCallsUsed}/${maxToolCalls} | Tools: ${toolSummary}`
 }
 

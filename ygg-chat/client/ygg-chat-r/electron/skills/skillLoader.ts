@@ -183,7 +183,7 @@ Step-by-step instructions for the AI to follow...
 
       for (const entry of entries) {
         if (entry.isDirectory() && !entry.name.startsWith('.')) {
-          await this.loadSkill(entry.name)
+          await this.loadSkillOrGroup(entry.name)
         }
       }
     } catch (error) {
@@ -193,8 +193,30 @@ Step-by-step instructions for the AI to follow...
     }
   }
 
-  private async loadSkill(skillDirName: string): Promise<void> {
+  private async loadSkillOrGroup(skillDirName: string): Promise<void> {
     const skillPath = path.join(this.getSkillsDirectory(), skillDirName)
+
+    if (await this.fileExists(path.join(skillPath, SKILL_FILE))) {
+      await this.loadSkillAtPath(skillDirName, skillPath)
+      return
+    }
+
+    try {
+      const entries = await fs.readdir(skillPath, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith('.')) {
+          const nestedSkillPath = path.join(skillPath, entry.name)
+          if (await this.fileExists(path.join(nestedSkillPath, SKILL_FILE))) {
+            await this.loadSkillAtPath(`${skillDirName}/${entry.name}`, nestedSkillPath)
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(`[SkillLoader] Failed to scan skill group ${skillDirName}:`, error)
+    }
+  }
+
+  private async loadSkillAtPath(skillDirName: string, skillPath: string): Promise<void> {
     const skillFilePath = path.join(skillPath, SKILL_FILE)
     const metaFilePath = path.join(skillPath, META_FILE)
 
@@ -289,6 +311,15 @@ Step-by-step instructions for the AI to follow...
     try {
       const stat = await fs.stat(dirPath)
       return stat.isDirectory()
+    } catch {
+      return false
+    }
+  }
+
+  private async fileExists(filePath: string): Promise<boolean> {
+    try {
+      const stat = await fs.stat(filePath)
+      return stat.isFile()
     } catch {
       return false
     }

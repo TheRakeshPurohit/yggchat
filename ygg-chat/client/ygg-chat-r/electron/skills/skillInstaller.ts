@@ -13,12 +13,30 @@ interface GitHubContent {
   type: 'file' | 'dir'
   download_url: string | null
   url: string // API URL for directories
+  html_url?: string
 }
 
-interface InstallResult {
+export interface SkillInstallCandidate {
+  name: string
+  path: string
+  url: string
+  contents?: GitHubContent[]
+}
+
+interface GitHubSourceParts {
+  owner: string
+  repo: string
+  path: string
+  ref?: string
+}
+
+export interface InstallResult {
   success: boolean
   skillName?: string
+  skillNames?: string[]
   error?: string
+  code?: 'MULTIPLE_SKILLS_FOUND' | 'NO_SKILLS_FOUND' | 'INVALID_SOURCE' | 'INSTALL_FAILED'
+  candidates?: SkillInstallCandidate[]
 }
 
 interface CatalogSkill {
@@ -29,11 +47,30 @@ interface CatalogSkill {
 
 const GITHUB_API_BASE = 'https://api.github.com'
 const USER_AGENT = 'ygg-chat-electron'
+const GITHUB_API_MIN_INTERVAL_MS = process.env.VITEST ? 0 : 750
+
+let lastGitHubApiRequestAt = 0
+
+async function delay(ms: number): Promise<void> {
+  if (ms <= 0) return
+  await new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function waitForGitHubApiSlot(): Promise<void> {
+  const now = Date.now()
+  const waitMs = Math.max(0, lastGitHubApiRequestAt + GITHUB_API_MIN_INTERVAL_MS - now)
+  if (waitMs > 0) {
+    await delay(waitMs)
+  }
+  lastGitHubApiRequestAt = Date.now()
+}
 
 /**
  * Fetch JSON from GitHub API
  */
 async function fetchGitHubAPI(url: string): Promise<any> {
+  await waitForGitHubApiSlot()
+
   const response = await fetch(url, {
     headers: {
       'User-Agent': USER_AGENT,
@@ -72,7 +109,11 @@ async function downloadFile(url: string): Promise<string> {
 /**
  * Recursively download directory contents from GitHub
  */
-async function downloadDirectory(contents: GitHubContent[], targetDir: string): Promise<void> {
+async function downloadDirectory(
+  contents: GitHubContent[],
+  targetDir: string,
+  preloadedDirectories: Map<string, GitHubContent[]> = new Map()
+): Promise<void> {
   await fs.mkdir(targetDir, { recursive: true })
 
   for (const item of contents) {
@@ -82,9 +123,9 @@ async function downloadDirectory(contents: GitHubContent[], targetDir: string): 
       const content = await downloadFile(item.download_url)
       await fs.writeFile(targetPath, content, 'utf-8')
     } else if (item.type === 'dir') {
-      // Fetch subdirectory contents
-      const subContents = await fetchGitHubAPI(item.url)
-      await downloadDirectory(subContents, targetPath)
+      // Fetch subdirectory contents, reusing already discovered directories when available.
+      const subContents = preloadedDirectories.get(item.path) || (await fetchGitHubAPI(item.url))
+      await downloadDirectory(subContents, targetPath, preloadedDirectories)
     }
   }
 }
@@ -97,27 +138,126 @@ async function downloadDirectory(contents: GitHubContent[], targetDir: string): 
  *   - "https://github.com/owner/repo" -> entire repo
  *   - "https://github.com/owner/repo/tree/main/path" -> specific path
  */
-function parseGitHubSource(source: string): { owner: string; repo: string; path: string } {
+function buildGitHubContentsUrl(owner: string, repo: string, repoPath: string, ref?: string): string {
+  const encodedPath = repoPath
+    .split('/')
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join('/')
+  return withGitHubRef(`${GITHUB_API_BASE}/repos/${owner}/${repo}/contents/${encodedPath}`, ref)
+}
+
+function withGitHubRef(url: string, ref?: string): string {
+  if (!ref) return url
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}ref=${encodeURIComponent(ref)}`
+}
+
+function buildGitHubTreeUrl(owner: string, repo: string, ref: string | undefined, repoPath: string): string {
+  const encodedPath = repoPath
+    .split('/')
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join('/')
+  return `https://github.com/${owner}/${repo}/tree/${encodeURIComponent(ref || 'main')}/${encodedPath}`
+}
+
+function containsSkillMd(contents: GitHubContent[]): boolean {
+  return contents.some((item: GitHubContent) => item.name === 'SKILL.md' && item.type === 'file')
+}
+
+async function findDirectSkillCandidates(
+  owner: string,
+  repo: string,
+  contents: GitHubContent[],
+  ref?: string
+): Promise<SkillInstallCandidate[]> {
+  const directories = contents.filter((item: GitHubContent) => item.type === 'dir')
+  const candidates: SkillInstallCandidate[] = []
+
+  for (const directory of directories) {
+    try {
+      const directoryContents = await fetchGitHubAPI(withGitHubRef(directory.url, ref))
+      if (Array.isArray(directoryContents) && containsSkillMd(directoryContents)) {
+        candidates.push({
+          name: directory.name,
+          path: directory.path,
+          url: directory.html_url || buildGitHubTreeUrl(owner, repo, ref, directory.path),
+          contents: directoryContents,
+        })
+      }
+    } catch {
+      // Ignore unreadable child directories; they are simply not installable skills.
+    }
+  }
+
+  return candidates
+}
+
+function multipleSkillsFound(candidates: SkillInstallCandidate[]): InstallResult {
+  const names = candidates.map(candidate => candidate.name).join(', ')
+  const urls = candidates.map(candidate => candidate.url).join(', ')
+  return {
+    success: false,
+    code: 'MULTIPLE_SKILLS_FOUND',
+    candidates: candidates.map(({ contents: _contents, ...candidate }) => candidate),
+    error: `Multiple skills found: ${names}. Paste one of these specific skill URLs to install it: ${urls}`,
+  }
+}
+
+async function discoverGitHubSkills(parts: GitHubSourceParts): Promise<{
+  contents: GitHubContent[]
+  isSingleSkill: boolean
+  candidates: SkillInstallCandidate[]
+}> {
+  const { owner, repo, path: repoPath, ref } = parts
+  const contents = await fetchGitHubAPI(buildGitHubContentsUrl(owner, repo, repoPath, ref))
+
+  if (!Array.isArray(contents)) {
+    return { contents: [], isSingleSkill: false, candidates: [] }
+  }
+
+  if (containsSkillMd(contents)) {
+    return { contents, isSingleSkill: true, candidates: [] }
+  }
+
+  let candidates = await findDirectSkillCandidates(owner, repo, contents, ref)
+  const skillsDir = contents.find((item: GitHubContent) => item.type === 'dir' && item.name === 'skills')
+  if (repoPath === '' && candidates.length === 0 && skillsDir) {
+    const skillsContents = await fetchGitHubAPI(withGitHubRef(skillsDir.url, ref))
+    if (Array.isArray(skillsContents)) {
+      candidates = await findDirectSkillCandidates(owner, repo, skillsContents, ref)
+    }
+  }
+
+  return { contents, isSingleSkill: false, candidates }
+}
+
+function parseGitHubSource(source: string): GitHubSourceParts {
   // Handle full URLs
   if (source.startsWith('https://github.com/')) {
     const url = new URL(source)
-    const parts = url.pathname.split('/').filter(Boolean)
+    const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent)
 
     const owner = parts[0]
     const repo = parts[1]
 
-    // Check for /tree/branch/path format
-    if (parts[2] === 'tree' && parts.length > 3) {
-      // Skip branch name (parts[3]), get rest as path
+    if (!owner || !repo) {
+      throw new Error('Invalid GitHub URL. Expected https://github.com/owner/repo')
+    }
+
+    // Check for /tree/branch/path or /blob/branch/path format
+    if ((parts[2] === 'tree' || parts[2] === 'blob') && parts.length > 3) {
+      const ref = parts[3]
       const pathParts = parts.slice(4)
-      return { owner, repo, path: pathParts.join('/') }
+      return { owner, repo, path: pathParts.join('/'), ref }
     }
 
     return { owner, repo, path: '' }
   }
 
   // Handle shorthand format: owner/repo or owner/repo/path
-  const parts = source.split('/')
+  const parts = source.split('/').filter(Boolean)
   if (parts.length < 2) {
     throw new Error('Invalid source format. Use "owner/repo" or "owner/repo/path"')
   }
@@ -166,39 +306,59 @@ async function validateSkillDirectory(dirPath: string): Promise<{ valid: boolean
  */
 export async function installFromGitHub(source: string): Promise<InstallResult> {
   try {
-    const { owner, repo, path: repoPath } = parseGitHubSource(source)
+    const parts = parseGitHubSource(source)
+    const { repo, path: repoPath, ref } = parts
+    const discovery = await discoverGitHubSkills(parts)
 
-    // Fetch contents from GitHub API
-    const apiUrl = `${GITHUB_API_BASE}/repos/${owner}/${repo}/contents/${repoPath}`
-    const contents = await fetchGitHubAPI(apiUrl)
-
-    // Check if this is a skill directory (has SKILL.md) or a directory of skills
-    const hasSkillMd =
-      Array.isArray(contents) &&
-      contents.some((item: GitHubContent) => item.name === 'SKILL.md' && item.type === 'file')
-
-    if (hasSkillMd) {
-      // This is a single skill - install it
-      return await installSingleSkill(contents, source, repoPath.split('/').pop() || repo)
+    if (discovery.isSingleSkill) {
+      return await installSingleSkill(discovery.contents, source, repoPath.split('/').pop() || repo)
     }
 
-    // Check if it's a directory containing skill folders
-    const skillFolders = Array.isArray(contents) ? contents.filter((item: GitHubContent) => item.type === 'dir') : []
-
-    if (skillFolders.length === 0) {
-      return { success: false, error: 'No skills found at this location' }
+    if (discovery.candidates.length === 1) {
+      return installFromGitHub(buildGitHubTreeUrl(parts.owner, repo, ref, discovery.candidates[0].path))
     }
 
-    // For now, return error asking user to be more specific
-    // In future, could show a picker UI
-    const folderNames = skillFolders.map((f: GitHubContent) => f.name).join(', ')
+    if (discovery.candidates.length > 1) {
+      return multipleSkillsFound(discovery.candidates)
+    }
+
     return {
       success: false,
-      error: `Multiple skill folders found: ${folderNames}. Please specify which skill to install (e.g., "${source}/folder-name")`,
+      code: 'NO_SKILLS_FOUND',
+      error:
+        'No skills found at this location. GitHub skills must be folders containing SKILL.md, for example https://github.com/owner/repo/tree/main/skills/skill-name',
     }
   } catch (error) {
     return {
       success: false,
+      code: 'INSTALL_FAILED',
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+export async function installAllFromGitHub(source: string): Promise<InstallResult> {
+  try {
+    const parts = parseGitHubSource(source)
+    const discovery = await discoverGitHubSkills(parts)
+
+    if (discovery.isSingleSkill) {
+      return installSingleSkill(discovery.contents, source, parts.path.split('/').pop() || parts.repo)
+    }
+
+    if (discovery.candidates.length === 0) {
+      return {
+        success: false,
+        code: 'NO_SKILLS_FOUND',
+        error: 'No skills found to install from this GitHub location',
+      }
+    }
+
+    return installSkillGroupFromGitHub(parts, source, discovery.candidates)
+  } catch (error) {
+    return {
+      success: false,
+      code: 'INSTALL_FAILED',
       error: error instanceof Error ? error.message : String(error),
     }
   }
@@ -207,6 +367,72 @@ export async function installFromGitHub(source: string): Promise<InstallResult> 
 /**
  * Install a single skill from GitHub contents
  */
+async function installSkillGroupFromGitHub(
+  parts: GitHubSourceParts,
+  source: string,
+  candidates: SkillInstallCandidate[]
+): Promise<InstallResult> {
+  const skillsDir = skillRegistry.getSkillsDirectory()
+  const groupName = parts.repo
+  const targetDir = path.join(skillsDir, groupName)
+  const tempDir = path.join(skillsDir, `.installing-${groupName}-${Date.now()}`)
+  const installedSkillNames: string[] = []
+
+  try {
+    if (await directoryExists(targetDir)) {
+      return { success: false, error: `Skill group "${groupName}" is already installed` }
+    }
+
+    await fs.mkdir(tempDir, { recursive: true })
+
+    for (const candidate of candidates) {
+      const contents =
+        candidate.contents || (await fetchGitHubAPI(buildGitHubContentsUrl(parts.owner, parts.repo, candidate.path, parts.ref)))
+      if (!Array.isArray(contents) || !containsSkillMd(contents)) {
+        throw new Error(`GitHub skill candidate "${candidate.name}" no longer contains SKILL.md`)
+      }
+
+      const skillTempDir = path.join(tempDir, candidate.name)
+      await downloadDirectory(contents, skillTempDir, new Map([[candidate.path, contents]]))
+
+      const validation = await validateSkillDirectory(skillTempDir)
+      if (!validation.valid) {
+        throw new Error(`${candidate.name}: ${validation.error}`)
+      }
+
+      installedSkillNames.push(validation.name || candidate.name)
+    }
+
+    await fs.rename(tempDir, targetDir)
+
+    const installedAt = new Date().toISOString()
+    for (const skillName of installedSkillNames) {
+      const metaPath = path.join(targetDir, skillName, '.skill-meta.json')
+      const meta = {
+        installedAt,
+        installedFrom: `github-group:${source}`,
+        enabled: true,
+        group: groupName,
+      }
+      await fs.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8')
+    }
+
+    await skillRegistry.reload()
+
+    return { success: true, skillName: groupName, skillNames: installedSkillNames }
+  } catch (error) {
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true })
+    } catch {}
+
+    return {
+      success: false,
+      code: 'INSTALL_FAILED',
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
 async function installSingleSkill(
   contents: GitHubContent[],
   source: string,

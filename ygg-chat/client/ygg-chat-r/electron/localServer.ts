@@ -29,6 +29,7 @@ import {
 import { listManagedHooks, setManagedHookEnabled } from './hooks/hookManager.js'
 import { runHookRequest } from './hooks/hookRunner.js'
 import { registerLocalOperationsRoutes } from './localOperations.js'
+import { localAnalyticsWorkerClient } from './localAnalyticsWorkerClient.js'
 import { createToolsStatements, initializeToolsSchema, pruneOldTools, registerToolsRoutes } from './localToolsRoutes.js'
 import { mcpManager } from './mcp/mcpManager.js'
 import { registerMcpRoutes } from './mcp/mcpRoutes.js'
@@ -50,8 +51,6 @@ import { editFile, multiEdit } from './tools/editFile.js'
 import { execute as executeFetchChats, executeFetchNotes } from './tools/fetchChats.js'
 import { execute as executeInternalLink } from './tools/internalLink.js'
 import { globSearch } from './tools/glob.js'
-import { executeHermesAgent, getHermesSession, setHermesSession } from './tools/hermesAgent.js'
-import { resolveHermesExecutionPlan } from './tools/hermesExecutionPlanner.js'
 import htmlRenderer from './tools/htmlRenderer.js'
 import { execute as executeMcpManagerTool } from './tools/mcpManagerTool.js'
 import { JobFilter, JobOptions, toolOrchestrator } from './tools/orchestrator/index.js'
@@ -63,6 +62,14 @@ import { UtilityToolRuntimeHost } from './tools/runtime/UtilityToolRuntimeHost.j
 import { execute as executeThemeManager } from './tools/themeManager.js'
 import { createTodoList, editTodoList, listTodoLists, readTodoList } from './tools/todoMd.js'
 import { executePlanMd } from './tools/planMd.js'
+import {
+  getStreamUndoSummary,
+  listStreamUndoSummariesByConversation,
+  markStreamUndoAssistantMessage,
+  recordPreEditBackup,
+  recordToolEditSuccess,
+  restoreStreamUndo,
+} from './tools/streamUndoManager.js'
 
 /**
  * Validates and resolves a path to ensure it's within the allowed rootPath scope.
@@ -134,61 +141,6 @@ const MAX_UPLOAD_ENTRIES = 5000
 const MAX_UPLOAD_UNPACKED_BYTES = 500 * 1024 * 1024
 const REMOTE_API_BASE = 'https://webdrasil-production.up.railway.app/api'
 const DEFAULT_PRESERVE_RESOURCE_DIRS = ['resources', 'resource']
-const HERMES_PERMISSION_RESPONSE_TIMEOUT_MS = 55_000
-
-type HermesPermissionDecision = 'allow_once' | 'allow_always' | 'deny'
-
-type PendingHermesPermissionRequest = {
-  conversationId: string
-  createdAt: number
-  resolve: (decision: HermesPermissionDecision) => void
-}
-
-const pendingHermesPermissionRequests = new Map<string, PendingHermesPermissionRequest>()
-
-function normalizeHermesPermissionToolCall(rawRequest: any): { id: string; name: string; arguments: Record<string, any> } {
-  const rawToolCall =
-    rawRequest?.toolCall && typeof rawRequest.toolCall === 'object'
-      ? rawRequest.toolCall
-      : rawRequest?.tool_call && typeof rawRequest.tool_call === 'object'
-        ? rawRequest.tool_call
-        : {}
-
-  const toolCallId =
-    typeof rawToolCall.id === 'string' && rawToolCall.id.trim().length > 0
-      ? rawToolCall.id
-      : typeof rawToolCall.toolCallId === 'string' && rawToolCall.toolCallId.trim().length > 0
-        ? rawToolCall.toolCallId
-        : typeof rawToolCall.tool_call_id === 'string' && rawToolCall.tool_call_id.trim().length > 0
-          ? rawToolCall.tool_call_id
-          : uuidv4()
-
-  const toolName =
-    typeof rawToolCall.title === 'string' && rawToolCall.title.trim().length > 0
-      ? rawToolCall.title
-      : typeof rawToolCall.name === 'string' && rawToolCall.name.trim().length > 0
-        ? rawToolCall.name
-        : typeof rawToolCall.kind === 'string' && rawToolCall.kind.trim().length > 0
-          ? rawToolCall.kind
-          : 'hermes_permission'
-
-  const toolArgs: Record<string, any> =
-    rawToolCall.rawInput && typeof rawToolCall.rawInput === 'object'
-      ? rawToolCall.rawInput
-      : rawToolCall.raw_input && typeof rawToolCall.raw_input === 'object'
-        ? rawToolCall.raw_input
-        : {}
-
-  if (typeof rawRequest?.description === 'string' && !('description' in toolArgs)) {
-    toolArgs.description = rawRequest.description
-  }
-
-  return {
-    id: toolCallId,
-    name: toolName,
-    arguments: toolArgs,
-  }
-}
 
 function buildRemoteApiUrl(pathname: string): string {
   if (pathname.startsWith('/')) {
@@ -435,6 +387,14 @@ type BuiltInToolHandler = (
 
 // Registry for built-in tools (initialized in setupServer)
 const builtInTools: Map<string, BuiltInToolHandler> = new Map()
+
+let searchNotesForToolRegistry:
+  | ((params: { userId: string; query: string; projectId?: string; limit: number }) => Array<Record<string, any>>)
+  | null = null
+let searchTopLevelUserMessagesForToolRegistry:
+  | ((params: { userId: string; query: string; projectId?: string; limit: number }) => Array<Record<string, any>>)
+  | null = null
+
 const utilityToolRuntimeHost = new UtilityToolRuntimeHost()
 let utilityRuntimeAvailable = false
 
@@ -536,7 +496,8 @@ function initializeBuiltInToolRegistry() {
     })
   })
 
-  builtInTools.set('edit_file', async (args, { rootPath, operationMode }) => {
+  builtInTools.set('edit_file', async (args, options) => {
+    const { rootPath, operationMode } = options
     const {
       path: filePath,
       operation,
@@ -555,7 +516,24 @@ function initializeBuiltInToolRegistry() {
       approxEndLine,
     } = args
     if (!filePath) throw new Error('path is required')
-    return await editFile(filePath, operation, {
+
+    const effectiveCwd = rootPath
+    const absolutePath = validateAndResolvePath(filePath, effectiveCwd, false)
+    if (operationMode === 'execute' && options.streamId) {
+      await recordPreEditBackup({
+        streamId: options.streamId,
+        conversationId: options.conversationId ?? null,
+        messageId: options.messageId ?? null,
+        parentMessageId: options.parentMessageId ?? null,
+        rootPath: rootPath ?? null,
+        cwd: effectiveCwd ?? null,
+        toolCallId: options.toolCallId ?? null,
+        originalPath: filePath,
+        absolutePath,
+      })
+    }
+
+    const result = await editFile(filePath, operation, {
       searchPattern,
       replacement,
       content,
@@ -576,9 +554,29 @@ function initializeBuiltInToolRegistry() {
       operationMode,
       cwd: rootPath,
     })
+
+    if (operationMode === 'execute' && options.streamId && result?.success && (result.replacements ?? 0) > 0) {
+      await recordToolEditSuccess({
+        streamId: options.streamId,
+        conversationId: options.conversationId ?? null,
+        messageId: options.messageId ?? null,
+        parentMessageId: options.parentMessageId ?? null,
+        rootPath: rootPath ?? null,
+        cwd: effectiveCwd ?? null,
+        toolCallId: options.toolCallId ?? null,
+        originalPath: filePath,
+        absolutePath,
+        toolName: 'edit_file',
+        operation,
+      })
+      return { ...result, undo: { tracked: true, streamId: options.streamId } }
+    }
+
+    return result
   })
 
-  builtInTools.set('multi_edit', async (args, { rootPath, operationMode }) => {
+  builtInTools.set('multi_edit', async (args, options) => {
+    const { rootPath, operationMode } = options
     const {
       edits,
       stopOnError,
@@ -590,7 +588,33 @@ function initializeBuiltInToolRegistry() {
       validateContent,
     } = args
     if (!Array.isArray(edits) || edits.length === 0) throw new Error('edits are required')
-    return await multiEdit(edits, {
+
+    const effectiveCwd = rootPath
+    const editPaths = edits
+      .map((edit: any, index: number) => ({ edit, index, filePath: typeof edit?.path === 'string' ? edit.path : null }))
+      .filter((item: { filePath: string | null }): item is { edit: any; index: number; filePath: string } => Boolean(item.filePath))
+
+    if (operationMode === 'execute' && options.streamId) {
+      const seen = new Set<string>()
+      for (const item of editPaths) {
+        const absolutePath = validateAndResolvePath(item.filePath, effectiveCwd, false)
+        if (seen.has(absolutePath)) continue
+        seen.add(absolutePath)
+        await recordPreEditBackup({
+          streamId: options.streamId,
+          conversationId: options.conversationId ?? null,
+          messageId: options.messageId ?? null,
+          parentMessageId: options.parentMessageId ?? null,
+          rootPath: rootPath ?? null,
+          cwd: effectiveCwd ?? null,
+          toolCallId: options.toolCallId ?? null,
+          originalPath: item.filePath,
+          absolutePath,
+        })
+      }
+    }
+
+    const result = await multiEdit(edits, {
       stopOnError,
       createBackup,
       encoding,
@@ -603,6 +627,35 @@ function initializeBuiltInToolRegistry() {
       operationMode,
       cwd: rootPath,
     })
+
+    if (operationMode === 'execute' && options.streamId && result?.results) {
+      let tracked = 0
+      for (const item of result.results) {
+        if (!item?.success || (item.replacements ?? 0) <= 0) continue
+        const sourceEdit = edits[item.index]
+        const originalPath = item.path || sourceEdit?.path
+        if (typeof originalPath !== 'string') continue
+        const absolutePath = validateAndResolvePath(originalPath, effectiveCwd, false)
+        await recordToolEditSuccess({
+          streamId: options.streamId,
+          conversationId: options.conversationId ?? null,
+          messageId: options.messageId ?? null,
+          parentMessageId: options.parentMessageId ?? null,
+          rootPath: rootPath ?? null,
+          cwd: effectiveCwd ?? null,
+          toolCallId: options.toolCallId ?? null,
+          originalPath,
+          absolutePath,
+          toolName: 'multi_edit',
+          operation: item.operation ?? sourceEdit?.operation ?? null,
+          index: item.index,
+        })
+        tracked += 1
+      }
+      if (tracked > 0) return { ...result, undo: { tracked: true, streamId: options.streamId, edits: tracked } }
+    }
+
+    return result
   })
 
   builtInTools.set('delete_file', async (args, { rootPath, operationMode }) => {
@@ -797,11 +850,12 @@ function initializeBuiltInToolRegistry() {
         return getter.all(userId, likeQuery, normalizedLikeQuery, limit)
       },
       searchTopLevelMessages: ({ userId, projectId, query, limit }) => {
-        if (typeof searchTopLevelUserMessages !== 'function') return []
-        return searchTopLevelUserMessages({ userId, projectId, query, limit })
+        if (!searchTopLevelUserMessagesForToolRegistry) return []
+        return searchTopLevelUserMessagesForToolRegistry({ userId, projectId, query, limit })
       },
       searchNotes: ({ userId, projectId, query, limit }) => {
-        return searchNotes({ userId, query, projectId, limit })
+        if (!searchNotesForToolRegistry) return []
+        return searchNotesForToolRegistry({ userId, query, projectId, limit })
       },
       listMessagesByConversationId: conversationId => {
         const getter = statements?.getMessagesByConversationId
@@ -850,11 +904,12 @@ function initializeBuiltInToolRegistry() {
         return getter.all(userId, likeQuery, normalizedLikeQuery, limit)
       },
       searchTopLevelMessages: ({ userId, projectId, query, limit }) => {
-        if (typeof searchTopLevelUserMessages !== 'function') return []
-        return searchTopLevelUserMessages({ userId, projectId, query, limit })
+        if (!searchTopLevelUserMessagesForToolRegistry) return []
+        return searchTopLevelUserMessagesForToolRegistry({ userId, projectId, query, limit })
       },
       searchNotes: ({ userId, projectId, query, limit }) => {
-        return searchNotes({ userId, query, projectId, limit })
+        if (!searchNotesForToolRegistry) return []
+        return searchNotesForToolRegistry({ userId, query, projectId, limit })
       },
       listMessagesByConversationId: conversationId => {
         const getter = statements?.getMessagesByConversationId
@@ -910,321 +965,6 @@ function initializeBuiltInToolRegistry() {
   })
 
   console.log(`[LocalServer] Initialized ${builtInTools.size} built-in tools`)
-}
-
-type LocalToolExecutionOptions = {
-  rootPath?: string
-  operationMode?: 'plan' | 'execute'
-  conversationId?: string | null
-  messageId?: string | null
-  streamId?: string | null
-}
-
-type HermesYggMcpToolDefinition = {
-  name: string
-  description?: string
-  inputSchema: Record<string, any>
-  _meta?: Record<string, any>
-}
-
-type HermesYggMcpContentBlock = {
-  type: 'text' | 'image' | 'resource'
-  text?: string
-  data?: string
-  mimeType?: string
-  resource?: {
-    uri: string
-    mimeType?: string
-    text?: string
-  }
-}
-
-const HERMES_YGG_MCP_PROTOCOL_VERSION = '2025-11-25'
-const HERMES_YGG_MCP_SESSION_ID = 'ygg-hermes-tools'
-const HERMES_YGG_EXPOSED_BUILTIN_TOOL_NAMES = new Set([
-  'todo_list',
-  'fetch_notes',
-  'fetch_chats',
-  'internalLink',
-  'read_file',
-  'read_file_continuation',
-  'read_files',
-  'create_file',
-  'edit_file',
-  'multi_edit',
-  'delete_file',
-  'directory',
-  'view_image',
-  'glob',
-  'ripgrep',
-  'brave_search',
-  'browse_web',
-  'bash',
-  'powershell',
-  'html_renderer',
-  'theme_manager',
-  'custom_tool_manager',
-  'mcp_manager',
-  'skill_manager',
-])
-
-const HERMES_YGG_EXPOSED_BUILTIN_TOOLS: HermesYggMcpToolDefinition[] = BUILTIN_TOOL_DEFINITIONS.filter(tool =>
-  HERMES_YGG_EXPOSED_BUILTIN_TOOL_NAMES.has(tool.name)
-).map(tool => ({
-  name: tool.name,
-  description: tool.description,
-  inputSchema: tool.inputSchema,
-}))
-
-function getHermesYggMcpAuthToken(): string | null {
-  const token = process.env.YGG_HERMES_MCP_AUTH_TOKEN?.trim()
-  return token || null
-}
-
-function getHermesYggRequestRootPath(rawHeader: unknown): string | undefined {
-  return typeof rawHeader === 'string' && rawHeader.trim() ? rawHeader.trim() : undefined
-}
-
-async function executeLocalToolByName(
-  toolName: string,
-  args: any,
-  toolOptions: LocalToolExecutionOptions = {}
-): Promise<ToolResult> {
-  const normalizedToolName = typeof toolName === 'string' ? toolName.trim() : toolName
-  const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
-
-  let result: ToolResult
-
-  const builtInHandler = builtInTools.get(normalizedToolName)
-  if (builtInHandler) {
-    if (shouldUseUtilityRuntimeForTool(normalizedToolName)) {
-      try {
-        result = await utilityToolRuntimeHost.executeTool(normalizedToolName, parsedArgs, toolOptions)
-      } catch (utilityError) {
-        if (isUtilityRuntimeFallbackDisabled()) {
-          throw utilityError
-        }
-        console.warn(
-          `[LocalServer] Utility runtime failed for ${normalizedToolName}; falling back to local execution:`,
-          utilityError
-        )
-        result = await builtInHandler(parsedArgs, toolOptions)
-      }
-    } else {
-      result = await builtInHandler(parsedArgs, toolOptions)
-    }
-  } else if (typeof normalizedToolName === 'string' && normalizedToolName.startsWith('mcp__')) {
-    if (!mcpManager) {
-      result = { success: false, error: 'MCP manager not initialized' }
-    } else {
-      try {
-        const mcpResult = await mcpManager.callTool(normalizedToolName, parsedArgs)
-        const textContent = mcpResult.content
-          .filter(c => c.type === 'text')
-          .map(c => c.text)
-          .join('\n')
-        result = {
-          success: !mcpResult.isError,
-          content: mcpResult.content,
-          text: textContent,
-          error: mcpResult.isError ? textContent : undefined,
-        }
-      } catch (mcpError) {
-        console.error('[LocalServer] MCP tool error:', mcpError)
-        result = { success: false, error: mcpError instanceof Error ? mcpError.message : String(mcpError) }
-      }
-    }
-  } else if (customToolRegistry.hasCustomTool(normalizedToolName)) {
-    if (shouldUseUtilityRuntimeForCustomTool(normalizedToolName)) {
-      try {
-        result = await utilityToolRuntimeHost.executeTool(normalizedToolName, parsedArgs, toolOptions)
-      } catch (utilityError) {
-        if (isUtilityRuntimeFallbackDisabled()) {
-          throw utilityError
-        }
-        console.warn(
-          `[LocalServer] Utility runtime failed for custom tool ${normalizedToolName}; falling back to local execution:`,
-          utilityError
-        )
-        result = await customToolRegistry.executeTool(normalizedToolName, parsedArgs, {
-          rootPath: toolOptions.rootPath,
-          operationMode: toolOptions.operationMode,
-          conversationId: toolOptions.conversationId ?? null,
-          messageId: toolOptions.messageId ?? null,
-          streamId: toolOptions.streamId ?? null,
-          cwd: toolOptions.rootPath,
-        })
-      }
-    } else {
-      result = await customToolRegistry.executeTool(normalizedToolName, parsedArgs, {
-        rootPath: toolOptions.rootPath,
-        operationMode: toolOptions.operationMode,
-        conversationId: toolOptions.conversationId ?? null,
-        messageId: toolOptions.messageId ?? null,
-        streamId: toolOptions.streamId ?? null,
-        cwd: toolOptions.rootPath,
-      })
-    }
-  } else {
-    console.warn(`[LocalServer] Unknown tool: ${normalizedToolName}`)
-    result = { success: false, error: `Unknown tool: ${normalizedToolName}` }
-  }
-
-  return result
-}
-
-function toHermesYggMcpToolDefinitionFromMcpTool(tool: any): HermesYggMcpToolDefinition | null {
-  const visibility = tool?._meta?.ui?.visibility
-  if (Array.isArray(visibility) && !visibility.includes('model')) {
-    return null
-  }
-
-  const name = typeof tool?.qualifiedName === 'string' ? tool.qualifiedName : typeof tool?.name === 'string' ? tool.name : null
-  if (!name) return null
-
-  return {
-    name,
-    description: typeof tool?.description === 'string' ? tool.description : undefined,
-    inputSchema:
-      tool?.inputSchema && typeof tool.inputSchema === 'object'
-        ? tool.inputSchema
-        : { type: 'object', properties: {} },
-    _meta: tool?._meta && typeof tool._meta === 'object' ? tool._meta : undefined,
-  }
-}
-
-function listHermesYggMcpTools(): HermesYggMcpToolDefinition[] {
-  const tools: HermesYggMcpToolDefinition[] = [...HERMES_YGG_EXPOSED_BUILTIN_TOOLS]
-
-  try {
-    const customTools = customToolRegistry
-      .getDefinitions()
-      .filter(def => def.enabled)
-      .map(def => ({
-        name: def.name,
-        description: def.description,
-        inputSchema: def.inputSchema,
-      }))
-    tools.push(...customTools)
-  } catch {
-    // Ignore custom-tool discovery failures in MCP listing.
-  }
-
-  try {
-    const mcpTools = mcpManager
-      .getAllTools()
-      .map(toHermesYggMcpToolDefinitionFromMcpTool)
-      .filter((tool): tool is HermesYggMcpToolDefinition => !!tool)
-    tools.push(...mcpTools)
-  } catch {
-    // Ignore upstream MCP listing failures in MCP listing.
-  }
-
-  const deduped = new Map<string, HermesYggMcpToolDefinition>()
-  for (const tool of tools) {
-    if (!tool?.name) continue
-    if (!deduped.has(tool.name)) {
-      deduped.set(tool.name, tool)
-    }
-  }
-
-  return Array.from(deduped.values())
-}
-
-function stringifyHermesYggMcpText(value: unknown): string {
-  if (typeof value === 'string') return value
-  if (value == null) return ''
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return String(value)
-  }
-}
-
-function toHermesYggMcpContent(result: any): HermesYggMcpContentBlock[] {
-  if (Array.isArray(result?.content)) {
-    const contentBlocks = result.content
-      .map((block: any): HermesYggMcpContentBlock | null => {
-        if (!block || typeof block !== 'object') {
-          const text = stringifyHermesYggMcpText(block)
-          return text ? { type: 'text', text } : null
-        }
-
-        if (block.type === 'text' && typeof block.text === 'string') {
-          return { type: 'text', text: block.text }
-        }
-
-        if (block.type === 'image' && typeof block.data === 'string') {
-          return { type: 'image', data: block.data, mimeType: typeof block.mimeType === 'string' ? block.mimeType : undefined }
-        }
-
-        if (block.type === 'resource' && block.resource && typeof block.resource.uri === 'string') {
-          return {
-            type: 'resource',
-            resource: {
-              uri: block.resource.uri,
-              mimeType: typeof block.resource.mimeType === 'string' ? block.resource.mimeType : undefined,
-              text: typeof block.resource.text === 'string' ? block.resource.text : undefined,
-            },
-          }
-        }
-
-        const text = stringifyHermesYggMcpText(block)
-        return text ? { type: 'text', text } : null
-      })
-      .filter((block): block is HermesYggMcpContentBlock => !!block)
-
-    if (contentBlocks.length > 0) {
-      return contentBlocks
-    }
-  }
-
-  const fallbackText =
-    (typeof result?.text === 'string' && result.text) ||
-    (typeof result?.error === 'string' && result.error) ||
-    stringifyHermesYggMcpText(result)
-
-  return [{ type: 'text', text: fallbackText || 'Tool completed with no output.' }]
-}
-
-function toHermesYggMcpToolCallResult(result: any): { content: HermesYggMcpContentBlock[]; isError?: boolean } {
-  return {
-    content: toHermesYggMcpContent(result),
-    isError: result?.success === false || result?.isError === true,
-  }
-}
-
-function setHermesYggMcpResponseHeaders(res: any): void {
-  res.setHeader('mcp-protocol-version', HERMES_YGG_MCP_PROTOCOL_VERSION)
-  res.setHeader('mcp-session-id', HERMES_YGG_MCP_SESSION_ID)
-}
-
-function sendHermesYggMcpJsonResult(res: any, id: unknown, result: any, statusCode = 200): void {
-  setHermesYggMcpResponseHeaders(res)
-  if (id === undefined || id === null) {
-    res.status(202).end()
-    return
-  }
-  res.status(statusCode).json({ jsonrpc: '2.0', id, result })
-}
-
-function sendHermesYggMcpJsonError(
-  res: any,
-  id: unknown,
-  code: number,
-  message: string,
-  statusCode = 200
-): void {
-  setHermesYggMcpResponseHeaders(res)
-  if (id === undefined || id === null) {
-    res.status(statusCode).json({ error: message })
-    return
-  }
-  res.status(statusCode).json({
-    jsonrpc: '2.0',
-    id,
-    error: { code, message },
-  })
 }
 
 function registerCustomToolsWithOrchestrator(): number {
@@ -1455,6 +1195,7 @@ function initializeLocalDatabase(dbPath: string) {
       user_id TEXT,
       context TEXT,
       system_prompt TEXT,
+      cwd TEXT,
       storage_mode TEXT NOT NULL CHECK (storage_mode IN ('cloud','local')) DEFAULT 'cloud',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1481,6 +1222,17 @@ function initializeLocalDatabase(dbPath: string) {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `)
+
+  // Ensure project cwd column exists for older DBs
+  try {
+    const columns = db.prepare(`PRAGMA table_info(projects)`).all() as { name: string }[]
+    const columnNames = new Set(columns.map(col => col.name))
+    if (!columnNames.has('cwd')) {
+      db.exec(`ALTER TABLE projects ADD COLUMN cwd TEXT`)
+    }
+  } catch (error) {
+    console.warn('[LocalServer] Failed to migrate projects table:', error)
+  }
 
   // Ensure favorite column exists for older DBs
   try {
@@ -1532,6 +1284,41 @@ function initializeLocalDatabase(dbPath: string) {
   } catch (error) {
     console.warn('[LocalServer] Failed to migrate messages table:', error)
   }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS streaming_runs (
+      stream_id TEXT PRIMARY KEY,
+      conversation_id TEXT,
+      parent_message_id TEXT,
+      user_message_id TEXT,
+      assistant_message_id TEXT,
+      final_message_id TEXT,
+      stream_type TEXT NOT NULL DEFAULT 'primary' CHECK (stream_type IN ('primary','branch','tool','subagent')),
+      status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','aborted','error')),
+      end_reason TEXT CHECK (end_reason IN ('completed','aborted','error','pruned','unknown') OR end_reason IS NULL),
+      provider TEXT,
+      model_name TEXT,
+      operation TEXT,
+      source TEXT NOT NULL DEFAULT 'renderer' CHECK (source IN ('renderer','headless','subagent','tool','unknown')),
+      root_message_id TEXT,
+      origin_message_id TEXT,
+      parent_stream_id TEXT,
+      tool_call_id TEXT,
+      error TEXT,
+      metadata_json TEXT,
+      started_at DATETIME NOT NULL,
+      ended_at DATETIME,
+      duration_ms INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_streaming_runs_conversation_started ON streaming_runs(conversation_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_streaming_runs_status_started ON streaming_runs(status, started_at);
+    CREATE INDEX IF NOT EXISTS idx_streaming_runs_parent_stream ON streaming_runs(parent_stream_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_streaming_runs_final_message ON streaming_runs(final_message_id);
+  `)
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS subagent_runs (
@@ -1921,7 +1708,17 @@ function initializeLocalDatabase(dbPath: string) {
     `)
 
     db.exec(`
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_fts_insert
+      DROP TRIGGER IF EXISTS note_search_docs_fts_insert;
+      DROP TRIGGER IF EXISTS note_search_docs_fts_update;
+      DROP TRIGGER IF EXISTS note_search_docs_fts_delete;
+      DROP TRIGGER IF EXISTS note_search_docs_from_messages_insert;
+      DROP TRIGGER IF EXISTS note_search_docs_from_messages_update;
+      DROP TRIGGER IF EXISTS note_search_docs_from_messages_delete;
+      DROP TRIGGER IF EXISTS note_search_docs_from_conversations_update;
+    `)
+
+    db.exec(`
+      CREATE TRIGGER note_search_docs_fts_insert
       AFTER INSERT ON note_search_docs
       BEGIN
         INSERT INTO note_search_fts (message_id, conversation_title, note)
@@ -1932,7 +1729,7 @@ function initializeLocalDatabase(dbPath: string) {
         );
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_fts_update
+      CREATE TRIGGER note_search_docs_fts_update
       AFTER UPDATE ON note_search_docs
       BEGIN
         DELETE FROM note_search_fts WHERE message_id = OLD.message_id;
@@ -1944,13 +1741,13 @@ function initializeLocalDatabase(dbPath: string) {
         );
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_fts_delete
+      CREATE TRIGGER note_search_docs_fts_delete
       AFTER DELETE ON note_search_docs
       BEGIN
         DELETE FROM note_search_fts WHERE message_id = OLD.message_id;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_messages_insert
+      CREATE TRIGGER note_search_docs_from_messages_insert
       AFTER INSERT ON messages
       WHEN LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0
       BEGIN
@@ -1976,9 +1773,18 @@ function initializeLocalDatabase(dbPath: string) {
           COALESCE(NEW.created_at, CURRENT_TIMESTAMP),
           CURRENT_TIMESTAMP
         FROM conversations c
-        WHERE c.id = NEW.conversation_id;
+        WHERE c.id = NEW.conversation_id
+        ON CONFLICT(message_id) DO UPDATE SET
+          conversation_id = excluded.conversation_id,
+          project_id = excluded.project_id,
+          user_id = excluded.user_id,
+          storage_mode = excluded.storage_mode,
+          conversation_title = excluded.conversation_title,
+          note = excluded.note,
+          message_created_at = excluded.message_created_at,
+          note_updated_at = excluded.note_updated_at;
 
-        INSERT OR REPLACE INTO note_search_embedding_state (
+        INSERT INTO note_search_embedding_state (
           message_id,
           content_hash,
           embedding_model,
@@ -1994,13 +1800,24 @@ function initializeLocalDatabase(dbPath: string) {
           NULL,
           'pending',
           NULL
-        );
+        )
+        ON CONFLICT(message_id) DO UPDATE SET
+          content_hash = NULL,
+          embedding_status = CASE
+            WHEN note_search_embedding_state.embedding_status = 'ready' THEN 'stale'
+            ELSE note_search_embedding_state.embedding_status
+          END,
+          last_error = NULL;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_messages_update
+      CREATE TRIGGER note_search_docs_from_messages_update
       AFTER UPDATE ON messages
+      WHEN COALESCE(OLD.note, '') IS NOT COALESCE(NEW.note, '')
       BEGIN
-        DELETE FROM note_search_docs WHERE message_id = OLD.id;
+        DELETE FROM note_search_docs
+        WHERE message_id = OLD.id
+          AND LENGTH(TRIM(COALESCE(NEW.note, ''))) = 0;
+
         INSERT INTO note_search_docs (
           message_id,
           conversation_id,
@@ -2024,34 +1841,22 @@ function initializeLocalDatabase(dbPath: string) {
           CURRENT_TIMESTAMP
         FROM conversations c
         WHERE c.id = NEW.conversation_id
-          AND LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0;
+          AND LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0
+        ON CONFLICT(message_id) DO UPDATE SET
+          conversation_id = excluded.conversation_id,
+          project_id = excluded.project_id,
+          user_id = excluded.user_id,
+          storage_mode = excluded.storage_mode,
+          conversation_title = excluded.conversation_title,
+          note = excluded.note,
+          message_created_at = excluded.message_created_at,
+          note_updated_at = excluded.note_updated_at;
 
         DELETE FROM note_search_embedding_state
         WHERE message_id = OLD.id
           AND LENGTH(TRIM(COALESCE(NEW.note, ''))) = 0;
 
-        INSERT OR REPLACE INTO note_search_embedding_state (
-          message_id,
-          content_hash,
-          embedding_model,
-          embedding_dimensions,
-          embedding_updated_at,
-          embedding_status,
-          last_error
-        )
-        SELECT
-          NEW.id,
-          NULL,
-          s.embedding_model,
-          s.embedding_dimensions,
-          s.embedding_updated_at,
-          'stale',
-          NULL
-        FROM note_search_embedding_state s
-        WHERE s.message_id = OLD.id
-          AND LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0;
-
-        INSERT OR IGNORE INTO note_search_embedding_state (
+        INSERT INTO note_search_embedding_state (
           message_id,
           content_hash,
           embedding_model,
@@ -2068,17 +1873,25 @@ function initializeLocalDatabase(dbPath: string) {
           NULL,
           'pending',
           NULL
-        WHERE LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0;
+        WHERE LENGTH(TRIM(COALESCE(NEW.note, ''))) > 0
+        ON CONFLICT(message_id) DO UPDATE SET
+          content_hash = NULL,
+          embedding_status = CASE
+            WHEN COALESCE(OLD.note, '') IS COALESCE(NEW.note, '') THEN note_search_embedding_state.embedding_status
+            WHEN note_search_embedding_state.embedding_status = 'ready' THEN 'stale'
+            ELSE 'pending'
+          END,
+          last_error = NULL;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_messages_delete
+      CREATE TRIGGER note_search_docs_from_messages_delete
       AFTER DELETE ON messages
       BEGIN
         DELETE FROM note_search_docs WHERE message_id = OLD.id;
         DELETE FROM note_search_embedding_state WHERE message_id = OLD.id;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS note_search_docs_from_conversations_update
+      CREATE TRIGGER note_search_docs_from_conversations_update
       AFTER UPDATE ON conversations
       BEGIN
         UPDATE note_search_docs
@@ -2186,12 +1999,13 @@ function initializeLocalDatabase(dbPath: string) {
 
     // Projects
     upsertProject: db.prepare(`
-        INSERT INTO projects (id, name, user_id, context, system_prompt, storage_mode, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO projects (id, name, user_id, context, system_prompt, cwd, storage_mode, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           context = excluded.context,
           system_prompt = excluded.system_prompt,
+          cwd = excluded.cwd,
           storage_mode = excluded.storage_mode,
           updated_at = excluded.updated_at
       `),
@@ -2222,8 +2036,14 @@ function initializeLocalDatabase(dbPath: string) {
     getLocalConversations: db.prepare(
       "SELECT * FROM conversations WHERE user_id = ? AND storage_mode = 'local' ORDER BY updated_at DESC"
     ),
+    getLocalConversationsPaginated: db.prepare(
+      "SELECT * FROM conversations WHERE user_id = ? AND storage_mode = 'local' ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+    ),
     getLocalConversationsByUserAndProject: db.prepare(
       "SELECT * FROM conversations WHERE user_id = ? AND project_id = ? AND storage_mode = 'local' ORDER BY updated_at DESC"
+    ),
+    getLocalConversationsByUserAndProjectPaginated: db.prepare(
+      "SELECT * FROM conversations WHERE user_id = ? AND project_id = ? AND storage_mode = 'local' ORDER BY updated_at DESC LIMIT ? OFFSET ?"
     ),
     getFavoriteConversations: db.prepare(
       'SELECT * FROM conversations WHERE user_id = ? AND favorite = 1 ORDER BY updated_at DESC'
@@ -2292,6 +2112,58 @@ function initializeLocalDatabase(dbPath: string) {
     getLastMessageByConversationId: db.prepare(
       'SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1'
     ),
+
+    // Streaming run lifecycle tracking
+    upsertStreamingRun: db.prepare(`
+        INSERT INTO streaming_runs (
+          stream_id, conversation_id, parent_message_id, user_message_id, assistant_message_id,
+          final_message_id, stream_type, status, end_reason, provider, model_name, operation,
+          source, root_message_id, origin_message_id, parent_stream_id, tool_call_id, error,
+          metadata_json, started_at, ended_at, duration_ms, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(stream_id) DO UPDATE SET
+          conversation_id = COALESCE(excluded.conversation_id, streaming_runs.conversation_id),
+          parent_message_id = COALESCE(excluded.parent_message_id, streaming_runs.parent_message_id),
+          user_message_id = COALESCE(excluded.user_message_id, streaming_runs.user_message_id),
+          assistant_message_id = COALESCE(excluded.assistant_message_id, streaming_runs.assistant_message_id),
+          final_message_id = COALESCE(excluded.final_message_id, streaming_runs.final_message_id),
+          stream_type = excluded.stream_type,
+          status = excluded.status,
+          end_reason = COALESCE(excluded.end_reason, streaming_runs.end_reason),
+          provider = COALESCE(excluded.provider, streaming_runs.provider),
+          model_name = COALESCE(excluded.model_name, streaming_runs.model_name),
+          operation = COALESCE(excluded.operation, streaming_runs.operation),
+          source = excluded.source,
+          root_message_id = COALESCE(excluded.root_message_id, streaming_runs.root_message_id),
+          origin_message_id = COALESCE(excluded.origin_message_id, streaming_runs.origin_message_id),
+          parent_stream_id = COALESCE(excluded.parent_stream_id, streaming_runs.parent_stream_id),
+          tool_call_id = COALESCE(excluded.tool_call_id, streaming_runs.tool_call_id),
+          error = COALESCE(excluded.error, streaming_runs.error),
+          metadata_json = COALESCE(excluded.metadata_json, streaming_runs.metadata_json),
+          ended_at = COALESCE(excluded.ended_at, streaming_runs.ended_at),
+          duration_ms = COALESCE(excluded.duration_ms, streaming_runs.duration_ms),
+          updated_at = excluded.updated_at
+      `),
+    updateStreamingRun: db.prepare(`
+        UPDATE streaming_runs
+        SET status = COALESCE(?, status),
+            end_reason = COALESCE(?, end_reason),
+            assistant_message_id = COALESCE(?, assistant_message_id),
+            final_message_id = COALESCE(?, final_message_id),
+            user_message_id = COALESCE(?, user_message_id),
+            error = ?,
+            metadata_json = COALESCE(?, metadata_json),
+            ended_at = COALESCE(?, ended_at),
+            duration_ms = COALESCE(?, duration_ms),
+            updated_at = ?
+        WHERE stream_id = ?
+      `),
+    getStreamingRunById: db.prepare('SELECT * FROM streaming_runs WHERE stream_id = ?'),
+    getStreamingRunsByConversationId: db.prepare(
+      'SELECT * FROM streaming_runs WHERE conversation_id = ? ORDER BY started_at ASC'
+    ),
+    getActiveStreamingRuns: db.prepare("SELECT * FROM streaming_runs WHERE status = 'running' ORDER BY started_at ASC"),
 
     // Subagent runs/transcripts
     upsertSubagentRun: db.prepare(`
@@ -2472,8 +2344,8 @@ function ensureProjectExists(projectId: string, userId: string) {
     // console.log('[LocalServer] Auto-creating project stub:', projectId)
     const now = new Date().toISOString()
     db.prepare(
-      'INSERT INTO projects (id, name, user_id, context, system_prompt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(projectId, 'Synced Project', userId, null, null, now, now)
+      'INSERT INTO projects (id, name, user_id, context, system_prompt, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(projectId, 'Synced Project', userId, null, null, null, now, now)
   }
 }
 
@@ -2685,6 +2557,36 @@ const normalizeSubagentRunRow = (row: any, messages: any[] = []) => ({
   tool_calls_used: Number(row.tool_calls_used || 0),
   messages,
 })
+
+const normalizeStreamingRunRow = (row: any) => {
+  if (!row) return null
+  return {
+    ...row,
+    metadata: safeJsonParseLocal(row.metadata_json, null),
+    duration_ms: row.duration_ms == null ? null : Number(row.duration_ms),
+  }
+}
+
+const normalizeStreamingRunMetadata = (value: any): string | null => {
+  if (value == null) return null
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return null
+  }
+}
+
+const isTerminalStreamingRunStatus = (status: any): status is 'completed' | 'aborted' | 'error' =>
+  status === 'completed' || status === 'aborted' || status === 'error'
+
+const calculateStreamingRunDurationMs = (startedAt: any, endedAt: string | null): number | null => {
+  if (!startedAt || !endedAt) return null
+  const started = new Date(startedAt).getTime()
+  const ended = new Date(endedAt).getTime()
+  if (!Number.isFinite(started) || !Number.isFinite(ended)) return null
+  return Math.max(0, ended - started)
+}
 
 // ChatNode interface for message tree structure
 interface ChatNode {
@@ -4013,7 +3915,7 @@ function setupServer() {
   // Sync Project
   app.post('/api/sync/project', (req, res) => {
     try {
-      const { id, name, user_id, owner_id, context, system_prompt, storage_mode, created_at, updated_at } = req.body
+      const { id, name, user_id, owner_id, context, system_prompt, cwd, storage_mode, created_at, updated_at } = req.body
 
       // Handle owner_id -> user_id mapping (Railway sends owner_id)
       const effectiveUserId = user_id || owner_id
@@ -4031,6 +3933,7 @@ function setupServer() {
         effectiveUserId,
         context || null,
         system_prompt || null,
+        cwd || null,
         storage_mode || 'cloud',
         created_at || new Date().toISOString(),
         updated_at || new Date().toISOString()
@@ -4176,6 +4079,134 @@ function setupServer() {
     } catch (error) {
       console.error('[LocalServer] Error getting conversation:', error)
       res.status(500).json({ error: 'Failed to get conversation' })
+    }
+  })
+
+  // Streaming run lifecycle APIs (local-only durable stream ledger)
+  app.post('/api/streaming/runs', (req, res) => {
+    try {
+      const body = req.body || {}
+      const streamId = String(body.stream_id || body.streamId || '').trim()
+      if (!streamId) {
+        res.status(400).json({ error: 'stream_id is required' })
+        return
+      }
+
+      const streamType = ['primary', 'branch', 'tool', 'subagent'].includes(body.stream_type || body.streamType)
+        ? body.stream_type || body.streamType
+        : 'primary'
+      const status = ['running', 'completed', 'aborted', 'error'].includes(body.status) ? body.status : 'running'
+      const source = ['renderer', 'headless', 'subagent', 'tool', 'unknown'].includes(body.source) ? body.source : 'renderer'
+      const now = new Date().toISOString()
+      const startedAt = body.started_at || body.startedAt || now
+      const endedAt = body.ended_at || body.endedAt || (isTerminalStreamingRunStatus(status) ? now : null)
+      const durationMs =
+        typeof body.duration_ms === 'number'
+          ? body.duration_ms
+          : typeof body.durationMs === 'number'
+            ? body.durationMs
+            : calculateStreamingRunDurationMs(startedAt, endedAt)
+      const metadataJson = normalizeStreamingRunMetadata(body.metadata_json ?? body.metadata)
+
+      statements.upsertStreamingRun.run(
+        streamId,
+        body.conversation_id || body.conversationId || null,
+        body.parent_message_id || body.parentMessageId || null,
+        body.user_message_id || body.userMessageId || null,
+        body.assistant_message_id || body.assistantMessageId || null,
+        body.final_message_id || body.finalMessageId || null,
+        streamType,
+        status,
+        body.end_reason || body.endReason || null,
+        body.provider || null,
+        body.model_name || body.modelName || null,
+        body.operation || null,
+        source,
+        body.root_message_id || body.rootMessageId || null,
+        body.origin_message_id || body.originMessageId || null,
+        body.parent_stream_id || body.parentStreamId || null,
+        body.tool_call_id || body.toolCallId || null,
+        body.error || null,
+        metadataJson,
+        startedAt,
+        endedAt,
+        durationMs,
+        body.created_at || body.createdAt || now,
+        now
+      )
+
+      const run = statements.getStreamingRunById.get(streamId)
+      res.json({ run: normalizeStreamingRunRow(run) })
+    } catch (error) {
+      console.error('[LocalServer] Error upserting streaming run:', error)
+      res.status(500).json({ error: 'Failed to upsert streaming run' })
+    }
+  })
+
+  app.patch('/api/streaming/runs/:streamId', (req, res) => {
+    try {
+      const { streamId } = req.params
+      const existing = statements.getStreamingRunById.get(streamId)
+      if (!existing) {
+        res.status(404).json({ error: 'Streaming run not found' })
+        return
+      }
+
+      const body = req.body || {}
+      const status = ['running', 'completed', 'aborted', 'error'].includes(body.status) ? body.status : null
+      const endedAt = body.ended_at || body.endedAt || (isTerminalStreamingRunStatus(status) ? new Date().toISOString() : null)
+      const durationMs =
+        typeof body.duration_ms === 'number'
+          ? body.duration_ms
+          : typeof body.durationMs === 'number'
+            ? body.durationMs
+            : calculateStreamingRunDurationMs(existing.started_at, endedAt)
+      const metadataJson = normalizeStreamingRunMetadata(body.metadata_json ?? body.metadata)
+      const now = new Date().toISOString()
+
+      statements.updateStreamingRun.run(
+        status,
+        body.end_reason || body.endReason || null,
+        body.assistant_message_id || body.assistantMessageId || null,
+        body.final_message_id || body.finalMessageId || null,
+        body.user_message_id || body.userMessageId || null,
+        body.error ?? null,
+        metadataJson,
+        endedAt,
+        durationMs,
+        now,
+        streamId
+      )
+
+      const run = statements.getStreamingRunById.get(streamId)
+      res.json({ run: normalizeStreamingRunRow(run) })
+    } catch (error) {
+      console.error('[LocalServer] Error updating streaming run:', error)
+      res.status(500).json({ error: 'Failed to update streaming run' })
+    }
+  })
+
+  app.get('/api/streaming/runs/:streamId', (req, res) => {
+    try {
+      const run = statements.getStreamingRunById.get(req.params.streamId)
+      if (!run) {
+        res.status(404).json({ error: 'Streaming run not found' })
+        return
+      }
+      res.json({ run: normalizeStreamingRunRow(run) })
+    } catch (error) {
+      console.error('[LocalServer] Error fetching streaming run:', error)
+      res.status(500).json({ error: 'Failed to fetch streaming run' })
+    }
+  })
+
+  app.get('/api/conversations/:conversationId/streaming-runs', (req, res) => {
+    try {
+      const runs = statements.getStreamingRunsByConversationId.all(req.params.conversationId).map(normalizeStreamingRunRow)
+      res.json({ runs })
+    } catch (error) {
+      console.error('[LocalServer] Error fetching conversation streaming runs:', error)
+      res.status(500).json({ error: 'Failed to fetch conversation streaming runs' })
     }
   })
 
@@ -4652,6 +4683,16 @@ function setupServer() {
         return
       }
 
+      const existingMessage = statements.getMessageById.get(messageId) as { id: string } | undefined
+      if (!existingMessage) {
+        console.warn('[LocalServer] Cannot save base64 attachments: message not found', {
+          messageId,
+          attachmentCount: attachments.length,
+        })
+        res.status(409).json({ error: 'message_not_found', messageId })
+        return
+      }
+
       const savedAttachments: Array<{ id: string; file_path: string }> = []
       const imagesDir = path.join(path.dirname(currentDbPath), 'user_images')
 
@@ -4852,6 +4893,7 @@ function setupServer() {
                   op.data.user_id,
                   op.data.context || null,
                   op.data.system_prompt || null,
+                  op.data.cwd || null,
                   op.data.storage_mode || 'cloud',
                   op.data.created_at || new Date().toISOString(),
                   op.data.updated_at || new Date().toISOString()
@@ -4942,6 +4984,288 @@ function setupServer() {
     }
   })
 
+  const getLongTermMemoryDirectory = () => path.join(electronApp.getPath('userData'), '.ygg', 'memory')
+  const getLongTermMemoryFilePath = () => path.join(getLongTermMemoryDirectory(), 'memory.md')
+  const getRecentMemoryFilePath = () => path.join(getLongTermMemoryDirectory(), 'recent_memory.md')
+  const sanitizeMemoryProjectDirectoryName = (projectName: string, projectId?: string | null) => {
+    const raw = (projectName || projectId || '').trim()
+    if (!raw) return ''
+    return raw
+      .replace(/[\\/\0:*?"<>|]+/g, '-')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/^[.\s]+|[.\s]+$/g, '')
+      .slice(0, 80)
+      .trim()
+      .replace(/^[.\s]+|[.\s]+$/g, '')
+  }
+  const getProjectMemoryFilePath = (projectName: string, projectId?: string | null) => {
+    const safeName = sanitizeMemoryProjectDirectoryName(projectName, projectId)
+    return safeName ? path.join(getLongTermMemoryDirectory(), 'projects', safeName, 'project_memory.md') : ''
+  }
+
+  type MemoryFileKind = 'global' | 'recent' | 'project'
+
+  interface MemoryFileSummary {
+    id: string
+    kind: MemoryFileKind
+    label: string
+    description?: string
+    projectName?: string | null
+    exists: boolean
+    path: string
+    sizeBytes: number | null
+    updatedAt: string | null
+  }
+
+  const readMemoryFileForContext = async (filePath: string, maxChars: number): Promise<{ exists: boolean; memory: string }> => {
+    try {
+      const raw = await fs.promises.readFile(filePath, 'utf8')
+      return { exists: true, memory: maxChars > 0 && raw.length > maxChars ? raw.slice(-maxChars) : raw }
+    } catch (readError: any) {
+      if (readError?.code !== 'ENOENT') {
+        throw readError
+      }
+      return { exists: false, memory: '' }
+    }
+  }
+
+  const getMemoryFileStat = async (filePath: string): Promise<Pick<MemoryFileSummary, 'exists' | 'sizeBytes' | 'updatedAt'>> => {
+    try {
+      const stat = await fs.promises.stat(filePath)
+      if (!stat.isFile()) {
+        return { exists: false, sizeBytes: null, updatedAt: null }
+      }
+      return { exists: true, sizeBytes: stat.size, updatedAt: stat.mtime.toISOString() }
+    } catch (statError: any) {
+      if (statError?.code !== 'ENOENT') {
+        throw statError
+      }
+      return { exists: false, sizeBytes: null, updatedAt: null }
+    }
+  }
+
+  const buildMemoryFileSummary = async (
+    input: Omit<MemoryFileSummary, 'exists' | 'sizeBytes' | 'updatedAt'>
+  ): Promise<MemoryFileSummary> => {
+    const stat = await getMemoryFileStat(input.path)
+    return { ...input, ...stat }
+  }
+
+  const listMemoryFileSummaries = async (): Promise<MemoryFileSummary[]> => {
+    const memoryDirectory = getLongTermMemoryDirectory()
+    const files: MemoryFileSummary[] = [
+      await buildMemoryFileSummary({
+        id: 'global:memory',
+        kind: 'global',
+        label: 'Long-term memory',
+        description: 'memory.md',
+        path: getLongTermMemoryFilePath(),
+      }),
+      await buildMemoryFileSummary({
+        id: 'global:recent',
+        kind: 'recent',
+        label: 'Recent memory',
+        description: 'recent_memory.md',
+        path: getRecentMemoryFilePath(),
+      }),
+    ]
+
+    const projectsDirectory = path.join(memoryDirectory, 'projects')
+    try {
+      const entries = await fs.promises.readdir(projectsDirectory, { withFileTypes: true })
+      const projectFiles = await Promise.all(
+        entries
+          .filter(entry => entry.isDirectory())
+          .map(async entry =>
+            buildMemoryFileSummary({
+              id: `project:${encodeURIComponent(entry.name)}`,
+              kind: 'project',
+              label: entry.name,
+              description: 'project_memory.md',
+              projectName: entry.name,
+              path: path.join(projectsDirectory, entry.name, 'project_memory.md'),
+            })
+          )
+      )
+      files.push(...projectFiles.filter(file => file.exists))
+    } catch (readError: any) {
+      if (readError?.code !== 'ENOENT') {
+        throw readError
+      }
+    }
+
+    return files
+  }
+
+  const resolveMemoryFileId = (id: string): { path: string; kind: MemoryFileKind; projectName?: string | null } | null => {
+    if (id === 'global:memory') return { path: getLongTermMemoryFilePath(), kind: 'global' }
+    if (id === 'global:recent') return { path: getRecentMemoryFilePath(), kind: 'recent' }
+
+    if (!id.startsWith('project:')) return null
+    const encodedProjectName = id.slice('project:'.length)
+    let projectName = ''
+    try {
+      projectName = decodeURIComponent(encodedProjectName)
+    } catch {
+      return null
+    }
+
+    if (!projectName || projectName.includes('/') || projectName.includes('\\') || projectName.includes('\0') || projectName.includes('..')) {
+      return null
+    }
+
+    const projectPath = path.join(getLongTermMemoryDirectory(), 'projects', projectName, 'project_memory.md')
+    const memoryRoot = path.resolve(getLongTermMemoryDirectory())
+    const resolvedProjectPath = path.resolve(projectPath)
+    if (resolvedProjectPath !== memoryRoot && !resolvedProjectPath.startsWith(`${memoryRoot}${path.sep}`)) {
+      return null
+    }
+
+    return { path: projectPath, kind: 'project', projectName }
+  }
+
+  app.get('/api/memory/context', async (req, res) => {
+    try {
+      const maxCharsRaw = Number(req.query?.maxChars ?? 10000)
+      const recentMaxCharsRaw = Number(req.query?.recentMaxChars ?? maxCharsRaw)
+      const projectMaxCharsRaw = Number(req.query?.projectMaxChars ?? 12000)
+      const maxChars = Number.isFinite(maxCharsRaw) ? Math.max(0, Math.min(Math.floor(maxCharsRaw), 100000)) : 10000
+      const recentMaxChars = Number.isFinite(recentMaxCharsRaw)
+        ? Math.max(0, Math.min(Math.floor(recentMaxCharsRaw), 100000))
+        : maxChars
+      const projectMaxChars = Number.isFinite(projectMaxCharsRaw)
+        ? Math.max(0, Math.min(Math.floor(projectMaxCharsRaw), 100000))
+        : 12000
+      const projectId = typeof req.query?.projectId === 'string' && req.query.projectId.trim() ? req.query.projectId.trim() : null
+      let projectName = typeof req.query?.projectName === 'string' && req.query.projectName.trim() ? req.query.projectName.trim() : null
+      if (projectId && !projectName) {
+        const project = statements.getProjectById.get(projectId) as { name?: string | null } | undefined
+        projectName = typeof project?.name === 'string' && project.name.trim() ? project.name.trim() : null
+      }
+      const memoryPath = getLongTermMemoryFilePath()
+      const recentMemoryPath = getRecentMemoryFilePath()
+      const projectMemoryPath = projectName || projectId ? getProjectMemoryFilePath(projectName || '', projectId) : ''
+      const { exists, memory } = await readMemoryFileForContext(memoryPath, maxChars)
+      const { exists: recentExists, memory: recentMemory } = await readMemoryFileForContext(
+        recentMemoryPath,
+        recentMaxChars
+      )
+      const { exists: projectExists, memory: projectMemory } = projectMemoryPath
+        ? await readMemoryFileForContext(projectMemoryPath, projectMaxChars)
+        : { exists: false, memory: '' }
+
+      if (/^(1|true|yes|on)$/i.test(process.env.YGG_HOOK_DEBUG_LOGS || '')) {
+        console.info('[LocalServer][memory] Context read', {
+          exists,
+          recentExists,
+          projectExists,
+          path: memoryPath,
+          recentPath: recentMemoryPath,
+          projectPath: projectMemoryPath,
+          projectId,
+          projectName,
+          maxChars,
+          recentMaxChars,
+          projectMaxChars,
+          returnedChars: memory.length,
+          returnedRecentChars: recentMemory.length,
+          returnedProjectChars: projectMemory.length,
+        })
+      }
+
+      res.json({
+        success: true,
+        exists,
+        recentExists,
+        projectExists,
+        memory,
+        recentMemory,
+        projectMemory,
+        path: memoryPath,
+        recentPath: recentMemoryPath,
+        projectPath: projectMemoryPath || null,
+        projectId,
+        projectName,
+      })
+    } catch (error) {
+      console.error('[LocalServer] Memory context error:', error)
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        memory: '',
+        recentMemory: '',
+        projectMemory: '',
+      })
+    }
+  })
+
+  app.get('/api/memory/files', async (_req, res) => {
+    try {
+      const files = await listMemoryFileSummaries()
+      res.json({ success: true, files, directory: getLongTermMemoryDirectory() })
+    } catch (error) {
+      console.error('[LocalServer] Memory file list error:', error)
+      res.status(500).json({ success: false, error: error instanceof Error ? error.message : String(error), files: [] })
+    }
+  })
+
+  app.get('/api/memory/file', async (req, res) => {
+    try {
+      const id = typeof req.query?.id === 'string' ? req.query.id.trim() : ''
+      const resolved = resolveMemoryFileId(id)
+      if (!resolved) {
+        res.status(400).json({ success: false, error: 'Invalid memory file id.', content: '' })
+        return
+      }
+
+      const files = await listMemoryFileSummaries()
+      const file = files.find(item => item.id === id) || null
+      let content = ''
+      try {
+        const stat = await fs.promises.stat(resolved.path)
+        if (!stat.isFile()) {
+          res.status(404).json({ success: false, error: 'Memory file not found.', content: '', file })
+          return
+        }
+        if (stat.size > 2 * 1024 * 1024) {
+          res.status(413).json({ success: false, error: 'Memory file is too large to preview.', content: '', file })
+          return
+        }
+        content = await fs.promises.readFile(resolved.path, 'utf8')
+      } catch (readError: any) {
+        if (readError?.code !== 'ENOENT') throw readError
+      }
+
+      res.json({ success: true, file, content })
+    } catch (error) {
+      console.error('[LocalServer] Memory file read error:', error)
+      res.status(500).json({ success: false, error: error instanceof Error ? error.message : String(error), content: '' })
+    }
+  })
+
+  app.get('/api/memory/path', (req, res) => {
+    try {
+      const projectId = typeof req.query?.projectId === 'string' && req.query.projectId.trim() ? req.query.projectId.trim() : null
+      let projectName = typeof req.query?.projectName === 'string' && req.query.projectName.trim() ? req.query.projectName.trim() : null
+      if (projectId && !projectName) {
+        const project = statements.getProjectById.get(projectId) as { name?: string | null } | undefined
+        projectName = typeof project?.name === 'string' && project.name.trim() ? project.name.trim() : null
+      }
+      res.json({
+        success: true,
+        path: getLongTermMemoryFilePath(),
+        recentPath: getRecentMemoryFilePath(),
+        projectPath: projectName || projectId ? getProjectMemoryFilePath(projectName || '', projectId) : null,
+        projectId,
+        projectName,
+        directory: getLongTermMemoryDirectory(),
+      })
+    } catch (error) {
+      res.status(500).json({ success: false, error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+
   app.get('/api/hooks', async (_req, res) => {
     try {
       const hooks = await listManagedHooks()
@@ -4999,6 +5323,8 @@ function setupServer() {
           elapsedMs: Date.now() - startedAt,
           matched: result.matched,
           hookCount: result.hookCount,
+          asyncHookCount: result.asyncHookCount ?? 0,
+          launchedAsyncHookCount: result.launchedAsyncHookCount ?? 0,
           blocked: result.blocked ?? false,
           hasAdditionalContext: Boolean(result.additionalContext),
           errors: result.errors ?? [],
@@ -5015,10 +5341,63 @@ function setupServer() {
     }
   })
 
+  // Stream edit undo endpoints
+  app.get('/api/undo/streams/:streamId', async (req, res) => {
+    try {
+      const summary = await getStreamUndoSummary(req.params.streamId)
+      if (!summary) {
+        res.status(404).json({ success: false, error: 'Undo manifest not found' })
+        return
+      }
+      res.json({ success: true, summary })
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.status(500).json({ success: false, error: msg })
+    }
+  })
+
+  app.get('/api/undo/conversations/:conversationId', async (req, res) => {
+    try {
+      const summaries = await listStreamUndoSummariesByConversation(req.params.conversationId)
+      res.json({ success: true, summaries })
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.status(500).json({ success: false, error: msg })
+    }
+  })
+
+  app.post('/api/undo/streams/:streamId/final-message', async (req, res) => {
+    try {
+      const summary = await markStreamUndoAssistantMessage(
+        req.params.streamId,
+        typeof req.body?.assistantMessageId === 'string' ? req.body.assistantMessageId : null
+      )
+      res.json({ success: true, summary })
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.status(500).json({ success: false, error: msg })
+    }
+  })
+
+  app.post('/api/undo/streams/:streamId/restore', async (req, res) => {
+    try {
+      const result = await restoreStreamUndo(req.params.streamId, {
+        force: req.body?.force === true,
+        expectedParentMessageId:
+          typeof req.body?.expectedParentMessageId === 'string' ? req.body.expectedParentMessageId : null,
+        restoredByMessageId: typeof req.body?.restoredByMessageId === 'string' ? req.body.restoredByMessageId : null,
+      })
+      res.status(result.success ? 200 : result.conflicts.length > 0 ? 409 : 400).json(result)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.status(500).json({ success: false, error: msg })
+    }
+  })
+
   // Tool Execution Endpoint (uses built-in and custom tool registries)
   app.post('/api/tools/execute', async (req, res) => {
     try {
-      const { toolName, args, rootPath, operationMode, conversationId, messageId, streamId } = req.body
+      const { toolName, args, rootPath, operationMode, conversationId, messageId, parentMessageId, streamId, toolCallId } = req.body
       const normalizedToolName = typeof toolName === 'string' ? toolName.trim() : toolName
       // console.log(`[LocalServer] Executing tool: ${toolName} (operationMode: ${operationMode || 'execute'})`)
 
@@ -5028,7 +5407,9 @@ function setupServer() {
         operationMode: operationMode as 'plan' | 'execute' | undefined,
         conversationId: conversationId ?? null,
         messageId: messageId ?? null,
+        parentMessageId: parentMessageId ?? null,
         streamId: streamId ?? null,
+        toolCallId: toolCallId ?? null,
       }
 
       let result: ToolResult
@@ -5125,95 +5506,6 @@ function setupServer() {
       const msg = error instanceof Error ? error.message : String(error)
       res.json({ result: { success: false, error: msg } })
     }
-  })
-
-  // Ygg-provided MCP endpoint for Hermes ACP sessions
-  app.post('/api/mcp/ygg', async (req, res) => {
-    const id = req.body?.id
-    const method = typeof req.body?.method === 'string' ? req.body.method : undefined
-    const authToken = getHermesYggMcpAuthToken()
-    const authorizationHeader = typeof req.get('authorization') === 'string' ? req.get('authorization') : ''
-
-    if (!authToken || authorizationHeader !== `Bearer ${authToken}`) {
-      sendHermesYggMcpJsonError(res, id, -32001, 'Unauthorized MCP request', 401)
-      return
-    }
-
-    if (!req.body || req.body.jsonrpc !== '2.0' || !method) {
-      sendHermesYggMcpJsonError(res, id, -32600, 'Invalid JSON-RPC request', 400)
-      return
-    }
-
-    if (method === 'notifications/initialized') {
-      sendHermesYggMcpJsonResult(res, id, {})
-      return
-    }
-
-    if (method === 'initialize') {
-      sendHermesYggMcpJsonResult(res, id, {
-        protocolVersion: HERMES_YGG_MCP_PROTOCOL_VERSION,
-        capabilities: {
-          tools: { listChanged: false },
-          resources: {},
-          prompts: {},
-        },
-        serverInfo: {
-          name: 'ygg-chat',
-          title: 'Ygg Chat Local Tools',
-          version: '1.0.0',
-        },
-      })
-      return
-    }
-
-    if (method === 'tools/list') {
-      sendHermesYggMcpJsonResult(res, id, {
-        tools: listHermesYggMcpTools(),
-      })
-      return
-    }
-
-    if (method === 'resources/list') {
-      sendHermesYggMcpJsonResult(res, id, { resources: [] })
-      return
-    }
-
-    if (method === 'prompts/list') {
-      sendHermesYggMcpJsonResult(res, id, { prompts: [] })
-      return
-    }
-
-    if (method === 'tools/call') {
-      const toolName = req.body?.params?.name
-      if (!toolName || typeof toolName !== 'string') {
-        sendHermesYggMcpJsonError(res, id, -32602, 'tools/call requires a string params.name', 400)
-        return
-      }
-
-      try {
-        const toolResult = await executeLocalToolByName(toolName, req.body?.params?.arguments ?? {}, {
-          rootPath: getHermesYggRequestRootPath(req.get('x-ygg-hermes-cwd')),
-          operationMode: 'execute',
-          conversationId:
-            typeof req.get('x-ygg-hermes-conversation-id') === 'string' && req.get('x-ygg-hermes-conversation-id')!.trim()
-              ? req.get('x-ygg-hermes-conversation-id')!.trim()
-              : null,
-          messageId: null,
-          streamId: null,
-        })
-
-        sendHermesYggMcpJsonResult(res, id, toHermesYggMcpToolCallResult(toolResult))
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        sendHermesYggMcpJsonResult(res, id, {
-          content: [{ type: 'text', text: message }],
-          isError: true,
-        })
-      }
-      return
-    }
-
-    sendHermesYggMcpJsonError(res, id, -32601, `Unsupported MCP method: ${method}`, 404)
   })
 
   // Custom Tools API Endpoints
@@ -5975,6 +6267,26 @@ function setupServer() {
   })
 
   // Local analytics dashboard endpoint
+  // Keep this route before the legacy synchronous implementation below so the
+  // expensive better-sqlite3 scans/aggregations run in a worker thread instead
+  // of blocking the Electron/local server event loop while LoggingPage loads.
+  app.get('/api/local/analytics/dashboard', async (req, res) => {
+    try {
+      if (!currentDbPath) {
+        res.status(503).json({ error: 'Failed to get local analytics dashboard', message: 'Local database is not initialized' })
+        return
+      }
+
+      const dashboard = await localAnalyticsWorkerClient.run(currentDbPath, req.query as Record<string, unknown>)
+      res.json(dashboard)
+    } catch (error) {
+      console.error('[LocalServer] Error getting local analytics dashboard:', error)
+      const message = error instanceof Error ? error.message : String(error)
+      res.status(500).json({ error: 'Failed to get local analytics dashboard', message })
+    }
+  })
+
+  // Legacy synchronous implementation retained as a fallback if route order changes.
   app.get('/api/local/analytics/dashboard', (req, res) => {
     try {
       const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max)
@@ -6024,6 +6336,36 @@ function setupServer() {
             : null
         const name = direct || functionName
         return name && name.trim() ? name.trim() : null
+      }
+      const parseToolArgs = (toolCall: unknown): Record<string, unknown> => {
+        if (!toolCall || typeof toolCall !== 'object') return {}
+        const record = toolCall as Record<string, unknown>
+        const candidates = [
+          record.args,
+          record.arguments,
+          record.input,
+          record.function && typeof record.function === 'object'
+            ? (record.function as Record<string, unknown>).arguments
+            : undefined,
+        ]
+
+        for (const candidate of candidates) {
+          if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+            return candidate as Record<string, unknown>
+          }
+          if (typeof candidate === 'string' && candidate.trim()) {
+            try {
+              const parsed = JSON.parse(candidate)
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                return parsed as Record<string, unknown>
+              }
+            } catch {
+              // ignore malformed tool argument JSON
+            }
+          }
+        }
+
+        return {}
       }
 
       const rangeDaysParam = Number(req.query.rangeDays)
@@ -6174,6 +6516,68 @@ function setupServer() {
       const filteredRequestedToolCalls = toolNameFilter
         ? requestedToolCalls.filter(toolName => toolName === toolNameFilter)
         : requestedToolCalls
+
+      const batchingByTool = new Map<
+        string,
+        { toolName: string; batches: number; expandedCalls: number; savedCalls: number }
+      >()
+      const batchingDailyMap = new Map<
+        string,
+        { date: string; batchedCalls: number; unbatchedEquivalentCalls: number; savedCalls: number }
+      >()
+      let batchedCalls = 0
+      let unbatchedEquivalentCalls = 0
+      let savedCalls = 0
+
+      const addBatchingToolStat = (toolName: string, expandedCalls: number) => {
+        if (toolName !== 'multi_call' && toolName !== 'multi_edit') return
+        const existing = batchingByTool.get(toolName) || { toolName, batches: 0, expandedCalls: 0, savedCalls: 0 }
+        existing.batches += 1
+        existing.expandedCalls += expandedCalls
+        existing.savedCalls += Math.max(0, expandedCalls - 1)
+        batchingByTool.set(toolName, existing)
+      }
+
+      for (const message of filteredMessages) {
+        const date = dayKey(message.created_at)
+        for (const toolCall of parseToolCalls(message.tool_calls)) {
+          const toolName = extractToolName(toolCall)
+          if (!toolName) continue
+          // toolNameFilter is intentionally matched against the persisted outer tool call.
+          // Nested multi_call calls are a different semantic and need a separate filter if exposed later.
+          if (toolNameFilter && toolName !== toolNameFilter) continue
+
+          const args = parseToolArgs(toolCall)
+          const nestedCalls = Array.isArray(args.calls) ? args.calls.length : 0
+          const edits = Array.isArray(args.edits) ? args.edits.length : 0
+          const expandedCalls =
+            toolName === 'multi_call' && nestedCalls > 0
+              ? nestedCalls
+              : toolName === 'multi_edit' && edits > 0
+                ? edits
+                : 1
+          const saved = Math.max(0, expandedCalls - 1)
+
+          batchedCalls += 1
+          unbatchedEquivalentCalls += expandedCalls
+          savedCalls += saved
+          addBatchingToolStat(toolName, expandedCalls)
+
+          const daily = batchingDailyMap.get(date) || {
+            date,
+            batchedCalls: 0,
+            unbatchedEquivalentCalls: 0,
+            savedCalls: 0,
+          }
+          daily.batchedCalls += 1
+          daily.unbatchedEquivalentCalls += expandedCalls
+          daily.savedCalls += saved
+          batchingDailyMap.set(date, daily)
+        }
+      }
+
+      const batchingByBatchTool = Array.from(batchingByTool.values()).sort((a, b) => a.toolName.localeCompare(b.toolName))
+      const batchingDaily = Array.from(batchingDailyMap.values()).sort((a, b) => a.date.localeCompare(b.date))
 
       const scopedToolJobs = toolJobs.filter(job => {
         const created = parseTimestamp(job.created_at)
@@ -6612,6 +7016,15 @@ function setupServer() {
             total: filteredRequestedToolCalls.length,
             byName: toolRequestedByName,
           },
+          batching: {
+            batchedCalls,
+            unbatchedEquivalentCalls,
+            savedCalls,
+            savedCallsPct: unbatchedEquivalentCalls > 0 ? round((savedCalls / unbatchedEquivalentCalls) * 100, 2) : 0,
+            cachePrefixSavingsFactorPct: round(savedCalls * 10, 2),
+            byBatchTool: batchingByBatchTool,
+            daily: batchingDaily,
+          },
           jobs: {
             available: true,
             statusCounts: toolStatusCounts,
@@ -6859,7 +7272,7 @@ function setupServer() {
 
   app.post('/api/local/projects', (req, res) => {
     try {
-      const { id, name, user_id, context, system_prompt } = req.body
+      const { id, name, user_id, context, system_prompt, cwd } = req.body
       if (!user_id) {
         res.status(400).json({ error: 'user_id required' })
         return
@@ -6872,6 +7285,7 @@ function setupServer() {
         user_id,
         context || null,
         system_prompt || null,
+        cwd || null,
         'local',
         now,
         now
@@ -6915,7 +7329,7 @@ function setupServer() {
   app.patch('/api/local/projects/:id', (req, res) => {
     try {
       const { id } = req.params
-      const { name, context, system_prompt } = req.body
+      const { name, context, system_prompt, cwd } = req.body
 
       const existing = statements.getProjectById.get(id) as any
       if (!existing) {
@@ -6937,6 +7351,7 @@ function setupServer() {
           name = COALESCE(?, name),
           context = ?,
           system_prompt = ?,
+          cwd = ?,
           updated_at = CURRENT_TIMESTAMP 
         WHERE id = ?
       `
@@ -6945,6 +7360,7 @@ function setupServer() {
           name || existing.name,
           context !== undefined ? context : existing.context,
           system_prompt !== undefined ? system_prompt : existing.system_prompt,
+          cwd !== undefined ? cwd : existing.cwd,
           id
         )
 
@@ -6989,15 +7405,36 @@ function setupServer() {
     }
   })
 
-  // GET /api/local/conversations?userId=xxx[&projectId=yyy]
+  // GET /api/local/conversations?userId=xxx[&projectId=yyy][&limit=50&cursor=0]
   app.get('/api/local/conversations', (req, res) => {
     try {
       const userId = req.query.userId as string
       const projectId = (req.query.projectId as string | undefined) || undefined
+      const limitParam = req.query.limit as string | undefined
+      const cursorParam = req.query.cursor as string | undefined
       // console.log('[LocalServer] 📋 GET /api/local/conversations - userId:', userId, 'projectId:', projectId)
       if (!userId) {
         // console.log('[LocalServer] ❌ Missing userId parameter')
         res.status(400).json({ error: 'userId required' })
+        return
+      }
+
+      if (limitParam) {
+        const parsedLimit = Number(limitParam)
+        const parsedOffset = cursorParam ? Number(cursorParam) : 0
+        const limit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(200, Math.floor(parsedLimit))) : 50
+        const offset = Number.isFinite(parsedOffset) ? Math.max(0, Math.floor(parsedOffset)) : 0
+        const rows = projectId
+          ? statements.getLocalConversationsByUserAndProjectPaginated.all(userId, projectId, limit + 1, offset)
+          : statements.getLocalConversationsPaginated.all(userId, limit + 1, offset)
+        const hasMore = rows.length > limit
+        const conversations = hasMore ? rows.slice(0, limit) : rows
+
+        res.json({
+          conversations,
+          nextCursor: hasMore ? String(offset + limit) : null,
+          hasMore,
+        })
         return
       }
 
@@ -8332,6 +8769,9 @@ function setupServer() {
       })
   }
 
+  searchNotesForToolRegistry = searchNotes
+  searchTopLevelUserMessagesForToolRegistry = searchTopLevelUserMessages
+
   // GET /api/local/conversations/search?userId=xxx&q=term&limit=20&projectId=xxx
   app.get('/api/local/conversations/search', (req, res) => {
     try {
@@ -8673,7 +9113,7 @@ function setupServer() {
   // POST /api/local/conversations
   app.post('/api/local/conversations', (req, res) => {
     try {
-      const { id, user_id, project_id, title, system_prompt, conversation_context } = req.body
+      const { id, user_id, project_id, title, system_prompt, conversation_context, cwd } = req.body
       if (!user_id) {
         res.status(400).json({ error: 'user_id required' })
         return
@@ -8681,6 +9121,8 @@ function setupServer() {
 
       const conversationId = id || uuidv4()
       const now = new Date().toISOString()
+      const project = project_id ? (statements.getProjectById.get(project_id) as any) : null
+      const inheritedCwd = cwd !== undefined ? cwd : project?.cwd || null
 
       statements.upsertConversation.run(
         conversationId,
@@ -8691,7 +9133,7 @@ function setupServer() {
         system_prompt || null,
         conversation_context || null,
         null, // research_note
-        null, // cwd
+        inheritedCwd || null, // cwd
         'local', // storage_mode
         now,
         now
@@ -8919,11 +9361,13 @@ function setupServer() {
       const { id: conversationId } = req.params
       const { messages } = req.body as {
         messages: Array<{
-          role: 'user' | 'assistant'
+          source_id?: string
+          parent_source_id?: string | null
+          role: 'user' | 'assistant' | 'system' | 'ex_agent' | 'tool'
           content: string
           thinking_block?: string
           model_name?: string
-          tool_calls?: string
+          tool_calls?: string | any
           note?: string
           note_color?: string | null
           content_blocks?: any
@@ -8947,15 +9391,53 @@ function setupServer() {
       const createdMessages: any[] = []
       let lastMessageId: string | null = null
       const now = new Date().toISOString()
+      const sourceIdToNewId = new Map<string, string>()
+      const hasStructuredParents = messages.some(msg => msg.source_id != null || msg.parent_source_id !== undefined)
 
-      // Insert messages sequentially, maintaining parent-child relationships (linear chain)
-      for (const msg of messages) {
-        const messageId = uuidv4()
+      messages.forEach((msg, index) => {
+        const sourceKey = msg.source_id != null ? String(msg.source_id) : `__legacy_${index}`
+        sourceIdToNewId.set(sourceKey, uuidv4())
+      })
+
+      const entries = messages.map((msg, index) => ({ msg, index }))
+      const orderedEntries: typeof entries = []
+
+      if (hasStructuredParents) {
+        const entryBySourceKey = new Map(entries.map(entry => [entry.msg.source_id != null ? String(entry.msg.source_id) : `__legacy_${entry.index}`, entry]))
+        const visitedEntries = new Set<string>()
+
+        const visitEntry = (entry: (typeof entries)[number]) => {
+          const sourceKey = entry.msg.source_id != null ? String(entry.msg.source_id) : `__legacy_${entry.index}`
+          if (visitedEntries.has(sourceKey)) return
+
+          const parentEntry = entry.msg.parent_source_id != null ? entryBySourceKey.get(String(entry.msg.parent_source_id)) : null
+          if (parentEntry) visitEntry(parentEntry)
+
+          visitedEntries.add(sourceKey)
+          orderedEntries.push(entry)
+        }
+
+        entries.forEach(visitEntry)
+      } else {
+        orderedEntries.push(...entries)
+      }
+
+      // Insert messages sequentially. Structured Heimdall clone payloads preserve
+      // selected parent/child relationships; legacy payloads keep the old linear
+      // chain behavior for backward compatibility.
+      for (const { msg, index } of orderedEntries) {
+        const sourceKey = msg.source_id != null ? String(msg.source_id) : `__legacy_${index}`
+        const messageId = sourceIdToNewId.get(sourceKey) || uuidv4()
+        const parentId = hasStructuredParents
+          ? msg.parent_source_id != null
+            ? sourceIdToNewId.get(String(msg.parent_source_id)) || null
+            : null
+          : lastMessageId
 
         statements.upsertMessage.run(
           messageId,
           conversationId,
-          lastMessageId, // Parent is the previous message in the chain
+          parentId,
           '[]', // children_ids starts empty (trigger will update parent's children_ids)
           msg.role,
           msg.content,
@@ -8983,7 +9465,7 @@ function setupServer() {
         const createdMessage = {
           id: messageId,
           conversation_id: conversationId,
-          parent_id: lastMessageId,
+          parent_id: parentId,
           children_ids: [],
           role: msg.role,
           content: msg.content,
@@ -9152,450 +9634,6 @@ function setupServer() {
       return { ...block, index }
     })
   }
-
-  // GET /api/agents/hermes-session/:conversationId - Get Hermes session info
-  app.get('/api/agents/hermes-session/:conversationId', (req, res) => {
-    try {
-      const { conversationId } = req.params
-      const conversation = statements.getConversationById.get(conversationId) as any
-
-      if (!conversation) {
-        res.json({ hasSession: false })
-        return
-      }
-
-      const cwd = conversation.cwd || process.cwd()
-      const sessionId = getHermesSession(conversationId, cwd)
-
-      if (sessionId) {
-        res.json({
-          hasSession: true,
-          sessionId,
-          cwd,
-        })
-        return
-      }
-
-      const lastHermesMessage = db!
-        .prepare(
-          `
-          SELECT ex_agent_session_id, created_at
-          FROM messages
-          WHERE conversation_id = ?
-            AND ex_agent_session_id IS NOT NULL
-            AND ex_agent_session_id != ''
-            AND (
-              role = 'assistant'
-              OR (role = 'ex_agent' AND ex_agent_type = 'hermes_agent')
-            )
-          ORDER BY created_at DESC
-          LIMIT 1
-        `
-        )
-        .get(conversationId) as any
-
-      if (lastHermesMessage?.ex_agent_session_id) {
-        setHermesSession(conversationId, cwd, lastHermesMessage.ex_agent_session_id)
-      }
-
-      res.json({
-        hasSession: !!lastHermesMessage?.ex_agent_session_id,
-        sessionId: lastHermesMessage?.ex_agent_session_id,
-        lastMessageAt: lastHermesMessage?.created_at,
-        cwd,
-      })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error getting Hermes session:', error)
-      res.status(500).json({ error: 'Failed to get Hermes session' })
-    }
-  })
-
-  // POST /api/agents/hermes-permission-response/:requestId - Resolve a pending Hermes ACP permission request
-  app.post('/api/agents/hermes-permission-response/:requestId', (req, res) => {
-    const { requestId } = req.params
-    const decisionRaw = typeof req.body?.decision === 'string' ? req.body.decision.trim().toLowerCase() : ''
-    const decision: HermesPermissionDecision =
-      decisionRaw === 'allow_always' ? 'allow_always' : decisionRaw === 'deny' ? 'deny' : 'allow_once'
-
-    const pending = pendingHermesPermissionRequests.get(requestId)
-    if (!pending) {
-      res.status(404).json({ error: 'Hermes permission request not found or already resolved' })
-      return
-    }
-
-    pendingHermesPermissionRequests.delete(requestId)
-    pending.resolve(decision)
-    res.json({ ok: true })
-  })
-
-  // POST /api/agents/hermes-messages/:conversationId - Send message to Hermes ACP backend
-  app.post('/api/agents/hermes-messages/:conversationId', async (req, res) => {
-    const { conversationId } = req.params
-    const {
-      message,
-      cwd: requestedCwd,
-      resume,
-      parentId: requestedParentId,
-      sessionId: providedSessionId,
-      forkSession,
-      model,
-      maxIterations,
-    } = req.body as {
-      message: string
-      cwd?: string
-      resume?: boolean
-      parentId?: string | null
-      sessionId?: string
-      forkSession?: boolean
-      model?: string
-      maxIterations?: number
-    }
-
-    if (!message) {
-      res.status(400).json({ error: 'Message content required' })
-      return
-    }
-
-    const conversation = statements.getConversationById.get(conversationId) as any
-    const cwd = requestedCwd || conversation?.cwd || process.cwd()
-
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-    })
-
-    const requestAbortController = new AbortController()
-
-    try {
-      const lastMessage = statements.getLastMessageByConversationId.get(conversationId) as any
-      const parentId = requestedParentId !== undefined ? requestedParentId : lastMessage?.id || null
-
-      const userMsgId = uuidv4()
-      const now = new Date().toISOString()
-      statements.upsertMessage.run(
-        userMsgId,
-        conversationId,
-        parentId,
-        '[]',
-        'user',
-        message,
-        null,
-        null,
-        null,
-        null,
-        'user-input',
-        null,
-        null,
-        null,
-        null,
-        null,
-        now
-      )
-
-      res.write(
-        `data: ${JSON.stringify({ type: 'user_message', message: { id: userMsgId, role: 'user', content: message } })}\n\n`
-      )
-
-      const findSessionIdFromAncestorChain = (startMessageId: string | null | undefined): string | undefined => {
-        if (!startMessageId) return undefined
-
-        let current = statements.getMessageById.get(startMessageId) as any
-        while (current) {
-          if (
-            typeof current.ex_agent_session_id === 'string' &&
-            current.ex_agent_session_id.trim().length > 0 &&
-            (current.role === 'assistant' || (current.role === 'ex_agent' && current.ex_agent_type === 'hermes_agent'))
-          ) {
-            return current.ex_agent_session_id
-          }
-          if (!current.parent_id) break
-          current = statements.getMessageById.get(current.parent_id)
-        }
-
-        return undefined
-      }
-
-      const lineageSessionId = findSessionIdFromAncestorChain(parentId)
-      const executionPlan = resolveHermesExecutionPlan({
-        providedSessionId,
-        lineageSessionId,
-        conversationSessionId: getHermesSession(conversationId, cwd),
-        forkSession,
-        resume,
-      })
-      let sessionId = executionPlan.sourceSessionId
-
-      let contentBlocks: any[] = []
-      let textParts: string[] = []
-      let reasoningParts: string[] = []
-      let currentSessionId: string | null = sessionId || null
-      let hasPersistedFinalAssistant = false
-      let sawHermesContentDelta = false
-
-      const onStream = (data: any) => {
-        try {
-          res.write(`data: ${JSON.stringify(data)}\n\n`)
-        } catch (error) {
-          console.error('[LocalServer] Error writing Hermes stream data:', error)
-        }
-      }
-
-      const onStreamingChunk = async (chunk: any) => {
-        try {
-          // Only forward true token deltas here.
-          // Tool lifecycle is streamed via messageType events (tool_start/tool_result).
-          if (chunk.type !== 'content_delta' && chunk.type !== 'thinking_delta') {
-            return
-          }
-
-          if (chunk.type === 'content_delta' && typeof chunk.delta === 'string' && chunk.delta.length > 0) {
-            sawHermesContentDelta = true
-          }
-
-          if (chunk.type === 'thinking_delta' && typeof chunk.delta === 'string' && chunk.delta.length > 0) {
-            reasoningParts.push(chunk.delta)
-          }
-
-          res.write(
-            `data: ${JSON.stringify({
-              type: 'chunk',
-              part: chunk.contentType === 'thinking' ? 'reasoning' : 'text',
-              delta: chunk.delta || '',
-              chunkType: chunk.type,
-            })}\n\n`
-          )
-        } catch (error) {
-          console.error('[LocalServer] Error writing Hermes streaming chunk:', error)
-        }
-      }
-
-      const onResponse = async (response: any) => {
-        onStream(response)
-
-        if (response.sessionId) {
-          currentSessionId = response.sessionId
-          setHermesSession(conversationId, cwd, response.sessionId)
-        }
-
-        const event = response.event || {}
-
-        if (response.messageType === 'assistant_message' || response.messageType === 'final') {
-          const assistantText =
-            (typeof event.content === 'string' && event.content) || (typeof event.text === 'string' && event.text) || ''
-
-          if (assistantText) {
-            const isDuplicateFinalText =
-              response.messageType === 'final' &&
-              textParts.length > 0 &&
-              textParts[textParts.length - 1] === assistantText
-
-            if (!isDuplicateFinalText) {
-              contentBlocks.push({ type: 'text', text: assistantText })
-              textParts.push(assistantText)
-              if (!sawHermesContentDelta) {
-                res.write(
-                  `data: ${JSON.stringify({
-                    type: 'chunk',
-                    part: 'text',
-                    delta: assistantText,
-                    chunkType: response.messageType,
-                  })}\n\n`
-                )
-              }
-            }
-          }
-        }
-
-        if (response.messageType === 'tool_start') {
-          const toolId = event.tool_call_id || event.toolCallId || uuidv4()
-          const toolName = event.name || event.tool_name || 'tool'
-          contentBlocks.push({
-            type: 'tool_use',
-            id: toolId,
-            name: toolName,
-            input: event.arguments || event.args || {},
-          })
-        }
-
-        if (response.messageType === 'tool_result') {
-          const toolCallId = event.tool_call_id || event.toolCallId || null
-          const toolName = event.name || event.tool_name || 'tool'
-          const toolContentRaw = event.content ?? event.result ?? ''
-
-          contentBlocks.push({
-            type: 'tool_result',
-            tool_use_id: toolCallId,
-            tool_name: toolName,
-            content: toolContentRaw,
-            is_error: event.ok === false,
-          })
-        }
-
-        if (response.messageType === 'error') {
-          const errorMessage = response.error?.message || event.message || 'Hermes ACP error'
-          if (errorMessage) {
-            contentBlocks.push({ type: 'text', text: `[Hermes Error] ${errorMessage}` })
-            textParts.push(`[Hermes Error] ${errorMessage}`)
-          }
-        }
-
-        if (
-          response.messageType === 'final' ||
-          response.messageType === 'conversation_end' ||
-          response.messageType === 'error'
-        ) {
-          if (!hasPersistedFinalAssistant && contentBlocks.length > 0) {
-            if (!currentSessionId) {
-              currentSessionId = sessionId || `hermes-${conversationId}`
-              setHermesSession(conversationId, cwd, currentSessionId)
-            }
-
-            const hermesMsgId = uuidv4()
-            const textContent = textParts.join('\n\n').trim()
-            const thinkingContent = reasoningParts.join('').trim()
-
-            if (thinkingContent && !contentBlocks.some(block => block?.type === 'thinking')) {
-              contentBlocks = [{ type: 'thinking', thinking: thinkingContent }, ...contentBlocks]
-            }
-
-            statements.upsertMessage.run(
-              hermesMsgId,
-              conversationId,
-              userMsgId,
-              '[]',
-              'assistant',
-              textContent || '[Hermes response]',
-              null,
-              null,
-              null,
-              null,
-              model || 'hermes-bridge',
-              response.messageType === 'error' ? response.error?.message || event.message || 'Hermes error' : null,
-              null,
-              currentSessionId,
-              null,
-              JSON.stringify(normalizeContentBlocksForStorage(contentBlocks)),
-              new Date().toISOString()
-            )
-
-            res.write(
-              `data: ${JSON.stringify({
-                type: 'complete',
-                sessionId: currentSessionId,
-                messageId: hermesMsgId,
-                messageCount: contentBlocks.length,
-              })}\n\n`
-            )
-
-            hasPersistedFinalAssistant = true
-          }
-
-          contentBlocks = []
-          textParts = []
-          reasoningParts = []
-        }
-      }
-
-      const onPermissionRequest = async (permissionRequest: any): Promise<HermesPermissionDecision> => {
-        if (requestAbortController.signal.aborted || res.writableEnded) {
-          return 'deny'
-        }
-
-        const requestId = uuidv4()
-        const toolCall = normalizeHermesPermissionToolCall(permissionRequest)
-
-        res.write(
-          `data: ${JSON.stringify({
-            type: 'permission_request',
-            requestId,
-            sessionId: permissionRequest?.sessionId ?? null,
-            toolCall,
-            options: Array.isArray(permissionRequest?.options) ? permissionRequest.options : [],
-          })}\n\n`
-        )
-
-        return await new Promise<HermesPermissionDecision>(resolve => {
-          let settled = false
-          let timeoutHandle: ReturnType<typeof setTimeout> | null = null
-
-          const cleanup = () => {
-            if (timeoutHandle) {
-              clearTimeout(timeoutHandle)
-              timeoutHandle = null
-            }
-            requestAbortController.signal.removeEventListener('abort', onAbort)
-            pendingHermesPermissionRequests.delete(requestId)
-          }
-
-          const settle = (decision: HermesPermissionDecision) => {
-            if (settled) return
-            settled = true
-            cleanup()
-            resolve(decision)
-          }
-
-          const onAbort = () => settle('deny')
-
-          pendingHermesPermissionRequests.set(requestId, {
-            conversationId,
-            createdAt: Date.now(),
-            resolve: settle,
-          })
-
-          timeoutHandle = setTimeout(() => settle('deny'), HERMES_PERMISSION_RESPONSE_TIMEOUT_MS)
-          requestAbortController.signal.addEventListener('abort', onAbort, { once: true })
-        })
-      }
-
-      const abortHermesRequest = () => {
-        if (!requestAbortController.signal.aborted && !res.writableEnded) {
-          requestAbortController.abort()
-        }
-      }
-
-      req.once('aborted', abortHermesRequest)
-      res.once('close', abortHermesRequest)
-
-      try {
-        await executeHermesAgent(
-          conversationId,
-          message,
-          cwd,
-          onResponse,
-          onStreamingChunk,
-          sessionId,
-          forkSession,
-          model,
-          maxIterations,
-          requestAbortController.signal,
-          onPermissionRequest
-        )
-      } finally {
-        req.off('aborted', abortHermesRequest)
-        res.off('close', abortHermesRequest)
-      }
-
-      if (cwd && conversation && conversation.cwd !== cwd) {
-        statements.updateConversationCwd.run(cwd, conversationId)
-      }
-    } catch (error) {
-      if (!requestAbortController.signal.aborted && !res.writableEnded) {
-        console.error('[LocalServer] Hermes ACP error:', error)
-        res.write(
-          `data: ${JSON.stringify({
-            type: 'error',
-            error: error instanceof Error ? error.message : 'Unknown Hermes ACP error',
-          })}\n\n`
-        )
-      }
-    }
-
-    if (!requestAbortController.signal.aborted && !res.writableEnded) {
-      res.end()
-    }
-  })
 
   // GET /api/agents/cc-session/:conversationId - Get CC session info
   app.get('/api/agents/cc-session/:conversationId', (req, res) => {
@@ -10555,6 +10593,7 @@ export async function startLocalServer(
 export function stopLocalServer(): Promise<void> {
   return new Promise(resolve => {
     // Shutdown tool orchestrator first
+    localAnalyticsWorkerClient.shutdown()
     toolOrchestrator.shutdown()
     customToolRegistry.shutdown()
     utilityRuntimeAvailable = false

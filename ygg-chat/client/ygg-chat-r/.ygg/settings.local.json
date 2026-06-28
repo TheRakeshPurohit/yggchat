@@ -6,7 +6,8 @@
           {
             "type": "command",
             "command": "python3 .ygg/hooks/inject_branch_point_prompt.py",
-            "timeoutMs": 30000
+            "timeoutMs": 30000,
+            "executionMode": "sync"
           }
         ]
       }
@@ -17,7 +18,14 @@
           {
             "type": "command",
             "command": "python3 .ygg/hooks/root_note_stop.py",
-            "timeoutMs": 60000
+            "timeoutMs": 60000,
+            "executionMode": "async"
+          },
+          {
+            "type": "command",
+            "command": "python3 .ygg/hooks/long_term_memory_stop.py",
+            "timeoutMs": 60000,
+            "executionMode": "async"
           }
         ]
       }

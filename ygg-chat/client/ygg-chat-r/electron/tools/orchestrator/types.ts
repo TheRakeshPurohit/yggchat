@@ -28,8 +28,12 @@ export interface JobOptions {
   conversationId?: string | null
   /** Message ID that triggered this job */
   messageId?: string | null
+  /** Parent user/root message ID for the current stream */
+  parentMessageId?: string | null
   /** Stream ID for real-time updates */
   streamId?: string | null
+  /** Tool call ID, when available */
+  toolCallId?: string | null
 }
 
 export interface Job {
@@ -58,7 +62,9 @@ export interface Job {
   /** Conversation context */
   conversationId: string | null
   messageId: string | null
+  parentMessageId: string | null
   streamId: string | null
+  toolCallId: string | null
   /** Timestamps */
   createdAt: string
   startedAt: string | null
@@ -85,6 +91,8 @@ export interface JobSummary {
   messageId: string | null
   streamId: string | null
   error: string | null
+  parentMessageId?: string | null
+  toolCallId?: string | null
 }
 
 export interface JobFilter {

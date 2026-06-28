@@ -1,8 +1,10 @@
 import { useQueryClient } from '@tanstack/react-query'
+import { Cloud, Eraser, FolderOpen, HardDrive, Plus, Save, Sparkles, Star, X } from 'lucide-react'
 import React, { useEffect, useState } from 'react'
 import { Project, ProjectWithLatestConversation, StorageMode } from '../../../../shared/types'
 import { Button, TextField } from '../components'
 import { InputTextArea } from '../components/InputTextArea/InputTextArea'
+import { getThemeModeColor, useCustomChatTheme, useHtmlDarkMode } from '../components/ThemeManager/themeConfig'
 import { isCommunityMode } from '../config/runtimeMode'
 import { createProject, CreateProjectPayload, updateProject, UpdateProjectPayload } from '../features/projects'
 import { useAppDispatch } from '../hooks/redux'
@@ -16,24 +18,110 @@ interface EditProjectProps {
   onProjectCreated?: (project: Project) => void
 }
 
+const glassIconButtonClass =
+  'group/control relative flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/85 text-stone-700 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-105 hover:bg-white hover:text-stone-950 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-50 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-yBlack-900/85 dark:text-stone-200 dark:hover:bg-neutral-900 dark:hover:text-white dark:focus-visible:ring-orange-400/70 dark:focus-visible:ring-offset-yBlack-900'
+const glassPillClass = 'rounded-full bg-white/25 p-1.5 backdrop-blur-xl dark:bg-black/20'
+const sectionCardClass = 'rounded-[2rem] bg-white/50 p-4 backdrop-blur-xl dark:bg-black/15 sm:p-5'
+const fieldLabelClass = 'mb-2 block text-sm font-medium text-stone-700 dark:text-stone-200'
+const fieldHintClass = 'mt-2 text-xs leading-5 text-stone-500 dark:text-stone-400'
+const inlineInputClass =
+  'w-full rounded-2xl border-transparent bg-white/65 px-4 py-3 text-sm text-stone-900 outline-none backdrop-blur-xl transition focus:bg-white/80 focus:ring-2 focus:ring-blue-400/20 dark:bg-yBlack-900/65 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:bg-yBlack-900/85 dark:focus:ring-orange-400/20'
+
+type EditProjectThemeStyles = {
+  backdrop: React.CSSProperties
+  modal: React.CSSProperties
+  chrome: React.CSSProperties
+  section: React.CSSProperties
+  primaryText: React.CSSProperties
+  titleText: React.CSSProperties
+  bodyText: React.CSSProperties
+  mutedText: React.CSSProperties
+  badge: React.CSSProperties
+  inputSurface: React.CSSProperties
+  panel: React.CSSProperties
+  panelMuted: React.CSSProperties
+  pillButton: React.CSSProperties
+  activePillButton: React.CSSProperties
+  primaryButton: React.CSSProperties
+}
+
 const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProject, onProjectCreated }) => {
   const dispatch = useAppDispatch()
   const queryClient = useQueryClient()
   const { userId } = useAuth()
+  const { theme: customTheme, enabled: customThemeEnabled } = useCustomChatTheme()
+  const isDarkMode = useHtmlDarkMode()
+
+  const themedStyles: EditProjectThemeStyles | null = customThemeEnabled
+    ? {
+        backdrop: {
+          backgroundColor: getThemeModeColor(customTheme.colors.authModalBackdrop, isDarkMode),
+          color: getThemeModeColor(customTheme.colors.toolJobsPrimaryText, isDarkMode),
+        },
+        modal: {
+          backgroundColor: getThemeModeColor(customTheme.colors.settingsPaneBodyBg, isDarkMode),
+        },
+        chrome: {
+          backgroundColor: getThemeModeColor(customTheme.colors.conversationToolbarBg, isDarkMode),
+        },
+        section: {
+          backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesCardBg, isDarkMode),
+        },
+        primaryText: {
+          color: getThemeModeColor(customTheme.colors.toolJobsPrimaryText, isDarkMode),
+        },
+        titleText: {
+          color: getThemeModeColor(customTheme.colors.settingsCustomThemesTitleText, isDarkMode),
+        },
+        bodyText: {
+          color: getThemeModeColor(customTheme.colors.settingsCustomThemesBodyText, isDarkMode),
+        },
+        mutedText: {
+          color: getThemeModeColor(customTheme.colors.toolJobsMutedText, isDarkMode),
+        },
+        badge: {
+          backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesAccentBg, isDarkMode),
+          color: getThemeModeColor(customTheme.colors.settingsCustomThemesAccentText, isDarkMode),
+        },
+        inputSurface: {
+          backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesInnerCardBg, isDarkMode),
+          color: getThemeModeColor(customTheme.colors.toolJobsPrimaryText, isDarkMode),
+        },
+        panel: {
+          backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesInnerCardBg, isDarkMode),
+        },
+        panelMuted: {
+          backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesListBg, isDarkMode),
+        },
+        pillButton: {
+          backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesButtonBg, isDarkMode),
+          color: getThemeModeColor(customTheme.colors.settingsCustomThemesButtonText, isDarkMode),
+        },
+        activePillButton: {
+          backgroundColor: getThemeModeColor(customTheme.colors.composerToggleActiveBg, isDarkMode),
+          borderColor: getThemeModeColor(customTheme.colors.composerToggleActiveBorder, isDarkMode),
+          color: getThemeModeColor(customTheme.colors.composerToggleActiveText, isDarkMode),
+        },
+        primaryButton: {
+          backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesPrimaryButtonBg, isDarkMode),
+          color: getThemeModeColor(customTheme.colors.settingsCustomThemesPrimaryButtonText, isDarkMode),
+        },
+      }
+    : null
 
   const [newProjectName, setNewProjectName] = useState('')
   const [newProjectContext, setNewProjectContext] = useState('')
   const [newProjectSystemPrompt, setNewProjectSystemPrompt] = useState('')
+  const [projectCwd, setProjectCwd] = useState('')
   const [storageMode, setStorageMode] = useState<StorageMode>(isCommunityMode ? 'local' : 'cloud')
 
-  // Check if running in Electron
   const isElectronMode =
     import.meta.env.VITE_ENVIRONMENT === 'electron' ||
     (typeof process !== 'undefined' && process.env?.VITE_ENVIRONMENT === 'electron')
 
-  const isEditing = editingProject !== null
+  const isEditing = Boolean(editingProject)
+  const canSubmit = newProjectName.trim().length > 0
 
-  // Use the custom hook for system prompt management
   const {
     prompts: userSystemPrompts,
     loading: promptsLoading,
@@ -43,6 +131,9 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
     setShowSavePromptInput,
     savePromptName,
     setSavePromptName,
+    savePromptStorage,
+    setSavePromptStorage,
+    canSaveToCloud,
     savingPrompt,
     saveError,
     isExistingPrompt,
@@ -65,21 +156,23 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
       setNewProjectName(editingProject.name)
       setNewProjectContext(editingProject.context || '')
       setNewProjectSystemPrompt(editingProject.system_prompt || '')
+      setProjectCwd(editingProject.cwd || '')
       setStorageMode(isCommunityMode ? 'local' : editingProject.storage_mode || 'cloud')
       setSelectedPromptId(null)
     } else if (isOpen) {
-      // Only reset form when opening modal for creating new project
       resetForm()
     }
   }, [editingProject, isOpen])
 
   const handleCreateProject = async () => {
-    if (!newProjectName.trim()) return
+    if (!canSubmit) return
 
+    const normalizedProjectCwd = projectCwd.trim()
     const payload: CreateProjectPayload = {
       name: newProjectName.trim(),
       context: newProjectContext.trim() || undefined,
       system_prompt: newProjectSystemPrompt.trim() || undefined,
+      cwd: normalizedProjectCwd || null,
       storageMode: isCommunityMode ? 'local' : storageMode,
     }
 
@@ -96,21 +189,21 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
   }
 
   const handleUpdateProject = async () => {
-    if (!newProjectName.trim() || !editingProject) return
+    if (!canSubmit || !editingProject) return
 
+    const normalizedProjectCwd = projectCwd.trim()
     const payload: UpdateProjectPayload = {
       id: editingProject.id,
       name: newProjectName.trim(),
       context: newProjectContext.trim() || undefined,
       system_prompt: newProjectSystemPrompt.trim() || undefined,
+      cwd: normalizedProjectCwd || null,
       storage_mode: isCommunityMode ? 'local' : storageMode,
     }
 
     try {
       const updatedProject = await dispatch(updateProject(payload)).unwrap()
 
-      // Update React Query cache to reflect changes immediately
-      // Helper function to update project in cached array
       const updateProjectInCache = (projects: ProjectWithLatestConversation[] | undefined) => {
         if (!projects) return projects
         return projects.map(proj =>
@@ -120,16 +213,14 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
                 name: updatedProject.name,
                 context: updatedProject.context,
                 system_prompt: updatedProject.system_prompt,
+                cwd: updatedProject.cwd ?? null,
                 updated_at: updatedProject.updated_at,
               }
             : proj
         )
       }
 
-      // Update the main projects list cache
       queryClient.setQueryData<ProjectWithLatestConversation[]>(['projects', userId], updateProjectInCache)
-
-      // Update the individual project cache
       queryClient.setQueryData<Project>(['projects', updatedProject.id], (old: Project | undefined) => {
         if (!old) return updatedProject
         return {
@@ -137,6 +228,7 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
           name: updatedProject.name,
           context: updatedProject.context,
           system_prompt: updatedProject.system_prompt,
+          cwd: updatedProject.cwd ?? null,
           updated_at: updatedProject.updated_at,
         }
       })
@@ -152,6 +244,7 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
     setNewProjectName('')
     setNewProjectContext('')
     setNewProjectSystemPrompt('')
+    setProjectCwd('')
     setStorageMode(isCommunityMode ? 'local' : 'cloud')
     setSelectedPromptId(null)
     resetSaveUI()
@@ -162,242 +255,388 @@ const EditProject: React.FC<EditProjectProps> = ({ isOpen, onClose, editingProje
     onClose()
   }
 
+  const handleSelectProjectCwd = async () => {
+    const result = await window.electronAPI?.dialog?.selectFolder()
+    if (result?.success && result.path) {
+      setProjectCwd(result.path)
+    }
+  }
+
+  const handleSubmit = isEditing ? handleUpdateProject : handleCreateProject
+  const textInputStyle = themedStyles?.inputSurface
+  const textAreaStyle = themedStyles?.inputSurface
+  const sectionStyle = themedStyles?.section
+  const panelStyle = themedStyles?.panel
+  const panelMutedStyle = themedStyles?.panelMuted
+  const mutedTextStyle = themedStyles?.mutedText
+  const titleTextStyle = themedStyles?.titleText
+  const bodyTextStyle = themedStyles?.bodyText
+  const primaryTextStyle = themedStyles?.primaryText
+
   if (!isOpen) return null
 
   return (
-    <div className='fixed inset-0 bg-neutral-400/40 dark:bg-black/30 bg-opacity-50 backdrop-blur-sm flex items-center justify-center z-5000 p-4 text-lg'>
-      <div className='bg-neutral-100 mica-medium text-neutral-900 dark:bg-yBlack-900 rounded-3xl border border-gray-200 dark:border-zinc-700 w-full thin-scrollbar max-w-5xl h-full max-h-[83vh] overflow-y-auto thin-scrollbar'>
-        <div className='py-6 px-4 sm:px-10 md:px-12 lg:px-12 xl:px-16 2xl:px-15 2xl:py-10 3xl:px-24 4xl:px-24'>
-          <div className='flex items-center justify-between space-y-6'>
-            <h3 className='text-2xl font-semibold dark:text-neutral-100'>
-              {isEditing ? `Edit Project: ${editingProject?.name}` : 'Create New Project'}
-            </h3>
-            <button
-              onClick={onClose}
-              className='text-neutral-900 dark:text-neutral-200 hover:text-gray-600 dark:hover:text-gray-300'
-            >
-              <i className='bx bx-x text-2xl active:scale-95'></i>
-            </button>
-          </div>
+    <div
+      className='fixed inset-0 z-5000 flex items-center justify-center bg-stone-200/45 p-3 text-stone-900 backdrop-blur-xl dark:bg-black/45 dark:text-stone-100 sm:p-4'
+      style={themedStyles?.backdrop}
+    >
+      <div
+        className='flex h-full max-h-[86vh] w-full max-w-6xl flex-col overflow-hidden rounded-[2rem] bg-neutral-50/85 backdrop-blur-2xl dark:bg-yBlack-900/90'
+        style={themedStyles?.modal}
+      >
+        <header
+          className='sticky top-0 z-10 bg-neutral-50/80 px-5 py-4 backdrop-blur-2xl dark:bg-yBlack-900/80 sm:px-7'
+          style={themedStyles?.chrome}
+        >
+          <div className='flex items-start justify-between gap-4'>
+            <div className='min-w-0'>
+              <div
+                className='mb-2 inline-flex items-center gap-2 rounded-full bg-white/50 px-3 py-1 text-xs font-medium text-stone-500 backdrop-blur-xl dark:bg-white/5 dark:text-stone-400'
+                style={themedStyles?.badge}
+              >
+                <Sparkles size={14} strokeWidth={2.25} />
+                {isEditing ? 'Project settings' : 'New workspace'}
+              </div>
+              <h3 className='truncate text-2xl font-semibold tracking-tight text-stone-950 dark:text-stone-50' style={primaryTextStyle}>
+                {isEditing ? editingProject?.name : 'Create project'}
+              </h3>
+              <p className='mt-1 text-sm text-stone-500 dark:text-stone-400' style={mutedTextStyle}>
+                Keep project instructions, context, and storage preferences in one focused place.
+              </p>
+            </div>
 
-          <div className='space-y-6'>
-            <div>
-              <label className='block pb-2 block text-[19px] sm:text-[19px] md:text-[19px] lg:text-[19px] xl:text-[19px] 2xl:text-[19px] 3xl:text-[19px] 4xl:text-[19px] text-neutral-900 font-medium mb-2 dark:text-neutral-200'>
-                Project Name
-              </label>
+            <div className={glassPillClass} style={panelMutedStyle}>
+              <button type='button' onClick={handleCancel} className={glassIconButtonClass} style={themedStyles?.pillButton} title='Close' aria-label='Close'>
+                <X size={18} strokeWidth={2.25} />
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <div className='thin-scrollbar flex-1 overflow-y-auto px-5 py-5 sm:px-7 sm:py-6'>
+          <div className='space-y-5'>
+            <section className={sectionCardClass} style={sectionStyle}>
+              <label className={fieldLabelClass} style={titleTextStyle}>Project name</label>
               <TextField
-                placeholder='Enter project name...'
+                placeholder='Name this project...'
                 value={newProjectName}
                 onChange={setNewProjectName}
-                className='text-lg'
+                className='!rounded-2xl !border-transparent !bg-white/70 !py-3 !text-base dark:!border-transparent dark:!bg-yBlack-900/70'
+                style={textInputStyle}
+                autoFocus
               />
-            </div>
-            {/* User System Prompts horizontal scrolling list */}
-            {userSystemPrompts.length > 0 && (
-              <div className='mb-4'>
-                <p className='text-sm text-neutral-600 dark:text-neutral-400 mb-4'>Select a saved prompt:</p>
-                <div className='flex gap-2 overflow-x-auto pb-2 thin-scrollbar'>
-                  {userSystemPrompts.map(prompt => (
-                    <button
-                      key={prompt.id}
-                      onClick={() => handleSelectPrompt(prompt)}
-                      className={`flex items-center justify-center gap-2 flex-shrink-0 h-10 px-4 rounded-xl border transition-all duration-150 ${
-                        selectedPromptId === prompt.id
-                          ? 'bg-sky-600/70 text-white border-transparent'
-                          : 'bg-neutral-50 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 border-transparent dark:border-transparent hover:bg-neutral-100 dark:hover:bg-neutral-700'
-                      }`}
-                      title={prompt.description || prompt.content.substring(0, 100)}
-                    >
-                      <span className='font-medium text-sm whitespace-nowrap'>{prompt.name}</span>
-                      {prompt.is_default && (
-                        <span className=' pt-0.5 text-xs opacity-70'>
-                          <i className='bx bxs-star text-base'></i>
-                        </span>
-                      )}
-                    </button>
-                  ))}
+            </section>
+
+            <section className={sectionCardClass} style={sectionStyle}>
+              <div className='mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between'>
+                <div>
+                  <label className={fieldLabelClass} style={titleTextStyle}>System prompt</label>
+                  <p className='text-xs leading-5 text-stone-500 dark:text-stone-400' style={mutedTextStyle}>
+                    Optional behavior instructions for every chat in this project.
+                  </p>
                 </div>
+                {promptsLoading && (
+                  <span className='text-xs text-stone-500 dark:text-stone-400' style={mutedTextStyle}>
+                    Loading prompts...
+                  </span>
+                )}
               </div>
-            )}
-            <div className=''>
+
+              {userSystemPrompts.length > 0 && (
+                <div className='mb-4'>
+                  <div className='thin-scrollbar flex gap-2 overflow-x-auto pb-1'>
+                    {userSystemPrompts.map(prompt => {
+                      const selected = selectedPromptId === prompt.id
+                      return (
+                        <button
+                          key={prompt.id}
+                          type='button'
+                          onClick={() => handleSelectPrompt(prompt)}
+                          className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-full px-4 text-sm font-medium transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-orange-400/60 ${
+                            selected
+                              ? 'bg-blue-50 text-blue-700 dark:bg-orange-500/15 dark:text-orange-100'
+                              : 'bg-white/55 text-stone-700 hover:bg-white dark:bg-white/5 dark:text-stone-300 dark:hover:bg-white/10'
+                          }`}
+                          style={selected ? themedStyles?.activePillButton : themedStyles?.pillButton}
+                          title={prompt.description || prompt.content.substring(0, 100)}
+                          aria-pressed={selected}
+                        >
+                          <span className='max-w-44 truncate'>{prompt.name}</span>
+                          {prompt.is_default && <Star size={14} strokeWidth={2.25} fill='currentColor' />}
+                          <span
+                            className='rounded-full bg-black/10 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] opacity-70 dark:bg-white/10'
+                            style={themedStyles?.panelMuted}
+                          >
+                            {prompt.storage_mode === 'local' ? 'Local' : 'Cloud'}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
               <InputTextArea
                 placeholder='System prompt for this project...'
-                label='System Prompt (Optional)'
                 value={newProjectSystemPrompt}
                 onChange={val => {
                   setNewProjectSystemPrompt(val)
-                  // Clear selection if user manually edits the prompt
                   if (selectedPromptId) setSelectedPromptId(null)
                 }}
-                minRows={11}
-                maxRows={11}
+                minRows={8}
+                maxRows={12}
                 width='w-full'
-                variant='outline'
-                outline={true}
-                className='drop-shadow-xl shadow-[0_0px_8px_3px_rgba(0,0,0,0.03),0_0px_2px_0px_rgba(0,0,0,0.05)] dark:shadow-[0_0px_24px_2px_rgba(0,0,0,0.5),0_0px_2px_2px_rgba(0,0,0,0.1)]'
+                showHelp={false}
+                className='!rounded-[1.5rem] !bg-white/45 dark:!bg-yBlack-900/40'
+                style={textAreaStyle}
               />
 
-              {/* Save as Prompt / Make Default button */}
               {newProjectSystemPrompt.trim() && (
-                <div className='mt-3'>
+                <div className='mt-4'>
                   {isExistingPrompt ? (
-                    // Show "Make Default" or "Remove Default" button when prompt already exists
                     matchingPrompt &&
                     (matchingPrompt.is_default ? (
                       <button
                         type='button'
                         onClick={handleRemoveDefault}
                         disabled={removingDefault}
-                        className='flex items-center gap-2 text-sm text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 transition-colors disabled:opacity-50'
+                        className='inline-flex items-center gap-2 rounded-full bg-red-50/80 px-3 py-2 text-sm font-medium text-red-600 transition hover:bg-red-100 disabled:opacity-50 dark:bg-red-500/10 dark:text-red-300 dark:hover:bg-red-500/15'
+                        style={themedStyles?.pillButton}
                       >
-                        <i className='bx bxs-star text-base'></i>
-                        {removingDefault ? 'Removing...' : 'Remove Default'}
+                        <Star size={16} strokeWidth={2.25} fill='currentColor' />
+                        {removingDefault ? 'Removing...' : 'Remove default'}
                       </button>
                     ) : (
                       <button
                         type='button'
                         onClick={handleMakeDefault}
                         disabled={makingDefault}
-                        className='flex items-center gap-2 text-sm text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 transition-colors disabled:opacity-50'
+                        className='inline-flex items-center gap-2 rounded-full bg-amber-50/80 px-3 py-2 text-sm font-medium text-amber-700 transition hover:bg-amber-100 disabled:opacity-50 dark:bg-orange-500/10 dark:text-orange-200 dark:hover:bg-orange-500/15'
+                        style={themedStyles?.activePillButton}
                       >
-                        <i className='bx bx-star text-base'></i>
-                        {makingDefault ? 'Setting...' : 'Make Default'}
+                        <Star size={16} strokeWidth={2.25} />
+                        {makingDefault ? 'Setting...' : 'Make default'}
                       </button>
                     ))
+                  ) : !showSavePromptInput ? (
+                    <button
+                      type='button'
+                      onClick={() => setShowSavePromptInput(true)}
+                      className='inline-flex items-center gap-2 rounded-full bg-white/60 px-3 py-2 text-sm font-medium text-stone-700 transition hover:bg-white dark:bg-white/5 dark:text-stone-200 dark:hover:bg-white/10'
+                      style={themedStyles?.pillButton}
+                    >
+                      <Save size={16} strokeWidth={2.25} />
+                      Save as prompt
+                    </button>
                   ) : (
-                    // Show "Save as Prompt" when content doesn't match existing prompt
-                    <>
-                      {!showSavePromptInput ? (
+                    <div className='rounded-[1.5rem] bg-white/50 p-3 dark:bg-white/5' style={panelStyle}>
+                      <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
+                        <input
+                          type='text'
+                          value={savePromptName}
+                          onChange={e => setSavePromptName(e.target.value)}
+                          placeholder='Prompt name...'
+                          maxLength={100}
+                          className={inlineInputClass}
+                          style={textInputStyle}
+                          autoFocus
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') handleSaveAsPrompt()
+                            if (e.key === 'Escape') resetSaveUI()
+                          }}
+                        />
+                        <div className='flex shrink-0 items-center gap-1 rounded-full bg-white/55 p-1 dark:bg-white/5' style={panelMutedStyle}>
+                          {(['local', 'cloud'] as const).map(storage => (
+                            <button
+                              key={storage}
+                              type='button'
+                              onClick={() => setSavePromptStorage(storage)}
+                              disabled={storage === 'cloud' && !canSaveToCloud}
+                              className={`rounded-full px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                                savePromptStorage === storage
+                                  ? 'bg-white text-blue-700 shadow-sm dark:bg-yBlack-900/80 dark:text-orange-100'
+                                  : 'text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-100'
+                              }`}
+                              style={savePromptStorage === storage ? themedStyles?.activePillButton : themedStyles?.mutedText}
+                              title={storage === 'local' ? 'Save only on this device' : 'Save to cloud account'}
+                            >
+                              {storage === 'local' ? 'Local' : 'Cloud'}
+                            </button>
+                          ))}
+                        </div>
+                        <Button
+                          type='button'
+                          variant='outline2'
+                          size='small'
+                          rounded='full'
+                          onClick={handleSaveAsPrompt}
+                          disabled={!savePromptName.trim() || savingPrompt}
+                          className='group shrink-0 border-transparent bg-white/70 px-4 dark:bg-white/5'
+                        >
+                          <span className='transition-transform duration-100 group-active:scale-95'>
+                            {savingPrompt ? 'Saving...' : 'Save'}
+                          </span>
+                        </Button>
                         <button
                           type='button'
-                          onClick={() => setShowSavePromptInput(true)}
-                          className='flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors'
+                          onClick={resetSaveUI}
+                          className={glassIconButtonClass}
+                          style={themedStyles?.pillButton}
+                          title='Cancel save prompt'
+                          aria-label='Cancel save prompt'
                         >
-                          <i className='bx bx-save text-base'></i>
-                          Save as Prompt
+                          <X size={16} strokeWidth={2.25} />
                         </button>
-                      ) : (
-                        <div className='space-y-2'>
-                          <div className='flex items-center gap-2'>
-                            <input
-                              type='text'
-                              value={savePromptName}
-                              onChange={e => setSavePromptName(e.target.value)}
-                              placeholder='Enter prompt name...'
-                              maxLength={100}
-                              className='flex-1 px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-transparent'
-                              autoFocus
-                              onKeyDown={e => {
-                                if (e.key === 'Enter') handleSaveAsPrompt()
-                                if (e.key === 'Escape') resetSaveUI()
-                              }}
-                            />
-                            <button
-                              type='button'
-                              onClick={handleSaveAsPrompt}
-                              disabled={!savePromptName.trim() || savingPrompt}
-                              className='px-3 py-2 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
-                            >
-                              {savingPrompt ? 'Saving...' : 'Save'}
-                            </button>
-                            <button
-                              type='button'
-                              onClick={resetSaveUI}
-                              className='px-2 py-2 text-sm text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition-colors'
-                            >
-                              <i className='bx bx-x text-lg'></i>
-                            </button>
-                          </div>
-                          {saveError && <p className='text-sm text-red-500 dark:text-red-400'>{saveError}</p>}
-                        </div>
-                      )}
-                    </>
+                      </div>
+                      <p className='mt-2 text-xs text-stone-500 dark:text-stone-400' style={mutedTextStyle}>
+                        {savePromptStorage === 'local'
+                          ? 'Local prompts stay on this device.'
+                          : 'Cloud prompts sync with your account.'}
+                      </p>
+                      {saveError && <p className='mt-2 text-sm text-red-500 dark:text-red-400'>{saveError}</p>}
+                    </div>
                   )}
                 </div>
               )}
-            </div>
-            <div>
-              {/* <label className='block pb-2 text-[19px] text-neutral-900 font-medium mb-2 dark:text-neutral-200'>
-                System Prompt (Optional)
-              </label> */}
+            </section>
 
+            <section className={sectionCardClass} style={sectionStyle}>
+              <label className={fieldLabelClass} style={titleTextStyle}>Context</label>
+              <p className='mb-4 text-xs leading-5 text-stone-500 dark:text-stone-400' style={mutedTextStyle}>
+                Optional background, goals, repository notes, or operating assumptions for this project.
+              </p>
               <InputTextArea
-                label='Context (Optional)'
                 placeholder='Project context or description...'
                 value={newProjectContext}
                 onChange={setNewProjectContext}
-                minRows={12}
+                minRows={9}
                 maxRows={16}
                 width='w-full'
-                variant='outline'
-                outline={true}
-                className='drop-shadow-xl shadow-[0_0px_8px_3px_rgba(0,0,0,0.03),0_0px_2px_0px_rgba(0,0,0,0.05)] dark:shadow-[0_0px_24px_2px_rgba(0,0,0,0.5),0_0px_2px_2px_rgba(0,0,0,0)]'
+                showHelp={false}
+                className='!rounded-[1.5rem] !bg-white/45 dark:!bg-yBlack-900/40'
+                style={textAreaStyle}
               />
-              {promptsLoading && (
-                <div className='mb-4 text-sm text-neutral-500 dark:text-neutral-400'>Loading saved prompts...</div>
-              )}
-            </div>
+            </section>
 
-            {/* Storage Mode Selection (only in Electron) */}
             {isElectronMode && (
-              <div>
-                <label className='pb-2 block text-[19px] sm:text-[19px] md:text-[19px] lg:text-[19px] xl:text-[19px] 2xl:text-[19px] 3xl:text-[19px] 4xl:text-[19px] text-neutral-900 font-medium mb-2 dark:text-neutral-200'>
-                  Storage Location
-                </label>
-                <div className='space-y-2'>
-                  {!isCommunityMode && (
-                    <label className='flex items-center p-3 rounded-xl border border-gray-300 dark:border-neutral-700 cursor-pointer hover:bg-neutral-50 dark:hover:bg-neutral-800/40'>
-                      <input
-                        type='radio'
-                        value='cloud'
-                        checked={storageMode === 'cloud'}
-                        onChange={e => setStorageMode(e.target.value as StorageMode)}
-                        className='mr-3'
-                      />
-                      <div>
-                        <div className='font-medium dark:text-neutral-100'>Cloud</div>
-                        <div className='text-[15px] pt-0.5 text-neutral-700 dark:text-neutral-300'>
-                          Synced to cloud (accessible anywhere) No Agent Support
-                        </div>
-                      </div>
-                    </label>
-                  )}
-                  <label className='flex items-center p-3 rounded-xl border border-gray-300 dark:border-neutral-700 cursor-pointer hover:bg-neutral-50 dark:hover:bg-neutral-800/40'>
-                    <input
-                      type='radio'
-                      value='local'
-                      checked={storageMode === 'local'}
-                      onChange={e => setStorageMode(e.target.value as StorageMode)}
-                      className='mr-3'
-                    />
-                    <div>
-                      <div className='font-medium dark:text-neutral-100'>Local Only</div>
-                      <div className='text-[15px] pt-0.5 text-neutral-700 dark:text-neutral-300'>
-                        Stored on this device only (not synced) Supports Agent
-                      </div>
-                    </div>
-                  </label>
+              <section className={sectionCardClass} style={sectionStyle}>
+                <label className={fieldLabelClass} style={titleTextStyle}>Working directory</label>
+                <div className='flex flex-col gap-2 sm:flex-row'>
+                  <input
+                    type='text'
+                    value={projectCwd}
+                    onChange={event => setProjectCwd(event.target.value)}
+                    placeholder='Optional default cwd for new local chats'
+                    className={inlineInputClass}
+                    style={textInputStyle}
+                    title='Default working directory inherited by new local chats in this project'
+                  />
+                  <div className={`${glassPillClass} flex w-fit items-center gap-2`} style={panelMutedStyle}>
+                    <button
+                      type='button'
+                      onClick={handleSelectProjectCwd}
+                      className={glassIconButtonClass}
+                      style={themedStyles?.pillButton}
+                      title='Select project working directory'
+                      aria-label='Select project working directory'
+                    >
+                      <FolderOpen size={18} strokeWidth={2.25} />
+                    </button>
+                    {projectCwd.trim() && (
+                      <button
+                        type='button'
+                        onClick={() => setProjectCwd('')}
+                        className={glassIconButtonClass}
+                        style={themedStyles?.pillButton}
+                        title='Clear project working directory'
+                        aria-label='Clear project working directory'
+                      >
+                        <Eraser size={18} strokeWidth={2.25} />
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
+                <p className={fieldHintClass} style={mutedTextStyle}>New local chats inherit this cwd. Existing chats keep their own cwd.</p>
+              </section>
             )}
 
-            <div className='flex gap-2 justify-end pt-4'>
+            {isElectronMode && (
+              <section className={sectionCardClass} style={sectionStyle}>
+                <label className={fieldLabelClass} style={titleTextStyle}>Storage location</label>
+                <div className='grid gap-3 sm:grid-cols-2'>
+                  {!isCommunityMode && (
+                    <button
+                      type='button'
+                      onClick={() => setStorageMode('cloud')}
+                      className={`rounded-[1.5rem] p-4 text-left transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.99] ${
+                        storageMode === 'cloud'
+                          ? 'bg-blue-50/80 text-blue-800 dark:bg-orange-500/15 dark:text-orange-100'
+                          : 'bg-white/45 text-stone-700 hover:bg-white dark:bg-white/5 dark:text-stone-300 dark:hover:bg-white/10'
+                      }`}
+                      style={storageMode === 'cloud' ? themedStyles?.activePillButton : panelStyle}
+                      aria-pressed={storageMode === 'cloud'}
+                    >
+                      <span className='mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-white/45 dark:bg-black/10' style={panelMutedStyle}>
+                        <Cloud size={18} strokeWidth={2.25} />
+                      </span>
+                      <span className='block font-medium'>Cloud</span>
+                      <span className='mt-1 block text-sm leading-5 opacity-75' style={bodyTextStyle}>Synced anywhere. No agent support.</span>
+                    </button>
+                  )}
+                  <button
+                    type='button'
+                    onClick={() => setStorageMode('local')}
+                    className={`rounded-[1.5rem] p-4 text-left transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.99] ${
+                      storageMode === 'local'
+                        ? 'bg-blue-50/80 text-blue-800 dark:bg-orange-500/15 dark:text-orange-100'
+                        : 'bg-white/45 text-stone-700 hover:bg-white dark:bg-white/5 dark:text-stone-300 dark:hover:bg-white/10'
+                    }`}
+                    style={storageMode === 'local' ? themedStyles?.activePillButton : panelStyle}
+                    aria-pressed={storageMode === 'local'}
+                  >
+                    <span className='mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-white/45 dark:bg-black/10' style={panelMutedStyle}>
+                      <HardDrive size={18} strokeWidth={2.25} />
+                    </span>
+                    <span className='block font-medium'>Local only</span>
+                    <span className='mt-1 block text-sm leading-5 opacity-75' style={bodyTextStyle}>Stored on this device. Supports agent.</span>
+                  </button>
+                </div>
+              </section>
+            )}
+          </div>
+        </div>
+
+        <footer className='bg-neutral-50/80 px-5 py-4 backdrop-blur-2xl dark:bg-yBlack-900/80 sm:px-7' style={themedStyles?.chrome}>
+          <div className='flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between'>
+            <p className='text-xs text-stone-500 dark:text-stone-400' style={mutedTextStyle}>
+              {canSubmit ? 'Ready to save.' : 'Add a project name to continue.'}
+            </p>
+            <div className='flex justify-end gap-2'>
+              <Button
+                variant='outline2'
+                size='small'
+                rounded='full'
+                className='group px-5 py-2.5'
+                onClick={handleCancel}
+              >
+                <span className='transition-transform duration-100 group-active:scale-95'>Cancel</span>
+              </Button>
               <Button
                 variant='outline'
-                size='medium'
-                className='group'
-                onClick={isEditing ? handleUpdateProject : handleCreateProject}
+                size='small'
+                rounded='full'
+                disabled={!canSubmit}
+                className='group border-transparent bg-white/70 px-5 py-2.5 dark:border-transparent dark:bg-white/5'
+                onClick={handleSubmit}
               >
-                <p className='transition-transform duration-100 group-active:scale-95'>
-                  {isEditing ? 'Update Project' : 'Create Project'}
-                </p>
-              </Button>
-              <Button variant='outline' size='medium' className='group' onClick={handleCancel}>
-                <p className='transition-transform duration-100 group-active:scale-95'>Cancel</p>
+                <span className='inline-flex items-center gap-2 transition-transform duration-100 group-active:scale-95'>
+                  {isEditing ? <Save size={16} strokeWidth={2.25} /> : <Plus size={16} strokeWidth={2.25} />}
+                  {isEditing ? 'Update project' : 'Create project'}
+                </span>
               </Button>
             </div>
           </div>
-        </div>
+        </footer>
       </div>
     </div>
   )

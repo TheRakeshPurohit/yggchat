@@ -7,7 +7,14 @@ import { MoreVertical, RefreshCw, Settings } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { batch } from 'react-redux'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
-import { ConversationId, ImageConfig, MessageId, OpenAIServiceTier, ReasoningConfig } from '../../../../shared/types'
+import {
+  ConversationId,
+  ImageConfig,
+  MessageId,
+  OpenAIServiceTier,
+  Project,
+  ReasoningConfig,
+} from '../../../../shared/types'
 import {
   ActionPopover,
   Button,
@@ -20,6 +27,7 @@ import {
   PlanClarificationPanel,
   Select,
   SettingsPane,
+  StreamingThinkingIndicator,
   TextField,
   ToolJobsModal,
   ToolPermissionDialog,
@@ -33,15 +41,10 @@ import {
 } from '../components/SettingsPane/ChatInputBorderAnimationSettings'
 import {
   getStoredSendButtonAnimation,
-  getStoredSendButtonColor,
-  getStoredStreamingAnimation,
-  getStoredStreamingDarkColor,
-  getStoredStreamingLightColor,
-  getStoredStreamingSpeed,
+  getStoredSendButtonDarkColor,
+  getStoredSendButtonLightColor,
   SendButtonAnimationType,
   SendButtonLoadingAnimation,
-  StreamingAnimationType,
-  StreamingLoadingAnimation,
 } from '../components/SettingsPane/SendButtonAnimationSettings'
 import {
   getThemeModeColor,
@@ -53,6 +56,10 @@ import {
 } from '../components/ThemeManager/themeConfig'
 import { isCommunityMode } from '../config/runtimeMode'
 import {
+  clearOpenAIChatGPTTokensFromHeadless,
+  persistOpenAIChatGPTTokensToHeadless,
+} from '../features/chats/openaiHeadlessAuth'
+import {
   abortGeneration,
   AUTO_COMPACTION_NOTE,
   cancelPlanClarification,
@@ -62,12 +69,14 @@ import {
   compactBranch,
   deleteMessage,
   editMessageWithBranching,
+  fetchConversationStreamUndo,
   initializeUserAndConversation,
   Message,
   resolveAttachmentUrl,
   respondToPlanClarification,
   respondToToolPermission,
   respondToToolPermissionAndEnableAll,
+  restoreStreamFileEdits,
   selectCcCwd,
   selectConversationMessages,
   selectCurrentConversationId,
@@ -85,13 +94,13 @@ import {
   selectOperationMode,
   selectProviderState,
   selectSendingState,
-  sendHermesMessage,
+  selectStreamUndoRoot,
   sendMessage,
   syncConversationToLocal,
   updateConversationTitle,
   updateMessage,
 } from '../features/chats'
-import type { ContentBlock, ToolCall } from '../features/chats/chatTypes'
+import type { ContentBlock, ImageDraftTarget, StreamUndoSummary, ToolCall } from '../features/chats/chatTypes'
 import type { PlanClarificationAnswer } from '../features/chats/planToolTypes'
 import { estimateContentBlocksForContext, safeEstimateTokenCount } from '../features/chats/contextTokenEstimate'
 import {
@@ -126,19 +135,22 @@ import {
 } from '../features/ideContext/ideContextSelectors'
 import { selectSelectedProject } from '../features/projects/projectSelectors'
 import { uiActions } from '../features/ui'
-import { refreshUserCredits, selectCurrentUser } from '../features/users'
+import { selectCurrentUser } from '../features/users'
 import {
   CHAT_REASONING_SETTINGS_CHANGE_EVENT,
   loadChatReasoningSettings,
   REASONING_EFFORT_OPTIONS,
 } from '../helpers/chatReasoningSettingsStorage'
 import {
+  CHAT_UI_ADDED_FILES_PILLS_VISIBILITY_CHANGE_EVENT,
+  CHAT_UI_ADDED_FILES_PILLS_VISIBILITY_KEY,
   CHAT_UI_AUTO_COMPACTION_ENABLED_CHANGE_EVENT,
   CHAT_UI_AUTO_COMPACTION_ENABLED_KEY,
   CHAT_UI_TOKEN_USAGE_HOVER_DETAILS_VISIBILITY_CHANGE_EVENT,
   CHAT_UI_TOKEN_USAGE_HOVER_DETAILS_VISIBILITY_KEY,
   CHAT_UI_TOKEN_USAGE_VISIBILITY_CHANGE_EVENT,
   loadAutoCompactionEnabled,
+  loadShowAddedFilesPills,
   loadShowTokenUsageBar,
   loadShowTokenUsageHoverDetails,
 } from '../helpers/chatUiSettingsStorage'
@@ -169,6 +181,7 @@ import { cloneConversation, localApi } from '../utils/api'
 import { getAssetPath } from '../utils/assetPath'
 import { parseId } from '../utils/helpers'
 import { extractTextFromPdf } from '../utils/pdfUtils'
+import { addFileMentionLookupKeys } from '../../shared/fileMatchRanking'
 
 type ParsedMessageData = {
   toolCalls?: ToolCall[]
@@ -281,6 +294,9 @@ type ChatInputControllerProps = {
   onClearIdeContexts?: () => void
   selectedIdeContextItems?: Array<{ id: string; label: string }>
   fallbackFileSearchRoot?: string | null
+  filterSelectedMentionFiles?: boolean
+  imageDraftTarget?: ImageDraftTarget
+  fontSizeOffset?: number
 }
 
 type AddedIdeContext = {
@@ -291,6 +307,8 @@ type AddedIdeContext = {
   endLine: number
   selectedText: string
 }
+
+type StreamingThinkingIndicatorPlacement = 'message' | 'input-tab'
 
 const EMPTY_PARSED_MESSAGE_DATA: ParsedMessageData = {}
 const COMPOSER_SLASH_COMMANDS = [
@@ -312,6 +330,16 @@ const BENCH_MAX_SAMPLES = 3000
 const BENCH_MAX_EVENTS = 1200
 const BENCH_SCROLL_ACTIVE_WINDOW_MS = 140
 const THEME_DEMO_INTERVAL_MS = 500
+const STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY = 'chat:streamingThinkingIndicatorPlacement'
+
+const getStoredStreamingThinkingIndicatorPlacement = (): StreamingThinkingIndicatorPlacement => {
+  try {
+    const stored = window.localStorage.getItem(STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY)
+    return stored === 'input-tab' ? 'input-tab' : 'message'
+  } catch {
+    return 'message'
+  }
+}
 
 const parseCreatedAtMs = (createdAt: string | Date | null | undefined): number | null => {
   if (!createdAt) return null
@@ -363,6 +391,67 @@ const getWorkspaceMutationBadgeClassName = (operation: WorkspaceMutationOperatio
     default:
       return 'border border-sky-500/20 bg-sky-500/10 text-sky-600 dark:text-sky-300'
   }
+}
+
+const clampUsagePercent = (value: number | null | undefined): number | null => {
+  if (value == null || !Number.isFinite(value)) return null
+  return Math.max(0, Math.min(100, value))
+}
+
+const formatUsagePercent = (value: number | null | undefined): string => {
+  const clamped = clampUsagePercent(value)
+  return clamped == null ? '—' : `${Math.round(clamped)}%`
+}
+
+const getUsageMeterFillClassName = (percent: number | null): string => {
+  if (percent == null) return 'bg-neutral-300/50 dark:bg-neutral-700/60'
+  if (percent >= 95) return 'bg-rose-500 dark:bg-rose-400'
+  if (percent >= 80) return 'bg-amber-500 dark:bg-amber-400'
+  return 'bg-blue-500 dark:bg-orange-400'
+}
+
+type OpenAIUsageMeterProps = {
+  label: string
+  usedPercent: number | null | undefined
+  resetAtIso?: string | null
+  note?: string
+}
+
+const OpenAIUsageMeter = ({ label, usedPercent, resetAtIso, note }: OpenAIUsageMeterProps) => {
+  const percent = clampUsagePercent(usedPercent)
+  const activeSegments = percent == null ? 0 : Math.ceil((percent / 100) * 14)
+  const fillClassName = getUsageMeterFillClassName(percent)
+
+  return (
+    <div className='rounded-2xl bg-white/45 px-3 py-3 backdrop-blur-xl dark:bg-black/20'>
+      <div className='flex items-center justify-between gap-3'>
+        <div className='min-w-0'>
+          <div className='text-xs font-semibold uppercase tracking-[0.16em] text-neutral-500 dark:text-neutral-400'>
+            {label}
+          </div>
+          {note && <div className='mt-0.5 truncate text-xs text-neutral-500/80 dark:text-neutral-500'>{note}</div>}
+        </div>
+        <div className='shrink-0 text-base font-semibold tabular-nums text-neutral-900 dark:text-neutral-100'>
+          {formatUsagePercent(percent)}
+        </div>
+      </div>
+      <div className='mt-2.5 grid grid-cols-[repeat(14,minmax(0,1fr))] gap-1' aria-label={`${label} usage ${formatUsagePercent(percent)}`}>
+        {Array.from({ length: 14 }).map((_, index) => (
+          <div
+            key={`${label}-usage-segment-${index}`}
+            className={`h-2 rounded-full transition-colors duration-300 ${
+              index < activeSegments ? fillClassName : 'bg-neutral-300/35 dark:bg-white/10'
+            }`}
+          />
+        ))}
+      </div>
+      {resetAtIso && (
+        <div className='mt-2 text-xs text-neutral-500 dark:text-neutral-400'>
+          Resets {new Date(resetAtIso).toLocaleString()}
+        </div>
+      )}
+    </div>
+  )
 }
 
 // const formatStreamDebugId = (value: unknown): string => {
@@ -758,6 +847,9 @@ const ChatInputController = React.memo(
         onClearIdeContexts,
         selectedIdeContextItems,
         fallbackFileSearchRoot,
+        filterSelectedMentionFiles = true,
+        imageDraftTarget = { kind: 'composer' },
+        fontSizeOffset = 0,
       },
       ref
     ) => {
@@ -863,6 +955,10 @@ const ChatInputController = React.memo(
             onClearIdeContexts={onClearIdeContexts}
             selectedIdeContextItems={selectedIdeContextItems}
             fallbackFileSearchRoot={fallbackFileSearchRoot}
+            filterSelectedMentionFiles={filterSelectedMentionFiles}
+            enableImageAttachments={true}
+            imageDraftTarget={imageDraftTarget}
+            fontSizeOffset={fontSizeOffset}
             className='!border-0 !focus:border-0 !outline-none !shadow-none focus:!ring-0'
           />
         </div>
@@ -932,15 +1028,6 @@ function Chat() {
     </div>
   ) : null
 
-  // Hermes ACP mode toggle (desktop-only)
-  const [hermesMode, setHermesMode] = useState(() => {
-    if (import.meta.env.VITE_ENVIRONMENT === 'web') return false
-    try {
-      return window.localStorage.getItem('chat:agentMode') === 'hermes'
-    } catch {
-      return false
-    }
-  })
 
   // Working directory input for local agent flows
   const ccCwd = useAppSelector(selectCcCwd)
@@ -968,8 +1055,6 @@ function Chat() {
     }
   })
 
-  // Hermes mode is available in desktop builds
-  const hermesModeAvailable = import.meta.env.VITE_ENVIRONMENT !== 'web'
 
   // Get conversation ID and project ID from URL params FIRST (before any hooks that depend on it)
   const { id: conversationIdParam, projectId: projectIdParam } = useParams<{ id?: string; projectId?: string }>()
@@ -998,6 +1083,7 @@ function Chat() {
   // const canSendFromRedux = useAppSelector(selectCanSend)
   const sendingState = useAppSelector(selectSendingState)
   const currentConversationId = useAppSelector(selectCurrentConversationId)
+  const streamUndoRoot = useAppSelector(selectStreamUndoRoot)
   const compactingConversationId = useAppSelector(state => state.chat.composition.compactingConversationId)
   // Current view stream - automatically selects the relevant stream based on currentPath
   const currentViewStream = useAppSelector(selectCurrentViewStream)
@@ -1054,6 +1140,16 @@ function Chat() {
   useEffect(() => {
     setPendingViewStreamId(null)
   }, [currentConversationId])
+
+  useEffect(() => {
+    if (currentConversationId == null) return
+    dispatch(fetchConversationStreamUndo(currentConversationId))
+  }, [currentConversationId, dispatch])
+
+  useEffect(() => {
+    if (currentConversationId == null || !streamState.finished) return
+    dispatch(fetchConversationStreamUndo(currentConversationId))
+  }, [currentConversationId, dispatch, streamState.finished, streamState.id, streamState.finalMessageId])
 
   const conversationMessages = useAppSelector(selectConversationMessages)
   const displayMessages = useAppSelector(selectDisplayMessages)
@@ -1141,6 +1237,25 @@ function Chat() {
   const selectedFilesForChat = useAppSelector(selectSelectedFilesForChat)
   // const mentionableFilesForDebug = useAppSelector(selectMentionableFiles)
   const optimisticMessage = useAppSelector(state => state.chat.composition.optimisticMessage)
+  const imageDrafts = useAppSelector(state => state.chat.composition.imageDrafts)
+  const imageDraftTarget = useAppSelector(state => state.chat.composition.imageDraftTarget)
+
+  const composerImageDrafts = useMemo(
+    () => (imageDraftTarget?.kind === 'composer' ? imageDrafts : []),
+    [imageDrafts, imageDraftTarget]
+  )
+  const composerImageDraftDataUrls = useMemo(
+    () => composerImageDrafts.map(draft => draft.dataUrl),
+    [composerImageDrafts]
+  )
+
+  const getBranchImageDraftDataUrls = useCallback(
+    (messageId: MessageId | string): string[] => {
+      if (imageDraftTarget?.kind !== 'branch' || String(imageDraftTarget.messageId) !== String(messageId)) return []
+      return imageDrafts.map(draft => draft.dataUrl)
+    },
+    [imageDrafts, imageDraftTarget]
+  )
 
   const addCurrentIdeContextToMessage = useCallback((): boolean => {
     const selectedText = currentIdeSelection?.selectedText?.trim()
@@ -1214,14 +1329,15 @@ function Chat() {
   const [openingFilePath, setOpeningFilePath] = useState<string | null>(null)
   // Anchor position for fixed expanded panel (viewport coords)
   const [expandedAnchor, setExpandedAnchor] = useState<{ left: number; top: number } | null>(null)
-  // Dynamic input area height for adaptive padding
-  // const [inputAreaHeight, setInputAreaHeight] = useState(170)
+  // Dynamic input area height for adaptive streaming/message padding
+  const [inputAreaHeight, setInputAreaHeight] = useState(170)
   const [containerHeight, setContainerHeight] = useState(1100)
   // Credits refresh loading state
-  const [isRefreshingCredits, setIsRefreshingCredits] = useState(false)
   // Todo list collapsed state
   const [todoListCollapsed, setTodoListCollapsed] = useState(false)
   const [workspaceMutationsCollapsed, setWorkspaceMutationsCollapsed] = useState(false)
+  const [streamingThinkingIndicatorPlacement, setStreamingThinkingIndicatorPlacement] =
+    useState<StreamingThinkingIndicatorPlacement>(getStoredStreamingThinkingIndicatorPlacement)
   // Tool jobs modal state
   const [jobsModalOpen, setJobsModalOpen] = useState(false)
   const [orchestratorEnabled, setOrchestratorEnabledState] = useState(() => isOrchestratorEnabled())
@@ -1770,23 +1886,13 @@ function Chat() {
       // Build a lookup map of mentionable names -> full paths (changed from contents).
       const nameToPath = new Map<string, string>() // Renamed Map for clarity.
 
-      // Helper function to extract basename (filename without full path).
-      // Handles both Windows (\) and Unix (/) path separators.
-      const basename = (p: string) => {
-        if (!p) return p
-        const parts = p.split(/\\\\|\//) // Regex splits on \\ (escaped for JS) or /.
-        return parts[parts.length - 1] // Returns the last part (e.g., 'api.ts' from '/src/api.ts').
-      }
-
       // Populate the Map from selected files (assuming selectedFilesForChat is SelectedFileContent[]).
-      // Adds multiple variations of the filename as keys for flexible matching.
-      // Values are now f.path (full path).
+      // Adds basename, relative path, absolute path, and normalized slash variants so selector-inserted
+      // mentions resolve consistently in both IDE and local fallback modes.
       for (const f of selectedFilesForChat) {
-        if (f.name && !nameToPath.has(f.name)) nameToPath.set(f.name, f.path)
-        const baseRel = basename(f.relativePath)
-        if (baseRel && !nameToPath.has(baseRel)) nameToPath.set(baseRel, f.path)
-        const basePath = basename(f.path)
-        if (basePath && !nameToPath.has(basePath)) nameToPath.set(basePath, f.path)
+        addFileMentionLookupKeys(nameToPath, f.name, f.path)
+        addFileMentionLookupKeys(nameToPath, f.relativePath, f.path)
+        addFileMentionLookupKeys(nameToPath, f.path, f.path)
       }
 
       // Replace mentions in the message.
@@ -1858,14 +1964,25 @@ function Chat() {
   // Track if the user manually scrolled during the current stream; disables bottom pin until finished
   const userScrolledDuringStreamRef = useRef<boolean>(false)
   const streamActiveRef = useRef<boolean>(false)
+  const finalTextStreamingStartedRef = useRef<boolean>(false)
+  const hasFinalTextStreamingRef = useRef<boolean>(false)
+  const lastTrustedScrollTopRef = useRef<number | null>(null)
+  const isProgrammaticStreamingScrollRef = useRef<boolean>(false)
+  const streamingProgrammaticScrollResetTimeoutRef = useRef<number | null>(null)
+  const liveStreamingContentRef = useRef<HTMLDivElement>(null)
+  const skippedInitialLiveTailFollowRef = useRef<boolean>(false)
+  const previousFocusedChatMessageIdRef = useRef<MessageId | null>(null)
   // Sentinel at the end of the list for robust bottom scrolling
   const bottomRef = useRef<HTMLDivElement>(null)
   // rAF id to coalesce frequent scroll requests during streaming
   const scrollRafRef = useRef<number | null>(null)
   // Remember the last focused message we already scrolled to (to avoid repeated jumps)
   const lastFocusedScrollIdRef = useRef<MessageId | null>(null)
-  // Track the most visible message ID for Heimdall highlighting
+  // Track the most visible text-response message ID for Heimdall highlighting.
+  // When the viewport moves over tool/reasoning-only rows, keep this sticky ref
+  // pointing at the previous eligible message until the next text response appears.
   const [visibleMessageId, setVisibleMessageId] = useState<MessageId | null>(null)
+  const lastVisibleTextMessageIdRef = useRef<MessageId | null>(null)
   const [showScrollToBottomButton, setShowScrollToBottomButton] = useState(false)
   const updateVisibleMessageRef = useRef<(() => void) | null>(null)
   // Ref for input area to measure its height dynamically
@@ -1876,36 +1993,6 @@ function Chat() {
   // Track if we already applied the URL hash-based path to avoid overriding user branch switches
   const hashAppliedRef = useRef<MessageId | null>(null)
 
-  const findNearestHermesSessionFromMessage = useCallback(
-    (startMessageId: MessageId | null | undefined): string | undefined => {
-      if (startMessageId == null) return undefined
-
-      let currentMessageId: MessageId | null = startMessageId
-
-      while (currentMessageId != null) {
-        const message = conversationMessages.find(m => String(m.id) === String(currentMessageId))
-
-        if (typeof message?.ex_agent_session_id === 'string' && message.ex_agent_session_id.trim().length > 0) {
-          return message.ex_agent_session_id
-        }
-
-        currentMessageId = message?.parent_id ?? null
-      }
-
-      return undefined
-    },
-    [conversationMessages]
-  )
-
-  // Helper function to find the last Hermes session ID in a message path.
-  // This follows the selected lineage tip first and then walks upward through ancestors.
-  const findLastHermesSession = useCallback(
-    (messageIds: MessageId[]): string | undefined => {
-      if (!messageIds || messageIds.length === 0) return undefined
-      return findNearestHermesSessionFromMessage(messageIds[messageIds.length - 1])
-    },
-    [findNearestHermesSessionFromMessage]
-  )
 
   // Lock page scroll while chat is mounted
   useEffect(() => {
@@ -1956,6 +2043,31 @@ function Chat() {
   //     observer.disconnect()
   //   }
   // }, [])
+
+  // Measure input area height dynamically so live streamed messages can stop above
+  // the absolutely-positioned composer instead of being hidden behind it.
+  useEffect(() => {
+    const inputArea = inputAreaRef.current
+    if (!inputArea) return
+
+    const measure = () => {
+      const rect = inputArea.getBoundingClientRect()
+      const style = window.getComputedStyle(inputArea)
+      const marginBottom = parseFloat(style.marginBottom) || 0
+      const nextHeight = Math.ceil(rect.height + marginBottom)
+      if (nextHeight > 0) {
+        setInputAreaHeight(prev => (Math.abs(prev - nextHeight) > 1 ? nextHeight : prev))
+      }
+    }
+
+    const observer = new ResizeObserver(measure)
+    observer.observe(inputArea)
+    measure()
+
+    return () => {
+      observer.disconnect()
+    }
+  }, [])
 
   // Measure messages container height dynamically
   useEffect(() => {
@@ -2020,7 +2132,7 @@ function Chat() {
           const toolCallsHash = hashUnknownForRenderCache(msg.tool_calls)
           const thinkingHash = hashStringForRenderCache(msg.thinking_block ?? '')
           const noteHash = hashStringForRenderCache(`${msg.note ?? ''}:${msg.note_color ?? ''}`)
-          return `${msg.id}:${updatedAt}:a${artifactCount}:c${contentHash}:b${contentBlocksHash}:t${toolCallsHash}:r${thinkingHash}:n${noteHash}`
+          return `${msg.id}:${msg.role}:${updatedAt}:a${artifactCount}:c${contentHash}:b${contentBlocksHash}:t${toolCallsHash}:r${thinkingHash}:n${noteHash}`
         })
         .join('|'),
     [renderableMessages]
@@ -2336,7 +2448,7 @@ function Chat() {
               ? '!rounded-none !rounded-b-md'
               : '!rounded-none'
 
-      const containerClassName = [endsAssistantBlock ? 'pb-4' : '', radiusClassName].filter(Boolean).join(' ')
+      const containerClassName = radiusClassName
 
       if (containerClassName) {
         classByMessageId.set(String(row.message.id), containerClassName)
@@ -2395,11 +2507,14 @@ function Chat() {
     streamState.status === 'aborting'
   const showGenerationLoadingAnimation =
     isCurrentConversationCompacting || streamLifecycleActive || hasRunningToolJobForCurrentBranch
-  const hasStreamingMessageContent =
-    Boolean(streamState.buffer) ||
-    Boolean(streamState.thinkingBuffer) ||
-    streamState.toolCalls.length > 0 ||
-    streamState.events.length > 0
+  const hasFinalTextStreaming = Boolean(streamState.buffer?.trim())
+  const hasProcessStreamingContent =
+    Boolean(streamState.thinkingBuffer) || streamState.toolCalls.length > 0 || streamState.events.length > 0
+  const hasStreamingMessageContent = hasFinalTextStreaming || hasProcessStreamingContent
+
+  useEffect(() => {
+    hasFinalTextStreamingRef.current = hasFinalTextStreaming
+  }, [hasFinalTextStreaming])
   const shouldPreserveProcessStreamRow = streamState.status === 'waiting_for_tool' || hasRunningToolJobForCurrentBranch
   const liveDuplicateSuppressionMessageId = streamState.liveMessageId ?? streamState.streamingMessageId
   const completedDuplicateSuppressionMessageId =
@@ -2419,7 +2534,20 @@ function Chat() {
     ((shouldPreserveProcessStreamRow || liveDuplicateSuppressionMessageId == null) &&
       isCompletedStreamMessageAlreadyRendered)
   const showStreamingMessage = !isStreamingMessageAlreadyRendered && hasStreamingMessageContent
-  const showGenerationLoaderRow = showGenerationLoadingAnimation
+  const showLiveStreamingTail = showStreamingMessage && hasFinalTextStreaming
+  // Keep the streaming row in TanStack Virtual, but freeze its measurement while final
+  // text grows so token-by-token rendering does not constantly rewrite virtualizer geometry.
+  const showStreamingMessageInVirtualList = showStreamingMessage
+  const showStreamingThinkingMessageRow = streamingThinkingIndicatorPlacement === 'message'
+  const showStreamingThinkingInputTab = streamingThinkingIndicatorPlacement === 'input-tab'
+  const showGenerationLoaderRow = showGenerationLoadingAnimation && showStreamingThinkingMessageRow
+  const showGenerationLoaderInVirtualList = showGenerationLoaderRow && !showLiveStreamingTail
+  const bottomSentinelBaseHeight = Math.max(100, containerHeight - 300)
+  const liveStreamingBottomClearance = Math.max(inputAreaHeight + 34, 170)
+  // While the final answer streams outside the virtualizer, the clearance belongs to
+  // the live tail itself. The bottom sentinel remains for explicit scroll-to-latest,
+  // but automatic stream-follow must never target sentinel padding.
+  const bottomSentinelHeight = bottomSentinelBaseHeight
 
   const virtualRows = useMemo<VirtualRenderRow[]>(() => {
     const rows: VirtualRenderRow[] = messageRenderRows.map((row, index) => ({
@@ -2448,14 +2576,14 @@ function Chat() {
       })
     }
 
-    if (showStreamingMessage) {
+    if (showStreamingMessageInVirtualList) {
       rows.push({
         kind: 'streaming_message',
         key: 'streaming',
       })
     }
 
-    if (showGenerationLoaderRow) {
+    if (showGenerationLoaderInVirtualList) {
       rows.push({
         kind: 'generation_loader',
         key: 'generation-loader',
@@ -2469,10 +2597,76 @@ function Chat() {
     optimisticMessage,
     showOptimisticBranchMessage,
     optimisticBranchMessage,
-    showStreamingMessage,
-    showGenerationLoaderRow,
+    showStreamingMessageInVirtualList,
+    showGenerationLoaderInVirtualList,
     virtualRowsV2Enabled,
   ])
+
+  const getUndoSummariesForMessage = useCallback(
+    (messageId: string): StreamUndoSummary[] => {
+      const directStreamIds = streamUndoRoot.streamIdsByParentMessageId[String(messageId)] || []
+      const streamIds = new Set<string>(directStreamIds)
+      const messageIndex = renderableMessages.findIndex(message => String(message.id) === String(messageId))
+
+      if (messageIndex >= 0) {
+        for (let index = messageIndex + 1; index < renderableMessages.length; index += 1) {
+          const message = renderableMessages[index]
+          if (!message) continue
+          if (message.role === 'user') break
+          const assistantStreamIds = streamUndoRoot.streamIdsByAssistantMessageId[String(message.id)] || []
+          for (const streamId of assistantStreamIds) streamIds.add(streamId)
+        }
+      }
+
+      return Array.from(streamIds)
+        .map(id => streamUndoRoot.byStreamId[id])
+        .filter((summary): summary is StreamUndoSummary => Boolean(summary))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    },
+    [renderableMessages, streamUndoRoot]
+  )
+
+  const getUndoStateForMessage = useCallback(
+    (messageId: string) => {
+      const summaries = getUndoSummariesForMessage(messageId)
+      if (summaries.length === 0) return undefined
+      const latest = summaries[0]
+      const restoring = streamUndoRoot.restoringByStreamId[latest.streamId] ?? false
+      return {
+        available: latest.status === 'available',
+        restored: latest.status === 'restored',
+        restoring,
+        fileCount: latest.fileCount,
+        error: streamUndoRoot.errorByStreamId[latest.streamId] ?? null,
+      }
+    },
+    [getUndoSummariesForMessage, streamUndoRoot]
+  )
+
+  const handleUndoStreamEdits = useCallback(
+    (messageId: string) => {
+      if (currentConversationId != null) {
+        void dispatch(fetchConversationStreamUndo(currentConversationId))
+      }
+      const latest = getUndoSummariesForMessage(messageId).find(summary => summary.status === 'available')
+      if (!latest) return
+      const ok = window.confirm(
+        `Undo file edits from this agent run? This will restore ${latest.fileCount} file${latest.fileCount === 1 ? '' : 's'} to their pre-agent contents.`
+      )
+      if (!ok) return
+      dispatch(
+        restoreStreamFileEdits({
+          streamId: latest.streamId,
+          conversationId: currentConversationId,
+          parentMessageId:
+            latest.parentMessageId && String(latest.parentMessageId) === String(messageId)
+              ? messageId
+              : latest.parentMessageId,
+        })
+      )
+    },
+    [currentConversationId, dispatch, getUndoSummariesForMessage]
+  )
 
   const userTurnElapsedLabelByMessageId = useMemo(() => {
     const labels = new Map<string, string>()
@@ -2523,6 +2717,17 @@ function Chat() {
     benchLatestConversationIdRef.current = currentConversationId != null ? String(currentConversationId) : null
   }, [currentConversationId, renderableMessages.length, virtualRows.length])
 
+  // Consider the user to be "at the bottom" if within this many pixels.
+  // Keep the UI affordance generous, but use a much tighter threshold for automatic
+  // follow/measurement correction so long final streamed answers do not move while reading.
+  const NEAR_BOTTOM_PX = 600
+  const AUTO_FOLLOW_BOTTOM_PX = 120
+  const isNearBottom = (el: HTMLElement, threshold = NEAR_BOTTOM_PX) => {
+    // Distance remaining to bottom within the scroll container
+    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight
+    return remaining <= threshold
+  }
+
   // Virtualizer for efficient message list rendering
   const virtualizer = useVirtualizer({
     count: virtualRows.length,
@@ -2530,6 +2735,9 @@ function Chat() {
     getScrollElement: () => messagesContainerRef.current,
     estimateSize: () => 100, // Estimated average message height
     overscan: 6, // Buffer rows above/below viewport
+    // Keep paddingEnd stable through the transition into final text streaming. Changing
+    // it at the same time as live-tail mount changes total virtual size and causes
+    // TanStack/browser scroll compensation that looks like a user scroll to bottom.
     paddingEnd: virtualizerPaddingEnd,
   })
 
@@ -2650,14 +2858,6 @@ function Chat() {
     streamState.events.length,
   ])
 
-  // Consider the user to be "at the bottom" if within this many pixels
-  const NEAR_BOTTOM_PX = 600
-  const isNearBottom = (el: HTMLElement, threshold = NEAR_BOTTOM_PX) => {
-    // Distance remaining to bottom within the scroll container
-    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight
-    return remaining <= threshold
-  }
-
   const updateScrollToBottomButtonVisibility = useCallback(() => {
     const el = messagesContainerRef.current
     if (!el || virtualRows.length === 0) {
@@ -2667,6 +2867,32 @@ function Chat() {
 
     setShowScrollToBottomButton(!isNearBottom(el, NEAR_BOTTOM_PX))
   }, [virtualRows.length])
+
+  const scrollLiveTailToBottomOnce = useCallback(
+    (behavior: ScrollBehavior = 'auto') => {
+      const container = messagesContainerRef.current
+      const liveContent = liveStreamingContentRef.current
+      if (!container || !liveContent) return
+
+      const containerRect = container.getBoundingClientRect()
+      const contentRect = liveContent.getBoundingClientRect()
+      const contentBottom = container.scrollTop + contentRect.bottom - containerRect.top
+      // The composer overlays the scroll container, so keep the streamed content above
+      // that overlay. The separate spacer below the content supplies scrollable clearance;
+      // this helper intentionally targets only the content bottom, never the spacer/sentinel.
+      const desiredViewportBottomGap = Math.max(inputAreaHeight + 26, 106)
+      const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
+      const nextScrollTop = Math.min(
+        maxScrollTop,
+        Math.max(0, contentBottom + desiredViewportBottomGap - container.clientHeight)
+      )
+
+      if (Math.abs(container.scrollTop - nextScrollTop) > 1) {
+        container.scrollTo({ top: nextScrollTop, behavior })
+      }
+    },
+    [inputAreaHeight]
+  )
 
   // Helper: scroll to bottom immediately using the sentinel first, with follow-up passes
   // to account for virtualized row measurement and late layout changes in long branches.
@@ -2826,23 +3052,6 @@ function Chat() {
       dispatch(chatSliceActions.ccCwdSet(nextValue))
     },
     [dispatch]
-  )
-
-  const setHermesModeEnabled = useCallback(
-    (enabled: boolean) => {
-      if (!hermesModeAvailable) {
-        setHermesMode(false)
-        return
-      }
-
-      setHermesMode(enabled)
-      try {
-        window.localStorage.setItem('chat:agentMode', enabled ? 'hermes' : 'default')
-      } catch {
-        // noop
-      }
-    },
-    [hermesModeAvailable]
   )
 
   // Fetch conversations for the current project using React Query
@@ -3211,11 +3420,14 @@ function Chat() {
   const actionPopoverInputBorderColor = customThemeEnabled
     ? getThemeModeColor(customTheme.colors.actionPopoverBorder, isDarkMode)
     : undefined
+  const actionPopoverTriggerStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: getThemeModeColor(customTheme.colors.settingsCustomThemesButtonBg, isDarkMode),
+        color: getThemeModeColor(customTheme.colors.settingsCustomThemesButtonText, isDarkMode),
+      }
+    : undefined
   const sendButtonAnimationThemeColor = customThemeEnabled
     ? getThemeModeColor(customTheme.colors.sendButtonAnimationColor, isDarkMode)
-    : undefined
-  const streamingAnimationThemeColor = customThemeEnabled
-    ? getThemeModeColor(customTheme.colors.streamingAnimationColor, isDarkMode)
     : undefined
   const composerToggleActiveStyle = customThemeEnabled
     ? {
@@ -3277,19 +3489,17 @@ function Chat() {
   const effectiveChatInputBorderLightColor = effectiveAnimatedInputBorderColor ?? chatInputBorderLightColor
   const effectiveChatInputBorderDarkColor = effectiveAnimatedInputBorderColor ?? chatInputBorderDarkColor
 
-  const inputAreaBorderClasses = chatInputBorderAnimationEnabled
-    ? `chat-input-border-anim chat-input-border-${chatInputBorderAnimation}`
-    : operationMode === 'plan'
+  const leftControlsBorderClasses =
+    operationMode === 'plan'
       ? 'outline-1 outline-blue-200/70 dark:outline-neutral-700/50'
-      : useCustomInputAreaBorderColor
-        ? 'outline-2 dark:outline-2'
-        : 'outline-2 dark:outline-2 dark:outline-orange-700/70 outline-orange-700/70'
+      : 'outline-1 outline-neutral-200/70 dark:outline-neutral-700/50'
 
   const [showTokenUsageBar, setShowTokenUsageBar] = useState<boolean>(() => loadShowTokenUsageBar())
   const [showTokenUsageHoverDetails, setShowTokenUsageHoverDetails] = useState<boolean>(() =>
     loadShowTokenUsageHoverDetails()
   )
   const [autoCompactionEnabled, setAutoCompactionEnabled] = useState<boolean>(() => loadAutoCompactionEnabled())
+  const [showAddedFilesPills, setShowAddedFilesPills] = useState<boolean>(() => loadShowAddedFilesPills())
   const [expandedProcessMessageRuns, setExpandedProcessMessageRuns] = useState<Set<string>>(() => new Set())
   useEffect(() => {
     // Listen for custom event from SettingsPane (same window)
@@ -3320,17 +3530,29 @@ function Chat() {
       }
     }
 
+    const handleStreamingIndicatorPlacementEvent = (e: Event) => {
+      const detail = (e as CustomEvent<StreamingThinkingIndicatorPlacement>).detail
+      if (detail === 'message' || detail === 'input-tab') {
+        setStreamingThinkingIndicatorPlacement(detail)
+      }
+    }
+
     const handleStorageEvent = (e: StorageEvent) => {
       if (e.key === 'chat:groupToolReasoningRuns' && e.newValue !== null) {
         setGroupToolReasoningRuns(e.newValue === 'true')
       }
+      if (e.key === STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY && e.newValue !== null) {
+        setStreamingThinkingIndicatorPlacement(e.newValue === 'input-tab' ? 'input-tab' : 'message')
+      }
     }
 
     window.addEventListener('groupToolReasoningRunsChange', handleGroupRunsEvent)
+    window.addEventListener('streamingThinkingIndicatorPlacementChange', handleStreamingIndicatorPlacementEvent)
     window.addEventListener('storage', handleStorageEvent)
 
     return () => {
       window.removeEventListener('groupToolReasoningRunsChange', handleGroupRunsEvent)
+      window.removeEventListener('streamingThinkingIndicatorPlacementChange', handleStreamingIndicatorPlacementEvent)
       window.removeEventListener('storage', handleStorageEvent)
     }
   }, [])
@@ -3369,6 +3591,13 @@ function Chat() {
       }
     }
 
+    const handleAddedFilesPillsVisibilityEvent = (e: Event) => {
+      const detail = (e as CustomEvent<boolean>).detail
+      if (typeof detail === 'boolean') {
+        setShowAddedFilesPills(detail)
+      }
+    }
+
     const handleStorageEvent = (e: StorageEvent) => {
       if (e.key === 'chat:showTokenUsageBar' && e.newValue !== null) {
         setShowTokenUsageBar(e.newValue === 'true')
@@ -3380,6 +3609,10 @@ function Chat() {
 
       if (e.key === CHAT_UI_AUTO_COMPACTION_ENABLED_KEY && e.newValue !== null) {
         setAutoCompactionEnabled(e.newValue === 'true')
+      }
+
+      if (e.key === CHAT_UI_ADDED_FILES_PILLS_VISIBILITY_KEY && e.newValue !== null) {
+        setShowAddedFilesPills(e.newValue === 'true')
       }
     }
 
@@ -3394,6 +3627,10 @@ function Chat() {
     window.addEventListener(
       CHAT_UI_AUTO_COMPACTION_ENABLED_CHANGE_EVENT,
       handleAutoCompactionEnabledEvent as EventListener
+    )
+    window.addEventListener(
+      CHAT_UI_ADDED_FILES_PILLS_VISIBILITY_CHANGE_EVENT,
+      handleAddedFilesPillsVisibilityEvent as EventListener
     )
     window.addEventListener('storage', handleStorageEvent)
 
@@ -3410,44 +3647,31 @@ function Chat() {
         CHAT_UI_AUTO_COMPACTION_ENABLED_CHANGE_EVENT,
         handleAutoCompactionEnabledEvent as EventListener
       )
+      window.removeEventListener(
+        CHAT_UI_ADDED_FILES_PILLS_VISIBILITY_CHANGE_EVENT,
+        handleAddedFilesPillsVisibilityEvent as EventListener
+      )
       window.removeEventListener('storage', handleStorageEvent)
     }
   }, [])
 
   // Send button animation settings (synced from SettingsPane via custom event + localStorage)
   const [sendButtonAnimation, setSendButtonAnimation] = useState<SendButtonAnimationType>(getStoredSendButtonAnimation)
-  const [sendButtonColor, setSendButtonColor] = useState<string>(getStoredSendButtonColor)
-
-  // Streaming animation settings (shown below the live assistant message while content is streaming)
-  const [streamingAnimation, setStreamingAnimation] = useState<StreamingAnimationType>(getStoredStreamingAnimation)
-  const [streamingAnimationLightColor, setStreamingAnimationLightColor] = useState<string>(getStoredStreamingLightColor)
-  const [streamingAnimationDarkColor, setStreamingAnimationDarkColor] = useState<string>(getStoredStreamingDarkColor)
-  const [streamingAnimationSpeed, setStreamingAnimationSpeed] = useState<number>(getStoredStreamingSpeed)
+  const [sendButtonLightColor, setSendButtonLightColor] = useState<string>(getStoredSendButtonLightColor)
+  const [sendButtonDarkColor, setSendButtonDarkColor] = useState<string>(getStoredSendButtonDarkColor)
 
   useEffect(() => {
     const handleSendButtonAnimationEvent = (e: Event) => {
       const detail = (e as CustomEvent<SendButtonAnimationType>).detail
       if (detail) setSendButtonAnimation(detail)
     }
-    const handleSendButtonColorEvent = (e: Event) => {
+    const handleSendButtonLightColorEvent = (e: Event) => {
       const detail = (e as CustomEvent<string>).detail
-      if (detail) setSendButtonColor(detail)
+      if (detail) setSendButtonLightColor(detail)
     }
-    const handleStreamingAnimationEvent = (e: Event) => {
-      const detail = (e as CustomEvent<StreamingAnimationType>).detail
-      if (detail) setStreamingAnimation(detail)
-    }
-    const handleStreamingLightColorEvent = (e: Event) => {
+    const handleSendButtonDarkColorEvent = (e: Event) => {
       const detail = (e as CustomEvent<string>).detail
-      if (detail) setStreamingAnimationLightColor(detail)
-    }
-    const handleStreamingDarkColorEvent = (e: Event) => {
-      const detail = (e as CustomEvent<string>).detail
-      if (detail) setStreamingAnimationDarkColor(detail)
-    }
-    const handleStreamingSpeedEvent = (e: Event) => {
-      const detail = (e as CustomEvent<number>).detail
-      if (Number.isFinite(detail)) setStreamingAnimationSpeed(detail)
+      if (detail) setSendButtonDarkColor(detail)
     }
     const handleInputBorderAnimationEvent = (e: Event) => {
       const detail = (e as CustomEvent<ChatInputBorderAnimationType>).detail
@@ -3465,27 +3689,11 @@ function Chat() {
       if (e.key === 'chat:sendButtonAnimation' && e.newValue) {
         setSendButtonAnimation(e.newValue as SendButtonAnimationType)
       }
-      if (e.key === 'chat:sendButtonColor' && e.newValue) {
-        setSendButtonColor(e.newValue)
+      if (e.key === 'chat:sendButtonLightColor' && e.newValue) {
+        setSendButtonLightColor(e.newValue)
       }
-      if (e.key === 'chat:streamingAnimation' && e.newValue) {
-        setStreamingAnimation(e.newValue as StreamingAnimationType)
-      }
-      if (e.key === 'chat:streamingAnimationColor' && e.newValue) {
-        setStreamingAnimationLightColor(e.newValue)
-        setStreamingAnimationDarkColor(e.newValue)
-      }
-      if (e.key === 'chat:streamingAnimationLightColor' && e.newValue) {
-        setStreamingAnimationLightColor(e.newValue)
-      }
-      if (e.key === 'chat:streamingAnimationDarkColor' && e.newValue) {
-        setStreamingAnimationDarkColor(e.newValue)
-      }
-      if (e.key === 'chat:streamingAnimationSpeed' && e.newValue) {
-        const nextSpeed = Number.parseFloat(e.newValue)
-        if (Number.isFinite(nextSpeed)) {
-          setStreamingAnimationSpeed(nextSpeed)
-        }
+      if (e.key === 'chat:sendButtonDarkColor' && e.newValue) {
+        setSendButtonDarkColor(e.newValue)
       }
       if (e.key === 'chat:inputBorderAnimation' && e.newValue) {
         setChatInputBorderAnimation(e.newValue as ChatInputBorderAnimationType)
@@ -3499,12 +3707,8 @@ function Chat() {
     }
 
     window.addEventListener('sendButtonAnimationChange', handleSendButtonAnimationEvent)
-    window.addEventListener('sendButtonColorChange', handleSendButtonColorEvent)
-    window.addEventListener('streamingAnimationChange', handleStreamingAnimationEvent)
-    window.addEventListener('streamingAnimationColorChange', handleStreamingLightColorEvent)
-    window.addEventListener('streamingAnimationLightColorChange', handleStreamingLightColorEvent)
-    window.addEventListener('streamingAnimationDarkColorChange', handleStreamingDarkColorEvent)
-    window.addEventListener('streamingAnimationSpeedChange', handleStreamingSpeedEvent)
+    window.addEventListener('sendButtonLightColorChange', handleSendButtonLightColorEvent)
+    window.addEventListener('sendButtonDarkColorChange', handleSendButtonDarkColorEvent)
     window.addEventListener('inputBorderAnimationChange', handleInputBorderAnimationEvent)
     window.addEventListener('inputBorderLightColorChange', handleInputBorderLightColorEvent)
     window.addEventListener('inputBorderDarkColorChange', handleInputBorderDarkColorEvent)
@@ -3512,12 +3716,8 @@ function Chat() {
 
     return () => {
       window.removeEventListener('sendButtonAnimationChange', handleSendButtonAnimationEvent)
-      window.removeEventListener('sendButtonColorChange', handleSendButtonColorEvent)
-      window.removeEventListener('streamingAnimationChange', handleStreamingAnimationEvent)
-      window.removeEventListener('streamingAnimationColorChange', handleStreamingLightColorEvent)
-      window.removeEventListener('streamingAnimationLightColorChange', handleStreamingLightColorEvent)
-      window.removeEventListener('streamingAnimationDarkColorChange', handleStreamingDarkColorEvent)
-      window.removeEventListener('streamingAnimationSpeedChange', handleStreamingSpeedEvent)
+      window.removeEventListener('sendButtonLightColorChange', handleSendButtonLightColorEvent)
+      window.removeEventListener('sendButtonDarkColorChange', handleSendButtonDarkColorEvent)
       window.removeEventListener('inputBorderAnimationChange', handleInputBorderAnimationEvent)
       window.removeEventListener('inputBorderLightColorChange', handleInputBorderLightColorEvent)
       window.removeEventListener('inputBorderDarkColorChange', handleInputBorderDarkColorEvent)
@@ -3623,7 +3823,31 @@ function Chat() {
       try {
         const localConversation = await localApi.get<Conversation>(`/app/conversations/${currentConversationId}`)
         if (cwdLoadSeqRef.current !== loadSeq) return
-        const loadedCwd = typeof localConversation?.cwd === 'string' ? localConversation.cwd : ''
+        let loadedCwd = typeof localConversation?.cwd === 'string' ? localConversation.cwd : ''
+
+        if (!loadedCwd.trim() && projectIdFromUrl) {
+          try {
+            const localProject = await localApi.get<Project>(`/app/projects/${projectIdFromUrl}`)
+            if (cwdLoadSeqRef.current !== loadSeq) return
+            const projectCwd = typeof localProject?.cwd === 'string' ? localProject.cwd : ''
+            if (projectCwd.trim()) {
+              loadedCwd = projectCwd
+              void dispatch(
+                updateCwd({
+                  id: currentConversationId,
+                  cwd: projectCwd,
+                  storageMode: 'local',
+                })
+              )
+            }
+          } catch (projectCwdError) {
+            const message = projectCwdError instanceof Error ? projectCwdError.message : String(projectCwdError)
+            if (!message.includes('HTTP 404')) {
+              console.error('[Chat] Failed to load local project cwd fallback:', projectCwdError)
+            }
+          }
+        }
+
         persistedCcCwdRef.current = loadedCwd.trim()
         setCcCwdFromSystem(loadedCwd)
       } catch (error) {
@@ -3636,7 +3860,7 @@ function Chat() {
         setCcCwdFromSystem('')
       }
     })()
-  }, [currentConversationId, setCcCwdFromSystem])
+  }, [currentConversationId, dispatch, projectIdFromUrl, setCcCwdFromSystem])
 
   // Auto-sync cwd from IDE extension when connected
   // Passive IDE updates should only fill when cwd is empty.
@@ -3728,10 +3952,13 @@ function Chat() {
   // Query invalidation is now handled directly in sendMessage and editMessageWithBranching success handlers
   // This prevents aggressive refetching and duplicate API requests
 
-  // Cleanup any pending rAF on unmount
+  // Cleanup any pending streaming scroll work on unmount
   useEffect(() => {
     return () => {
       if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
+      if (streamingProgrammaticScrollResetTimeoutRef.current != null) {
+        window.clearTimeout(streamingProgrammaticScrollResetTimeoutRef.current)
+      }
     }
   }, [])
 
@@ -3739,28 +3966,136 @@ function Chat() {
     streamActiveRef.current = streamState.active
   }, [streamState.active])
 
-  // Listen for user scrolls; while streaming, toggle override based on proximity to bottom
+  const markStreamingProgrammaticScroll = useCallback(() => {
+    if (typeof window === 'undefined') return
+
+    isProgrammaticStreamingScrollRef.current = true
+    if (streamingProgrammaticScrollResetTimeoutRef.current != null) {
+      window.clearTimeout(streamingProgrammaticScrollResetTimeoutRef.current)
+    }
+    streamingProgrammaticScrollResetTimeoutRef.current = window.setTimeout(() => {
+      isProgrammaticStreamingScrollRef.current = false
+      streamingProgrammaticScrollResetTimeoutRef.current = null
+    }, 300)
+  }, [])
+
+  // Listen for user scroll intent. While final text is streaming, ANY user scroll/wheel/touch
+  // means "stop following the growing message" until the stream finishes. The live final answer
+  // is rendered outside TanStack Virtual, so we deliberately avoid per-token scroll correction.
   useEffect(() => {
     const el = messagesContainerRef.current
     if (!el) return
 
+    const disableFollowForUserIntent = () => {
+      if (!streamActiveRef.current) return
+      if (!hasFinalTextStreamingRef.current) return
+      // Programmatic scrolls do not emit wheel/touch events; if we see one, it is the user
+      // asking to read. Stop bottom-follow immediately, even if a follow scroll was just queued.
+      userScrolledDuringStreamRef.current = true
+      if (scrollRafRef.current != null) {
+        cancelAnimationFrame(scrollRafRef.current)
+        scrollRafRef.current = null
+      }
+    }
+
     const onScroll = (e: Event) => {
       if (!e.isTrusted || !streamActiveRef.current) return
-      const nearBottom = isNearBottom(el, NEAR_BOTTOM_PX)
-      // If the user is near the bottom, allow auto-pinning; otherwise, suppress it
+
+      const currentTop = el.scrollTop
+      const previousTop = lastTrustedScrollTopRef.current
+      lastTrustedScrollTopRef.current = currentTop
+
+      if (isProgrammaticStreamingScrollRef.current) {
+        if (hasFinalTextStreamingRef.current && previousTop != null && currentTop < previousTop - 1) {
+          userScrolledDuringStreamRef.current = true
+        }
+        return
+      }
+
+      if (hasFinalTextStreamingRef.current) {
+        if (previousTop == null || Math.abs(currentTop - previousTop) > 1) {
+          userScrolledDuringStreamRef.current = true
+        }
+        return
+      }
+
+      const nearBottom = isNearBottom(el, AUTO_FOLLOW_BOTTOM_PX)
       userScrolledDuringStreamRef.current = !nearBottom
     }
 
+    el.addEventListener('wheel', disableFollowForUserIntent, { passive: true })
+    el.addEventListener('touchmove', disableFollowForUserIntent, { passive: true })
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => {
+      el.removeEventListener('wheel', disableFollowForUserIntent)
+      el.removeEventListener('touchmove', disableFollowForUserIntent)
       el.removeEventListener('scroll', onScroll)
     }
   }, [])
 
-  // Reset the user scroll override when the stream finishes
+  useEffect(() => {
+    if (!streamState.active) {
+      finalTextStreamingStartedRef.current = false
+      return
+    }
+
+    if (hasFinalTextStreaming && !finalTextStreamingStartedRef.current) {
+      finalTextStreamingStartedRef.current = true
+      const container = messagesContainerRef.current
+      if (container && !isNearBottom(container, AUTO_FOLLOW_BOTTOM_PX)) {
+        userScrolledDuringStreamRef.current = true
+      }
+    }
+  }, [hasFinalTextStreaming, streamState.active])
+
+  useEffect(() => {
+    if (!showLiveStreamingTail) {
+      skippedInitialLiveTailFollowRef.current = false
+      return
+    }
+    if (userScrolledDuringStreamRef.current) return
+    if (typeof window === 'undefined') return
+
+    // Mounting the live tail changes the bottom spacer/sentinel layout. Do not auto-scroll
+    // on that first render; otherwise stream start still looks like a jump to the bottom.
+    // Subsequent token growth can follow normally while the user has not scrolled away.
+    if (!skippedInitialLiveTailFollowRef.current) {
+      skippedInitialLiveTailFollowRef.current = true
+      return
+    }
+
+    if (scrollRafRef.current != null) {
+      window.cancelAnimationFrame(scrollRafRef.current)
+    }
+
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      scrollRafRef.current = null
+      if (userScrolledDuringStreamRef.current) return
+      markStreamingProgrammaticScroll()
+      scrollLiveTailToBottomOnce('auto')
+    })
+
+    return () => {
+      if (scrollRafRef.current != null) {
+        window.cancelAnimationFrame(scrollRafRef.current)
+        scrollRafRef.current = null
+      }
+    }
+  }, [markStreamingProgrammaticScroll, scrollLiveTailToBottomOnce, showLiveStreamingTail, streamState.buffer])
+
+  // Reset streaming scroll state when the stream finishes. Do not perform an anchor-based
+  // handoff restore here: after the live tail is replaced by the persisted virtual row, that
+  // restore was moving the viewport upward by a couple of messages.
   useEffect(() => {
     if (streamState.finished) {
       userScrolledDuringStreamRef.current = false
+      finalTextStreamingStartedRef.current = false
+      lastTrustedScrollTopRef.current = null
+      isProgrammaticStreamingScrollRef.current = false
+      if (streamingProgrammaticScrollResetTimeoutRef.current != null) {
+        window.clearTimeout(streamingProgrammaticScrollResetTimeoutRef.current)
+        streamingProgrammaticScrollResetTimeoutRef.current = null
+      }
       if (scrollRafRef.current != null) {
         cancelAnimationFrame(scrollRafRef.current)
         scrollRafRef.current = null
@@ -3810,18 +4145,6 @@ function Chat() {
     virtualRows.length,
   ])
 
-  // Scroll to show new message at top when stream starts (normal mode only)
-  // DISABLED: Auto-scroll temporarily disabled
-  // useEffect(() => {
-  //   if (streamState.active && !hermesMode) {
-  //     // Scroll to position new message at top of viewport
-  //     // setTimeout(() => {
-  //     //   scrollToShowLatestAtTop('smooth')
-  //     // }, 450)
-  //     scrollToShowLatestAtTop('smooth')
-  //   }
-  // }, [streamState.active, hermesMode, scrollToShowLatestAtTop])
-
   // Scroll to selected node when path changes (only for user-initiated selections)
   useEffect(() => {
     if (selectionScrollCauseRef.current === 'user' && selectedPath && selectedPath.length > 0) {
@@ -3844,17 +4167,23 @@ function Chat() {
     }
   }, [selectedPath, focusedChatMessageId, findMessageRowIndex, scrollToMessageRowIndex])
 
-  // Scroll to the focused message when focus changes via hash/search (non user-click cases)
+  // Scroll to the focused message when focus actually changes via hash/search (non user-click cases).
+  // Do not re-run this because virtual rows, message indexes, or the virtualizer instance changed:
+  // stream completion changes those dependencies and was jumping to stale focused messages.
   useEffect(() => {
-    // Skip if no focus or a user-initiated selection will handle scrolling
+    const previousFocusedChatMessageId = previousFocusedChatMessageIdRef.current
+    previousFocusedChatMessageIdRef.current = focusedChatMessageId
+
+    // Skip if no focus, unchanged focus, or a user-initiated selection will handle scrolling.
     if (focusedChatMessageId == null) return
+    if (previousFocusedChatMessageId === focusedChatMessageId) return
     if (selectionScrollCauseRef.current === 'user') return
 
     // If we've already scrolled to this focused message, don't re-run on every list change
     if (lastFocusedScrollIdRef.current === focusedChatMessageId) return
 
-    // If focus changed programmatically during streaming, temporarily disable bottom pinning
-    if (streamState.active) {
+    // If focus changed programmatically during streaming, temporarily disable bottom pinning.
+    if (streamActiveRef.current) {
       userScrolledDuringStreamRef.current = true
     }
 
@@ -3867,60 +4196,77 @@ function Chat() {
       // Mark this focus as handled so we don't keep re-centering on subsequent renders
       lastFocusedScrollIdRef.current = focusedChatMessageId
     }
-  }, [focusedChatMessageId, findMessageRowIndex, scrollToMessageRowIndex, streamState.active])
+  }, [focusedChatMessageId])
 
-  // Helper to check if a message should be excluded from visibility tracking
-  // (tool-only or reasoning-only messages without meaningful text content)
-  const isToolOrReasoningOnly = useCallback((msg: Message): boolean => {
-    if (msg.role === 'tool') return true
+  // Helper to check if a message can drive Heimdall's current viewport highlight.
+  // Only simple text-response content should move the outline. Tool calls, tool
+  // results, reasoning, thinking, and image-only messages are intentionally ignored
+  // so Heimdall can keep the previous text node highlighted while those rows pass by.
+  const isHeimdallVisibleTextResponseMessage = useCallback((msg: Message): boolean => {
+    if (!msg || msg.role === 'tool') return false
 
-    if (msg.content_blocks) {
-      try {
-        const blocks = typeof msg.content_blocks === 'string' ? JSON.parse(msg.content_blocks) : msg.content_blocks
-        const arr = Array.isArray(blocks) ? blocks : [blocks]
+    const hasPlainContent = typeof msg.content === 'string' && msg.content.trim().length > 0
+    if (msg.role === 'user') {
+      return hasPlainContent
+    }
 
-        // Helper to check if a block has text content
-        const hasTextContent = (b: any): boolean => {
-          if (b.type === 'text' || b.type === 'image') return true
-          if (b.type === 'thinking' && b.content && typeof b.content === 'string' && b.content.trim()) return true
-          if (b.type === 'reasoning_details' && Array.isArray(b.reasoningDetails)) {
-            return b.reasoningDetails.some((r: any) => r.text && typeof r.text === 'string' && r.text.trim())
-          }
-          if (b.type === 'tool_result' && b.content) {
-            if (typeof b.content === 'string' && b.content.trim()) return true
-            if (Array.isArray(b.content)) {
-              return b.content.some((c: any) => c.type === 'text' && c.text && c.text.trim())
-            }
-          }
-          return false
+    if (!msg.content_blocks) {
+      return hasPlainContent
+    }
+
+    try {
+      const blocks = typeof msg.content_blocks === 'string' ? JSON.parse(msg.content_blocks) : msg.content_blocks
+      const arr = Array.isArray(blocks) ? blocks : [blocks]
+
+      return arr.some((block: any) => {
+        if (!block || typeof block !== 'object') return false
+
+        if (block.type === 'text') {
+          const text =
+            typeof block.text === 'string' ? block.text : typeof block.content === 'string' ? block.content : ''
+          return text.trim().length > 0
         }
 
-        // Exclude only if no blocks have meaningful text content
-        return arr.length > 0 && !arr.some(hasTextContent)
-      } catch {
-        return false
-      }
+        return getResponsesOutputAssistantTexts(block as ContentBlock).some(text => text.trim().length > 0)
+      })
+    } catch {
+      return false
     }
-    return false
   }, [])
 
   const visibilityInputsRef = useRef<{
     renderableMessages: Message[]
     virtualRows: VirtualRenderRow[]
-    isToolOrReasoningOnly: (msg: Message) => boolean
+    isHeimdallVisibleTextResponseMessage: (msg: Message) => boolean
   }>({
     renderableMessages,
     virtualRows,
-    isToolOrReasoningOnly,
+    isHeimdallVisibleTextResponseMessage,
   })
 
   useEffect(() => {
     visibilityInputsRef.current = {
       renderableMessages,
       virtualRows,
-      isToolOrReasoningOnly,
+      isHeimdallVisibleTextResponseMessage,
     }
-  }, [renderableMessages, virtualRows, isToolOrReasoningOnly])
+  }, [renderableMessages, virtualRows, isHeimdallVisibleTextResponseMessage])
+
+  useEffect(() => {
+    lastVisibleTextMessageIdRef.current = null
+    setVisibleMessageId(null)
+  }, [currentConversationId])
+
+  useEffect(() => {
+    const stickyId = lastVisibleTextMessageIdRef.current
+    if (stickyId == null) return
+
+    const stickyStillInCurrentBranch = renderableMessages.some(message => String(message.id) === String(stickyId))
+    if (!stickyStillInCurrentBranch) {
+      lastVisibleTextMessageIdRef.current = null
+      setVisibleMessageId(null)
+    }
+  }, [renderableMessages, selectedPath])
 
   // Track the most visible message using virtualizer's virtual items on scroll
   // Since elements are virtualized, we compute visibility based on scroll position
@@ -3932,34 +4278,32 @@ function Chat() {
       const {
         renderableMessages: currentMessages,
         virtualRows: currentVirtualRows,
-        isToolOrReasoningOnly: isExcluded,
+        isHeimdallVisibleTextResponseMessage: isHighlightCandidate,
       } = visibilityInputsRef.current
       const virtualItems = virtualizer.getVirtualItems()
 
-      const findFirstAllowedMessage = (): MessageId | null => {
+      const currentMessageIdSet = new Set(currentMessages.map(message => String(message.id)))
+      const findFirstHighlightCandidate = (): MessageId | null => {
         for (const msg of currentMessages) {
-          if (msg && !isExcluded(msg)) {
+          if (msg && isHighlightCandidate(msg)) {
             return msg.id
           }
         }
         return null
       }
-
-      const findLastAllowedMessage = (): MessageId | null => {
-        for (let i = currentMessages.length - 1; i >= 0; i--) {
-          const msg = currentMessages[i]
-          if (msg && !isExcluded(msg)) {
-            return msg.id
-          }
+      const getStickyOrInitialHighlightMessage = (): MessageId | null => {
+        const stickyId = lastVisibleTextMessageIdRef.current
+        if (stickyId != null && currentMessageIdSet.has(String(stickyId))) {
+          return stickyId
         }
-        return null
+
+        const fallback = findFirstHighlightCandidate()
+        lastVisibleTextMessageIdRef.current = fallback
+        return fallback
       }
 
       if (virtualItems.length === 0) {
-        const fallback = findFirstAllowedMessage()
-        if (fallback) {
-          setVisibleMessageId(fallback)
-        }
+        setVisibleMessageId(getStickyOrInitialHighlightMessage())
         return
       }
 
@@ -3977,7 +4321,7 @@ function Chat() {
         }
 
         const msg = virtualRenderRow.row.message
-        if (!msg || isExcluded(msg)) continue
+        if (!msg || !isHighlightCandidate(msg)) continue
 
         const itemTop = item.start
         const itemBottom = item.start + item.size
@@ -3990,16 +4334,15 @@ function Chat() {
       }
 
       if (!closestItem) {
-        const fallback = findLastAllowedMessage()
-        if (fallback) {
-          setVisibleMessageId(fallback)
-        }
+        setVisibleMessageId(getStickyOrInitialHighlightMessage())
         return
       }
 
       const closestVirtualRenderRow = currentVirtualRows[closestItem.index]
       if (closestVirtualRenderRow?.kind === 'message_row' && closestVirtualRenderRow.row.kind === 'message') {
-        setVisibleMessageId(closestVirtualRenderRow.row.message.id)
+        const nextVisibleMessageId = closestVirtualRenderRow.row.message.id
+        lastVisibleTextMessageIdRef.current = nextVisibleMessageId
+        setVisibleMessageId(nextVisibleMessageId)
       }
     }
 
@@ -4350,131 +4693,62 @@ function Chat() {
         return
       }
 
-      // Re-enable auto-pinning for Hermes mode sends until the user scrolls during this stream
-      if (hermesMode) {
-        userScrolledDuringStreamRef.current = false
-      }
       if (canSendLocal && currentConversationId) {
         // Check if this is a retrigger scenario (empty input + last message is user)
         const isRetrigger =
           !hasLocalInput && displayMessages.length > 0 && displayMessages[displayMessages.length - 1]?.role === 'user'
 
-        // Hermes mode routes messages to the local Hermes ACP endpoint.
-        if (hermesMode && hermesModeAvailable) {
-          const parent: MessageId | null = selectedPath.length > 0 ? selectedPath[selectedPath.length - 1] : null
-          const lastHermesSessionId = findLastHermesSession(selectedPath)
+        if (isRetrigger) {
+          // Retrigger: Use the last user message's content and parent
+          const lastUserMessage = displayMessages[displayMessages.length - 1]
 
-          if (isRetrigger) {
-            const lastUserMessage = displayMessages[displayMessages.length - 1]
-
-            if (!lastUserMessage) {
-              console.error('Cannot retrigger: No last user message found in displayMessages')
-              return
-            }
-
-            const contentToRetrigger = lastUserMessage.content
-
-            const streamId = generateStreamId('primary')
-            setPendingViewStreamId(streamId)
-
-            dispatch(
-              sendHermesMessage({
-                conversationId: currentConversationId,
-                message: contentToRetrigger,
-                cwd: ccCwd || undefined,
-                model: selectedModel?.name,
-                resume: true,
-                parentId: parent,
-                sessionId: lastHermesSessionId,
-                streamId,
-              })
-            )
-              .unwrap()
-              .catch(error => {
-                console.error('Failed to send Hermes retrigger message:', error)
-              })
-          } else {
-            const processedContent = replaceFileMentionsWithPath(localInputValue)
-            const contentWithIdeContext = appendIdeContextToMessage(processedContent)
-
-            dispatch(chatSliceActions.inputChanged({ content: contentWithIdeContext }))
-            clearLocalInput()
-
-            const streamId = generateStreamId('primary')
-            setPendingViewStreamId(streamId)
-
-            dispatch(
-              sendHermesMessage({
-                conversationId: currentConversationId,
-                message: contentWithIdeContext,
-                cwd: ccCwd || undefined,
-                model: selectedModel?.name,
-                resume: true,
-                parentId: parent,
-                sessionId: lastHermesSessionId,
-                streamId,
-              })
-            )
-              .unwrap()
-              .then(() => {
-                setAddedIdeContexts([])
-              })
-              .catch(error => {
-                console.error('Failed to send Hermes message:', error)
-              })
+          // Safety check: ensure lastUserMessage exists before accessing properties
+          if (!lastUserMessage) {
+            console.error('Cannot retrigger: No last user message found in displayMessages')
+            return
           }
+
+          const parent: MessageId | null = lastUserMessage.parent_id || null
+          const contentToRetrigger = lastUserMessage.content
+          const { content: retriggerContent, pendingCwdValue } = withPendingCwdAnnouncement(
+            currentConversationId,
+            contentToRetrigger
+          )
+
+          // Dispatch sendMessage with retrigger flag
+          const streamId = generateStreamId('primary')
+          setPendingViewStreamId(streamId)
+
+          dispatch(
+            sendMessage({
+              conversationId: currentConversationId,
+              input: { content: retriggerContent },
+              parent,
+              repeatNum: value,
+              think: think,
+              retrigger: true,
+              imageConfig: isImageGenerationModel ? imageConfig : undefined,
+              reasoningConfig: think ? reasoningConfig : undefined,
+              serviceTier: openAIServiceTier,
+              cwd: ccCwd || undefined,
+              operationMode,
+              streamId,
+            })
+          )
+            .unwrap()
+            .then(result => {
+              clearPendingCwdAnnouncement(currentConversationId, pendingCwdValue)
+              if (!result?.userMessage) {
+                console.warn('Server did not confirm user message')
+              }
+              // ✅ No refetch needed - messages already added to Redux via SSE stream
+              // Stream sends: user_message event + complete event with full message data
+              // Redux already updated via messageAdded() + messageBranchCreated() dispatches
+            })
+            .catch(error => {
+              console.error('Failed to retrigger generation:', error)
+            })
         } else {
-          // Regular model send (non-Hermes mode)
-          if (isRetrigger) {
-            // Retrigger: Use the last user message's content and parent
-            const lastUserMessage = displayMessages[displayMessages.length - 1]
-
-            // Safety check: ensure lastUserMessage exists before accessing properties
-            if (!lastUserMessage) {
-              console.error('Cannot retrigger: No last user message found in displayMessages')
-              return
-            }
-
-            const parent: MessageId | null = lastUserMessage.parent_id || null
-            const contentToRetrigger = lastUserMessage.content
-            const { content: retriggerContent, pendingCwdValue } = withPendingCwdAnnouncement(
-              currentConversationId,
-              contentToRetrigger
-            )
-
-            // Dispatch sendMessage with retrigger flag
-            const streamId = generateStreamId('primary')
-            setPendingViewStreamId(streamId)
-
-            dispatch(
-              sendMessage({
-                conversationId: currentConversationId,
-                input: { content: retriggerContent },
-                parent,
-                repeatNum: value,
-                think: think,
-                retrigger: true,
-                imageConfig: isImageGenerationModel ? imageConfig : undefined,
-                reasoningConfig: think ? reasoningConfig : undefined,
-                serviceTier: openAIServiceTier,
-                cwd: ccCwd || undefined,
-                streamId,
-              })
-            )
-              .unwrap()
-              .then(result => {
-                clearPendingCwdAnnouncement(currentConversationId, pendingCwdValue)
-                if (!result?.userMessage) {
-                  console.warn('Server did not confirm user message')
-                }
-                // ✅ No refetch needed - messages already added to Redux via SSE stream
-                // Stream sends: user_message event + complete event with full message data
-                // Redux already updated via messageAdded() + messageBranchCreated() dispatches
-              })
-              .catch(error => {
-                console.error('Failed to retrigger generation:', error)
-              })
-          } else {
             // Normal send flow
             // Process file mentions with actual content before sending
             const processedContent = replaceFileMentionsWithPath(localInputValue)
@@ -4526,7 +4800,7 @@ function Chat() {
                 model_name: selectedModel?.name || '',
                 partial: false,
                 pastedContext: [],
-                artifacts: [],
+                artifacts: composerImageDraftDataUrls,
               }
               dispatch(chatSliceActions.optimisticMessageSet(optimisticUserMessage))
 
@@ -4550,6 +4824,7 @@ function Chat() {
                   reasoningConfig: think ? reasoningConfig : undefined,
                   serviceTier: openAIServiceTier,
                   cwd: ccCwd || undefined,
+                  operationMode,
                   streamId,
                 })
               )
@@ -4679,7 +4954,6 @@ function Chat() {
               }
               sendWithParent(effectiveParent)
             })()
-          }
         }
       } else if (!currentConversationId) {
         console.error('📤 No conversation ID available')
@@ -4702,9 +4976,7 @@ function Chat() {
       appendIdeContextToMessage,
       scrollToBottomNow,
       selectedModel,
-      hermesMode,
       ccCwd,
-      hermesModeAvailable,
       projectConversations,
       queryClient,
       selectedProject,
@@ -4718,10 +4990,11 @@ function Chat() {
       imageConfig,
       reasoningConfig,
       openAIServiceTier,
-      findLastHermesSession,
+      operationMode,
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
       runComposerCommand,
+      composerImageDraftDataUrls,
     ]
   )
 
@@ -4755,44 +5028,14 @@ function Chat() {
         return
       }
 
-      const branchParentId =
-        originalMessage.role === 'assistant' || originalMessage.role === 'ex_agent'
-          ? originalMessage.id
-          : (originalMessage.parent_id ?? null)
-
-      if (hermesMode && hermesModeAvailable) {
-        const branchSourceSessionId = findNearestHermesSessionFromMessage(branchParentId)
-        const streamId = generateStreamId('branch')
-        setPendingViewStreamId(streamId)
-
-        dispatch(
-          sendHermesMessage({
-            conversationId: currentConversationId,
-            message: contentWithCwdAnnouncement,
-            cwd: ccCwd || undefined,
-            model: selectedModel?.name,
-            resume: branchSourceSessionId ? true : false,
-            parentId: branchParentId,
-            sessionId: branchSourceSessionId,
-            forkSession: Boolean(branchSourceSessionId),
-            streamId,
-          })
-        )
-          .unwrap()
-          .then(() => {
-            clearPendingCwdAnnouncement(currentConversationId, pendingCwdValue)
-            dispatch(chatSliceActions.messageArtifactsBackupCleared({ messageId: parsedId }))
-          })
-          .catch(error => {
-            console.error('Failed to send Hermes branch session:', error)
-          })
-
-        return
-      }
-
-      // Regular message branching logic (non-Hermes mode)
       // Keep artifacts so pasted images do not flicker away during branch send.
-      const optimisticArtifacts = Array.isArray(originalMessage.artifacts) ? originalMessage.artifacts : []
+      const branchDraftArtifacts = getBranchImageDraftDataUrls(parsedId)
+      const optimisticArtifacts = Array.from(
+        new Set([
+          ...(Array.isArray(originalMessage.artifacts) ? originalMessage.artifacts : []),
+          ...branchDraftArtifacts,
+        ])
+      )
       const optimisticBranchMessage: Message = {
         id: `branch-temp-${Date.now()}`,
         conversation_id: currentConversationId,
@@ -4821,6 +5064,7 @@ function Chat() {
           think: think,
           serviceTier: openAIServiceTier,
           cwd: ccCwd || undefined,
+          operationMode,
           streamId,
         })
       )
@@ -4846,9 +5090,8 @@ function Chat() {
       selectedModel?.name,
       think,
       openAIServiceTier,
-      hermesMode,
+      operationMode,
       ccCwd,
-      hermesModeAvailable,
       dispatch,
       replaceFileMentionsWithPath,
       appendIdeContextToMessage,
@@ -4856,7 +5099,7 @@ function Chat() {
       queryClient,
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
-      findNearestHermesSessionFromMessage,
+      getBranchImageDraftDataUrls,
     ]
   )
 
@@ -4941,6 +5184,7 @@ function Chat() {
           reasoningConfig: think ? reasoningConfig : undefined,
           serviceTier: openAIServiceTier,
           cwd: ccCwd || undefined,
+          operationMode,
           streamId,
         })
       )
@@ -4970,6 +5214,7 @@ function Chat() {
       imageConfig,
       reasoningConfig,
       openAIServiceTier,
+      operationMode,
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
     ]
@@ -5213,6 +5458,7 @@ function Chat() {
         email: typeof data.email === 'string' && data.email.trim() ? data.email.trim() : null,
       }
       saveTokens(tokens)
+      await persistOpenAIChatGPTTokensToHeadless(tokens, [userId])
 
       // Successfully authenticated, select the provider
       dispatch(chatSliceActions.providerSelected('OpenAI (ChatGPT)'))
@@ -5258,7 +5504,9 @@ function Chat() {
 
       if (Date.now() - startedAt >= timeoutMs) {
         setOpenaiAuthPolling(false)
-        setOpenaiAuthError('Sign-in is taking longer than expected. Finish in your browser or open the sign-in page again.')
+        setOpenaiAuthError(
+          'Sign-in is taking longer than expected. Finish in your browser or open the sign-in page again.'
+        )
         return
       }
 
@@ -5275,8 +5523,13 @@ function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openaiLoginModalOpen, openaiAuthFlow?.state])
 
-  const handleOpenaiLogout = () => {
+  const handleOpenaiLogout = async () => {
     clearOpenAITokens()
+    try {
+      await clearOpenAIChatGPTTokensFromHeadless([userId])
+    } catch (error) {
+      console.error('Failed to clear headless OpenAI ChatGPT tokens:', error)
+    }
     // If currently on OpenAI provider, switch back to an allowed local provider
     if (providers.currentProvider === 'OpenAI (ChatGPT)') {
       const fallbackProvider = providers.providers.some(provider => provider.name === 'LM Studio')
@@ -5472,16 +5725,21 @@ function Chat() {
           })
         )
           .then(drafts => {
-            dispatch(chatSliceActions.imageDraftsAppended(drafts))
+            const branchTargetMessageId =
+              activeBranchEditingMessageId != null ? parseId(activeBranchEditingMessageId) : null
+            const target: ImageDraftTarget =
+              branchTargetMessageId != null
+                ? { kind: 'branch', messageId: branchTargetMessageId }
+                : { kind: 'composer' }
 
-            // During branch editing, always attach previews to the actively edited message.
-            const targetMessageId =
-              activeBranchEditingMessageId != null ? parseId(activeBranchEditingMessageId) : focusedChatMessageId
+            dispatch(chatSliceActions.imageDraftsAppended({ drafts, target }))
 
-            if (targetMessageId != null) {
+            // During branch editing, attach previews only to the explicitly edited message.
+            // Do not fall back to focusedChatMessageId; focus is navigation state, not an attachment target.
+            if (branchTargetMessageId != null) {
               dispatch(
                 chatSliceActions.messageArtifactsAppended({
-                  messageId: targetMessageId,
+                  messageId: branchTargetMessageId,
                   artifacts: drafts.map(d => d.dataUrl),
                 })
               )
@@ -5492,7 +5750,7 @@ function Chat() {
 
       e.target.value = ''
     },
-    [dispatch, focusedChatMessageId, activeBranchEditingMessageId, updateLocalInput, focusLocalInput]
+    [dispatch, activeBranchEditingMessageId, updateLocalInput, focusLocalInput]
   )
 
   // const handleMultiReplyCountChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -5629,6 +5887,33 @@ function Chat() {
   }, [displayMessages])
 
   const branchFileMutationData = useMemo(() => extractBranchFileMutations(displayMessages), [displayMessages])
+  const hasLatestTodoList = Boolean(latestTodoList?.items?.length)
+  const hasBranchFileMutations = branchFileMutationData.latestByPath.length > 0
+  const showComposerSummaryPanels = hasLatestTodoList || hasBranchFileMutations
+  const showComposerSummaryPanelsAsRow = hasLatestTodoList && hasBranchFileMutations
+  const composerSummaryPanelClassName = showComposerSummaryPanelsAsRow ? 'min-w-0 flex-1 basis-0' : 'min-w-0 w-full'
+  const composerSummaryPanelsCollapsed = showComposerSummaryPanelsAsRow
+    ? todoListCollapsed && workspaceMutationsCollapsed
+    : false
+  const effectiveTodoListCollapsed = showComposerSummaryPanelsAsRow ? composerSummaryPanelsCollapsed : todoListCollapsed
+  const effectiveWorkspaceMutationsCollapsed = showComposerSummaryPanelsAsRow
+    ? composerSummaryPanelsCollapsed
+    : workspaceMutationsCollapsed
+  const toggleTodoListCollapsed = useCallback(() => {
+    const nextCollapsed = !effectiveTodoListCollapsed
+    setTodoListCollapsed(nextCollapsed)
+    if (showComposerSummaryPanelsAsRow) {
+      setWorkspaceMutationsCollapsed(nextCollapsed)
+    }
+  }, [effectiveTodoListCollapsed, showComposerSummaryPanelsAsRow])
+  const toggleWorkspaceMutationsCollapsed = useCallback(() => {
+    const nextCollapsed = !effectiveWorkspaceMutationsCollapsed
+    setWorkspaceMutationsCollapsed(nextCollapsed)
+    if (showComposerSummaryPanelsAsRow) {
+      setTodoListCollapsed(nextCollapsed)
+    }
+  }, [effectiveWorkspaceMutationsCollapsed, showComposerSummaryPanelsAsRow])
+
   const handleOpenWorkspaceMutationDiffs = useCallback(() => {
     const filePaths = branchFileMutationData.latestByPath.map(summary => summary.path)
     if (filePaths.length === 0) return
@@ -5740,21 +6025,46 @@ function Chat() {
   // Calculate progress percentages.
   const totalContextProgress =
     tokenLimits.totalBudget > 0 ? Math.min((tokenUsage.totalContextTokens / tokenLimits.totalBudget) * 100, 100) : 0
+  const tokenUsageProgressColor =
+    customThemeEnabled && chatProgressBarFillColor
+      ? chatProgressBarFillColor
+      : totalContextProgress >= 95
+        ? isDarkMode
+          ? '#f87171'
+          : '#ef4444'
+        : totalContextProgress >= 80
+          ? isDarkMode
+            ? '#fbbf24'
+            : '#f59e0b'
+          : isDarkMode
+            ? '#60a5fa'
+            : '#3b82f6'
+  const tokenUsageTintStrength = isDarkMode ? 16 : 13
+  const leftControlsTokenTintBaseColor = isDarkMode ? 'rgba(23, 23, 23, 0.4)' : 'rgba(245, 245, 245, 0.4)'
+  const leftControlsTokenTintStyle: React.CSSProperties | undefined = showTokenUsageBar
+    ? {
+        backgroundImage: `linear-gradient(90deg, color-mix(in srgb, ${tokenUsageProgressColor} ${tokenUsageTintStrength}%, transparent) 0%, color-mix(in srgb, ${tokenUsageProgressColor} ${tokenUsageTintStrength}%, transparent) ${totalContextProgress}%, ${leftControlsTokenTintBaseColor} ${Math.min(totalContextProgress + 8, 100)}%)`,
+      }
+    : undefined
+  const rightControlsTintColor =
+    useCustomInputAreaBorderColor && chatInputAreaBorderColor
+      ? chatInputAreaBorderColor
+      : chatInputBorderAnimationEnabled
+        ? isDarkMode
+          ? effectiveChatInputBorderDarkColor
+          : effectiveChatInputBorderLightColor
+        : isDarkMode
+          ? '#c2410c'
+          : '#93c5fd'
+  const rightControlsTintStrength = isDarkMode ? 28 : 24
+  const rightControlsTintStyle: React.CSSProperties | undefined =
+    operationMode === 'plan'
+      ? undefined
+      : {
+          backgroundColor: `color-mix(in srgb, ${rightControlsTintColor} ${rightControlsTintStrength}%, ${leftControlsTokenTintBaseColor})`,
+        }
   // Auto-compaction now runs as part of the explicit user send flow (handleSend),
   // so we intentionally avoid passive threshold-triggered compaction effects here.
-
-  // Handler to refresh user credits
-  const handleRefreshCredits = useCallback(async () => {
-    if (!userId || !accessToken || isRefreshingCredits) return
-    setIsRefreshingCredits(true)
-    try {
-      await dispatch(refreshUserCredits({ userId, accessToken })).unwrap()
-    } catch (error) {
-      console.error('Failed to refresh credits:', error)
-    } finally {
-      setIsRefreshingCredits(false)
-    }
-  }, [dispatch, userId, accessToken, isRefreshingCredits])
 
   return (
     <motion.div
@@ -6034,25 +6344,34 @@ function Chat() {
                               id='message-streaming'
                               index={virtualRow.index}
                               start={virtualRow.start}
-                              measureElement={virtualizer.measureElement}
+                              measureElement={showLiveStreamingTail ? null : virtualizer.measureElement}
                             >
-                              <ChatMessage
-                                id='streaming'
-                                role='assistant'
-                                content={streamState.buffer}
-                                thinking={streamState.thinkingBuffer}
-                                toolCalls={streamState.toolCalls}
-                                streamEvents={streamState.events}
-                                width='w-full'
-                                fontSizeOffset={fontSizeOffset}
-                                groupToolReasoningRuns={groupToolReasoningRuns}
-                                customTheme={customTheme}
-                                customThemeEnabled={customThemeEnabled}
-                                isDarkMode={isDarkMode}
-                                modelName={selectedModel?.name || undefined}
-                                className=''
-                                onOpenToolHtmlModal={openToolHtmlModal}
-                              />
+                              <div ref={showLiveStreamingTail ? liveStreamingContentRef : undefined}>
+                                <ChatMessage
+                                  id='streaming'
+                                  role='assistant'
+                                  content={streamState.buffer}
+                                  thinking={streamState.thinkingBuffer}
+                                  toolCalls={streamState.toolCalls}
+                                  streamEvents={streamState.events}
+                                  width='w-full'
+                                  fontSizeOffset={fontSizeOffset}
+                                  groupToolReasoningRuns={groupToolReasoningRuns}
+                                  customTheme={customTheme}
+                                  customThemeEnabled={customThemeEnabled}
+                                  isDarkMode={isDarkMode}
+                                  modelName={selectedModel?.name || undefined}
+                                  className=''
+                                  onOpenToolHtmlModal={openToolHtmlModal}
+                                />
+                              </div>
+                              {showLiveStreamingTail && (
+                                <div
+                                  aria-hidden='true'
+                                  data-live-streaming-clearance='true'
+                                  style={{ height: liveStreamingBottomClearance }}
+                                />
+                              )}
                             </VirtualizedRowContainer>
                           )
                         }
@@ -6069,13 +6388,12 @@ function Chat() {
                               measureElement={virtualizer.measureElement}
                             >
                               <div className={`${showStreamingMessage ? 'pt-2' : 'pt-1'} pl-2`}>
-                                <StreamingLoadingAnimation
-                                  animationType={streamingAnimation}
-                                  color={
-                                    streamingAnimationThemeColor ||
-                                    (isDarkMode ? streamingAnimationDarkColor : streamingAnimationLightColor)
+                                <StreamingThinkingIndicator
+                                  style={
+                                    fontSizeOffset !== 0
+                                      ? { fontSize: `calc(0.75em + ${fontSizeOffset}px)` }
+                                      : undefined
                                   }
-                                  speed={streamingAnimationSpeed}
                                 />
                               </div>
                             </VirtualizedRowContainer>
@@ -6109,12 +6427,15 @@ function Chat() {
                                 <button
                                   onClick={() => toggleProcessMessageRun(runId)}
                                   className='flex items-center gap-2 group/run hover:opacity-80 transition-opacity cursor-pointer outline-none'
+                                  style={
+                                    fontSizeOffset !== 0 ? { fontSize: `calc(1em + ${fontSizeOffset}px)` } : undefined
+                                  }
                                 >
-                                  <span className='text-[10px] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
+                                  <span className='text-[0.625em] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
                                     Agent Steps ({row.messages.length})
                                   </span>
                                   {!isExpanded && summaryParts.length > 0 && (
-                                    <span className='text-xs text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[320px]'>
+                                    <span className='text-[0.75em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[320px]'>
                                       {summaryParts.join(' • ')}
                                     </span>
                                   )}
@@ -6263,6 +6584,10 @@ function Chat() {
                               isDarkMode={isDarkMode}
                               className={assistantContainerClassName}
                               userTurnElapsedLabel={userTurnElapsedLabelByMessageId.get(String(msg.id))}
+                              undoState={msg.role === 'user' ? getUndoStateForMessage(String(msg.id)) : undefined}
+                              onUndoStreamEdits={
+                                msg.role === 'user' ? () => handleUndoStreamEdits(String(msg.id)) : undefined
+                              }
                               onEdit={handleMessageEdit}
                               onBranch={handleMessageBranch}
                               onDelete={handleRequestDelete}
@@ -6282,7 +6607,7 @@ function Chat() {
             </React.Profiler>
 
             {/* Bottom sentinel and padding for scrolling past last message */}
-            <div ref={bottomRef} data-bottom-sentinel='true' style={{ height: Math.max(100, containerHeight - 300) }} />
+            <div ref={bottomRef} data-bottom-sentinel='true' style={{ height: bottomSentinelHeight }} />
           </div>
         </div>
         {/* Input area: controls row + textarea (absolutely positioned overlay) */}
@@ -6300,909 +6625,909 @@ function Chat() {
               className='absolute -top-12 right-5 z-20 !rounded-full !p-2 shadow-[0_12px_32px_-12px_rgba(0,0,0,0.45)] backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:bg-black/5 dark:hover:bg-white/5'
               aria-label='Scroll to latest messages'
               title='Scroll to bottom'
-              onClick={() => scrollToBottomNow('auto')}
+              onClick={() => {
+                userScrolledDuringStreamRef.current = false
+                markStreamingProgrammaticScroll()
+                if (showLiveStreamingTail) {
+                  scrollLiveTailToBottomOnce('auto')
+                } else {
+                  scrollToBottomNow('auto')
+                }
+              }}
             >
               <i className='bx bx-down-arrow-alt text-lg' aria-hidden='true'></i>
             </Button>
           )}
 
           {/* Textarea (bottom, grows upward because wrapper is bottom-pinned) */}
-          <div
-            className={`slate-input-wrapper ${inputAreaBorderClasses} bg-neutral-100/40 dark:bg-neutral-900/40 backdrop-blur-xl rounded-3xl px-2 py-3 shadow-[0_20px_50px_-12px_rgba(0,0,0,0.25)] dark:shadow-[0_20px_50px_-12px_rgba(0,0,0,0.5)] transition-all duration-300`}
-            style={
-              chatInputBorderAnimationEnabled
-                ? ({
-                    '--chat-input-border-light': effectiveChatInputBorderLightColor,
-                    '--chat-input-border-dark': effectiveChatInputBorderDarkColor,
-                  } as React.CSSProperties)
-                : useCustomInputAreaBorderColor && chatInputAreaBorderColor
-                  ? { outlineColor: chatInputAreaBorderColor }
-                  : undefined
-            }
-          >
-            {toolCallPermissionRequest && (
-              <ToolPermissionDialog
-                toolCall={toolCallPermissionRequest.toolCall}
-                onGrant={() => dispatch(respondToToolPermission(true))}
-                onDeny={() => dispatch(respondToToolPermission(false))}
-                onAllowAll={() => dispatch(respondToToolPermissionAndEnableAll())}
-              />
-            )}
-            {planClarificationRequest && (
-              <PlanClarificationPanel
-                request={planClarificationRequest}
-                onSubmit={(answers: PlanClarificationAnswer[]) => dispatch(respondToPlanClarification(answers))}
-                onCancel={() => dispatch(cancelPlanClarification())}
-              />
-            )}
-            {/* Todo List Display - shows latest todo_list tool result */}
-            {latestTodoList && latestTodoList.items && latestTodoList.items.length > 0 && (
-              <div
-                className={`mx-2 ${toolCallPermissionRequest ? 'mt-1' : 'mt-2'} mb-1 px-2 py-0.5 rounded-[16px] bg-neutral-100/80 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700`}
-              >
-                <div className='flex items-center justify-between'>
-                  <span className='text-xs font-medium text-neutral-600 dark:text-neutral-400 flex items-center gap-1.5'>
-                    <i className='bx bx-list-check text-2xl'></i>
-                    <span className='text-[12px]'>{latestTodoList.name || 'Todo List'}</span>
-                    {todoListCollapsed && (
-                      <span className='text-[10px] text-neutral-400 dark:text-neutral-500 ml-1'>
-                        ({latestTodoList.items.filter(i => i.done).length}/{latestTodoList.items.length})
-                      </span>
-                    )}
-                  </span>
-                  <div className='flex items-center gap-2'>
-                    <span className='text-[10px] text-neutral-400 dark:text-neutral-500'>
-                      {latestTodoList.action === 'create'
-                        ? 'Created'
-                        : latestTodoList.action === 'edit'
-                          ? 'Updated'
-                          : ''}
-                    </span>
-                    <button
-                      onClick={() => setTodoListCollapsed(!todoListCollapsed)}
-                      className='py-0.5 mt-1 px-2 rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors'
-                      title={todoListCollapsed ? 'Expand todo list' : 'Collapse todo list'}
-                    >
-                      <i
-                        className={`bx ${todoListCollapsed ? 'bx-chevron-down' : 'bx-chevron-up'} text-sm text-neutral-500`}
-                      ></i>
-                    </button>
-                  </div>
-                </div>
-                {!todoListCollapsed && (
-                  <ul className='space-y-1 pb-2 mt-1.5 max-h-40 overflow-y-auto thin-scrollbar'>
-                    {latestTodoList.items.map((item, idx) => (
-                      <li
-                        key={`todo-item-${idx}`}
-                        className={`flex items-center gap-2 text-xs ${
-                          item.done
-                            ? 'text-neutral-500 dark:text-neutral-400'
-                            : 'text-neutral-800 dark:text-neutral-200'
-                        }`}
-                      >
-                        <span className={item.done ? 'text-green-600 dark:text-green-400' : 'text-neutral-400'}>
-                          {item.done ? '[✓]' : '[ ]'}
-                        </span>
-                        <span className={item.done ? 'line-through opacity-80' : ''}>{item.text}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+          <div className='relative isolate'>
+            {showGenerationLoadingAnimation && showStreamingThinkingInputTab && (
+              <div className='absolute left-0 top-0 z-0 flex -translate-y-[calc(100%-8px)]'>
+                <StreamingThinkingIndicator variant='tab' />
               </div>
             )}
-            {branchFileMutationData.latestByPath.length > 0 && (
-              <div
-                className={`mx-2 ${latestTodoList && latestTodoList.items && latestTodoList.items.length > 0 ? 'mt-1' : toolCallPermissionRequest ? 'mt-1' : 'mt-2'} mb-1 px-1 py-1`}
-              >
-                <div className='flex items-center justify-between gap-3'>
-                  <span className='min-w-0 flex items-center gap-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-400'>
-                    <i className='bx bx-file text-base shrink-0'></i>
-                    <span className='truncate text-[12px]'>Modified Files</span>
-                    <span className='shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
-                      {branchFileMutationData.latestByPath.length} file
-                      {branchFileMutationData.latestByPath.length === 1 ? '' : 's'}
-                    </span>
-                  </span>
-                  <div className='flex shrink-0 items-center gap-2'>
-                    <button
-                      type='button'
-                      onClick={handleOpenWorkspaceMutationDiffs}
-                      className='text-[10px] font-medium text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
-                      title='Open modified files in Git diff'
-                    >
-                      Diffs
-                    </button>
-                    <button
-                      onClick={() => setWorkspaceMutationsCollapsed(!workspaceMutationsCollapsed)}
-                      className='rounded-md px-1 py-0.5 text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
-                      title={workspaceMutationsCollapsed ? 'Expand modified files' : 'Collapse modified files'}
-                    >
-                      <i
-                        className={`bx ${workspaceMutationsCollapsed ? 'bx-chevron-down' : 'bx-chevron-up'} text-sm transition-transform duration-300 ease-in-out`}
-                      ></i>
-                    </button>
-                  </div>
-                </div>
+
+            <div
+              aria-hidden='true'
+              className={`pointer-events-none absolute left-0 top-0 z-0 h-[9px] w-28 rounded-t-sm bg-neutral-100/40 backdrop-blur-xl dark:bg-neutral-900/40 ${
+                showGenerationLoadingAnimation && showStreamingThinkingInputTab ? 'block' : 'hidden'
+              }`}
+            />
+
+            <div
+              className={`slate-input-wrapper relative z-10 ${leftControlsBorderClasses} bg-neutral-100/40 dark:bg-neutral-900/40 backdrop-blur-xl rounded-3xl px-2 pt-3 pb-2 transition-all duration-300`}
+            >
+              {toolCallPermissionRequest && (
+                <ToolPermissionDialog
+                  toolCall={toolCallPermissionRequest.toolCall}
+                  onGrant={() => dispatch(respondToToolPermission(true))}
+                  onDeny={() => dispatch(respondToToolPermission(false))}
+                  onAllowAll={() => dispatch(respondToToolPermissionAndEnableAll())}
+                />
+              )}
+              {planClarificationRequest && (
+                <PlanClarificationPanel
+                  request={planClarificationRequest}
+                  onSubmit={(answers: PlanClarificationAnswer[]) => dispatch(respondToPlanClarification(answers))}
+                  onCancel={() => dispatch(cancelPlanClarification())}
+                />
+              )}
+              {/* Todo List / Modified Files Display */}
+              {showComposerSummaryPanels && (
                 <div
-                  className={`overflow-hidden transition-[max-height,opacity,margin] duration-300 ease-in-out ${
-                    workspaceMutationsCollapsed ? 'mt-0 max-h-0 opacity-0' : 'mt-1.5 max-h-44 opacity-100'
+                  className={`mx-2 ${toolCallPermissionRequest ? 'mt-1' : 'mt-2'} mb-1 ${
+                    showComposerSummaryPanelsAsRow ? 'flex gap-2' : 'block'
                   }`}
-                  aria-hidden={workspaceMutationsCollapsed}
                 >
-                  <ul className='space-y-1 max-h-40 overflow-y-auto pr-1 thin-scrollbar'>
-                    {branchFileMutationData.latestByPath.map(summary => {
-                      const latestMutation = summary.latestMutation
-                      const fileName = getWorkspaceFileBaseName(summary.path)
-                      return (
-                        <li key={`workspace-summary-${summary.path}`} className='px-1 py-1'>
-                          <div className='flex items-start gap-2'>
-                            <span
-                              className={`mt-0.5 inline-flex h-5 shrink-0 items-center rounded-full px-1.5 text-[9px] font-semibold leading-none ${getWorkspaceMutationBadgeClassName(latestMutation.operation)}`}
-                            >
-                              {getWorkspaceMutationLabel(latestMutation.operation)}
+                  {hasLatestTodoList && latestTodoList && (
+                    <div
+                      className={`${composerSummaryPanelClassName} rounded-[16px] bg-neutral-100/80 px-2 py-0.5 dark:bg-neutral-800/50`}
+                    >
+                      <div className='flex items-center justify-between gap-2'>
+                        <span className='flex min-w-0 items-center gap-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-400'>
+                          <i className='bx bx-list-check shrink-0 text-2xl'></i>
+                          <span className='truncate text-[12px]'>Todo list</span>
+                          {effectiveTodoListCollapsed && (
+                            <span className='ml-1 shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
+                              ({latestTodoList.items.filter(i => i.done).length}/{latestTodoList.items.length})
                             </span>
-                            <div className='min-w-0 flex-1'>
-                              <div className='flex items-center justify-between gap-2'>
-                                <div className='min-w-0 flex items-center gap-1.5'>
-                                  <span className='truncate text-xs font-medium text-neutral-800 dark:text-neutral-100'>
-                                    {fileName}
-                                  </span>
-                                  {summary.mutationCount > 1 && (
-                                    <span className='shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
-                                      ×{summary.mutationCount}
-                                    </span>
-                                  )}
-                                </div>
-                                <button
-                                  type='button'
-                                  onClick={() => handleOpenWorkspaceMutationDiffForPath(summary.path)}
-                                  className='shrink-0 text-[10px] font-medium text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
-                                  title={`Open diff for ${fileName}`}
-                                >
-                                  Diff
-                                </button>
-                              </div>
-                              <div className='mt-0.5 truncate text-[10px] text-neutral-500 dark:text-neutral-400'>
-                                {summary.path}
-                              </div>
-                            </div>
-                          </div>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                </div>
-              </div>
-            )}
-            {showOpenAIUsagePanel && (
-              <div className='mx-2 mt-2 mb-1 rounded-[16px] border border-neutral-200 dark:border-neutral-700 bg-neutral-100/90 dark:bg-neutral-800/60 px-3 py-2'>
-                <div className='flex items-start justify-between gap-3'>
-                  <div className='text-xs font-semibold text-neutral-700 dark:text-neutral-200'>OpenAI Usage</div>
-                  <button
-                    type='button'
-                    className='text-red-500 hover:text-red-400 text-xs font-semibold leading-none'
-                    aria-label='Close OpenAI usage panel'
-                    onClick={() => setShowOpenAIUsagePanel(false)}
-                  >
-                    X
-                  </button>
-                </div>
-
-                {openAIUsageLoading ? (
-                  <div className='mt-2 text-xs text-neutral-600 dark:text-neutral-300'>Loading usage…</div>
-                ) : openAIUsageError ? (
-                  <div className='mt-2 text-xs text-red-500'>{openAIUsageError}</div>
-                ) : openAIUsageData ? (
-                  <div className='mt-2 space-y-1 text-xs text-neutral-700 dark:text-neutral-200'>
-                    <div className='flex items-center justify-between gap-2'>
-                      <span className='text-neutral-500 dark:text-neutral-400'>Session</span>
-                      <span>
-                        {openAIUsageData.session.usedPercent == null
-                          ? '—'
-                          : `${Math.round(openAIUsageData.session.usedPercent)}%`}
-                      </span>
-                    </div>
-                    <div className='flex items-center justify-between gap-2'>
-                      <span className='text-neutral-500 dark:text-neutral-400'>Weekly</span>
-                      <span>
-                        {openAIUsageData.weekly.usedPercent == null
-                          ? '—'
-                          : `${Math.round(openAIUsageData.weekly.usedPercent)}%`}
-                      </span>
-                    </div>
-                    {openAIUsageData.reviews.usedPercent != null && (
-                      <div className='flex items-center justify-between gap-2'>
-                        <span className='text-neutral-500 dark:text-neutral-400'>Reviews</span>
-                        <span>{`${Math.round(openAIUsageData.reviews.usedPercent)}%`}</span>
-                      </div>
-                    )}
-                    {openAIUsageData.credits && openAIUsageData.credits.balance != null && (
-                      <div className='flex items-center justify-between gap-2'>
-                        <span className='text-neutral-500 dark:text-neutral-400'>Credits</span>
-                        <span>{openAIUsageData.credits.balance.toFixed(2)}</span>
-                      </div>
-                    )}
-                    {openAIUsageData.session.resetAtIso && (
-                      <div className='pt-1 text-[10px] text-neutral-500 dark:text-neutral-400'>
-                        Session reset: {new Date(openAIUsageData.session.resetAtIso).toLocaleString()}
-                      </div>
-                    )}
-                    {openAIUsageData.weekly.resetAtIso && (
-                      <div className='text-[10px] text-neutral-500 dark:text-neutral-400'>
-                        Weekly reset: {new Date(openAIUsageData.weekly.resetAtIso).toLocaleString()}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className='mt-2 text-xs text-neutral-600 dark:text-neutral-300'>No usage data available.</div>
-                )}
-              </div>
-            )}
-
-            {(benchEnabled || benchStatusMessage) && (
-              <div className='mx-2 mt-2 mb-1 rounded-[16px] border border-violet-300/80 dark:border-violet-600/50 bg-violet-100/70 dark:bg-violet-900/30 px-3 py-2'>
-                <div className='flex items-center justify-between gap-2'>
-                  <div className='text-xs font-semibold text-violet-700 dark:text-violet-300'>
-                    Benchmark {benchEnabled ? 'ON' : 'OFF'}
-                  </div>
-                  {benchEnabled && (
-                    <div className='text-[10px] text-violet-700/80 dark:text-violet-300/80'>
-                      commits {benchCommitDurationsRef.current.length} • derives{' '}
-                      {benchDeriveDurationsRef.current.length}
-                    </div>
-                  )}
-                </div>
-                {benchStatusMessage && (
-                  <div className='mt-1 text-[11px] text-violet-700 dark:text-violet-200'>{benchStatusMessage}</div>
-                )}
-              </div>
-            )}
-
-            {/* Textarea with shortcut hint */}
-            <div className=''>
-              <ChatInputController
-                ref={inputControllerRef}
-                conversationId={currentConversationId}
-                initialValue={messageInput.content}
-                onHasTextChange={setHasLocalInput}
-                onSubmit={handleComposerSubmit}
-                onBlurPersist={handleComposerBlurPersist}
-                slashCommands={composerSlashCommands}
-                onSlashCommandSelect={handleComposerSlashCommandSelect}
-                onAddCurrentIdeContext={addCurrentIdeContextToMessage}
-                onClearIdeContexts={clearIdeContexts}
-                selectedIdeContextItems={addedIdeContextItems}
-                fallbackFileSearchRoot={ccCwd}
-              />
-            </div>
-            {/* Selected file chips moved from InputTextArea */}
-            {selectedFilesForChat && selectedFilesForChat.length > 0 && (
-              <div className='m-2 flex flex-wrap gap-2'>
-                {selectedFilesForChat.map(file => {
-                  const displayName =
-                    file.name || file.relativePath.split('/').pop() || file.path.split('/').pop() || file.relativePath
-                  const directoryLabel =
-                    file.relativeDirectoryPath ||
-                    (file.relativePath.includes('/') ? file.relativePath.split('/').slice(0, -1).join('/') : '')
-                  const isExpanded = expandedFilePath === file.path
-                  const isClosing = closingFilePath === file.path
-                  const isOpening = openingFilePath === file.path
-                  return (
-                    <div
-                      key={file.path}
-                      className='relative group inline-flex max-w-full items-center gap-2 rounded-full bg-neutral-100/70 px-2.5 py-1 text-neutral-800 transition-all duration-150 hover:border-neutral-400 hover:bg-neutral-200/70 dark:border-neutral-700 dark:bg-neutral-900/70 dark:text-neutral-100 dark:hover:border-neutral-500 dark:hover:bg-neutral-800/80'
-                      title={file.relativePath || file.path}
-                      onClick={e => {
-                        if (!isExpanded) {
-                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-                          setExpandedAnchor({ left: rect.left, top: rect.top })
-                          setOpeningFilePath(file.path)
-                          setExpandedFilePath(file.path)
-                          // Clear opening state after transition completes
-                          window.setTimeout(() => setOpeningFilePath(null), 130)
-                        }
-                      }}
-                    >
-                      <span className='inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-500/15 text-[11px] text-blue-700 dark:bg-blue-400/15 dark:text-blue-300'>
-                        📄
-                      </span>
-                      <span className='flex min-w-0 flex-col max-w-[110px] sm:max-w-[170px] md:max-w-[250px]'>
-                        <span className='truncate text-[12px] font-medium leading-tight'>{displayName}</span>
-                        {directoryLabel ? (
-                          <span className='truncate font-mono text-[10px] leading-tight text-neutral-600/90 dark:text-neutral-400/90'>
-                            {directoryLabel}
+                          )}
+                        </span>
+                        <div className='flex shrink-0 items-center gap-2'>
+                          <span className='text-[10px] text-neutral-400 dark:text-neutral-500'>
+                            {latestTodoList.action === 'create'
+                              ? 'Created'
+                              : latestTodoList.action === 'edit'
+                                ? 'Updated'
+                                : ''}
                           </span>
-                        ) : null}
-                      </span>
-                      <button
-                        type='button'
-                        className='inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] text-neutral-500 transition-colors hover:bg-neutral-300/80 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-neutral-100'
-                        aria-label={`Remove ${displayName}`}
-                        onClick={e => {
-                          e.stopPropagation()
-                          handleRemoveFileSelection(file)
-                        }}
-                      >
-                        ✕
-                      </button>
-
-                      {/* Hover tooltip that can expand into anchored modal */}
-                      <div
-                        className={`absolute bottom-full left-0 mb-2 origin-bottom-left rounded-lg shadow-sm p-3 transform transition-all duration-100 ease-out ${
-                          isExpanded
-                            ? 'hidden'
-                            : 'z-50 dark:bg-neutral-900 bg-neutral-100 opacity-0 invisible scale-95 pointer-events-none w-64 sm:w-72 md:w-80 group-hover:opacity-100 group-hover:visible group-hover:scale-100'
-                        }`}
-                      >
-                        <div className='text-xs text-blue-600 dark:text-blue-300 font-medium mb-1 truncate'>
-                          {file.name || file.relativePath.split('/').pop() || file.path.split('/').pop()}
-                        </div>
-                        {directoryLabel ? (
-                          <div className='text-[10px] text-neutral-600 dark:text-neutral-400 mb-2 truncate'>
-                            {directoryLabel}
-                          </div>
-                        ) : null}
-                        <div
-                          className={`text-xs font-mono whitespace-pre-wrap break-words text-stone-800 dark:text-stone-300 ${isExpanded ? 'overflow-auto max-h-[60vh]' : isClosing ? 'overflow-hidden' : 'overflow-hidden line-clamp-6'} ${isOpening || isClosing ? 'opacity-50 ' : 'opacity-100 visible'} transition-opacity duration-50 overscroll-contain select-text`}
-                        >
-                          {file.contents}
-                        </div>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-
-            {/* Token Usage Progress Bar - Optional */}
-            {showTokenUsageBar && (
-              <div className='mx-1 mb-0.5 group relative cursor-pointer'>
-                <div className='flex items-center gap-2'>
-                  <div className='flex-1 h-1 bg-neutral-300/50 dark:bg-neutral-700/50 rounded-full overflow-hidden relative'>
-                    <div
-                      className={`absolute inset-0 h-full rounded-full transition-all duration-300 ${
-                        customThemeEnabled
-                          ? ''
-                          : totalContextProgress >= 95
-                            ? 'bg-red-500 dark:bg-red-400'
-                            : totalContextProgress >= 80
-                              ? 'bg-amber-500 dark:bg-amber-400'
-                              : 'bg-blue-500 dark:bg-blue-400'
-                      }`}
-                      style={{
-                        width: `${totalContextProgress}%`,
-                        ...(customThemeEnabled && chatProgressBarFillColor
-                          ? { backgroundColor: chatProgressBarFillColor }
-                          : {}),
-                      }}
-                    />
-                  </div>
-                  {/* Refresh credits button */}
-                  <button
-                    onClick={handleRefreshCredits}
-                    disabled={isRefreshingCredits}
-                    className='p-1 rounded-full hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors disabled:opacity-50'
-                    title='Refresh credits'
-                  >
-                    <svg
-                      className={`w-3 h-3 text-neutral-500 dark:text-neutral-400 ${isRefreshingCredits ? 'animate-spin' : ''}`}
-                      fill='none'
-                      stroke='currentColor'
-                      viewBox='0 0 24 24'
-                    >
-                      <path
-                        strokeLinecap='round'
-                        strokeLinejoin='round'
-                        strokeWidth={2}
-                        d='M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15'
-                      />
-                    </svg>
-                  </button>
-                </div>
-                {/* Hover Popup with Token Details */}
-                {showTokenUsageHoverDetails && (
-                  <div className='absolute left-1/2 -translate-x-1/2 bottom-full mb-2 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50'>
-                    <div className='bg-neutral-100 dark:bg-neutral-900 text-black dark:text-white rounded-lg shadow-lg px-3 py-2 whitespace-nowrap'>
-                    <div className='flex items-center gap-2 text-xs'>
-                      <span className='text-blue-700 dark:text-blue-400'>Context:</span>
-                      <span>
-                        {tokenUsage.totalContextTokens.toLocaleString()} / {tokenLimits.totalBudget.toLocaleString()}
-                      </span>
-                    </div>
-                    <div className='flex items-center gap-2 text-xs mt-1'>
-                      <span className='text-neutral-700 dark:text-neutral-300'>Messages:</span>
-                      <span>{tokenUsage.messageTokens.toLocaleString()}</span>
-                    </div>
-                    <div className='flex items-center gap-2 text-xs mt-1'>
-                      <span className='text-neutral-700 dark:text-neutral-300'>Prompts + Context:</span>
-                      <span>{tokenUsage.promptAndContextTokens.toLocaleString()}</span>
-                    </div>
-                    <div className='flex items-center gap-2 text-xs mt-1'>
-                      <span className='text-neutral-700 dark:text-neutral-300'>Model window:</span>
-                      <span>{tokenLimits.totalContextLimit.toLocaleString()}</span>
-                    </div>
-                    <div className='flex items-center gap-2 text-xs mt-1'>
-                      <span className='text-neutral-900 dark:text-neutral-200'>Credits:</span>
-                      <span>{(current_credits * 100).toFixed(3)}</span>
-                    </div>
-                    {/* Tooltip Arrow */}
-                      <div className='absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-l-4 border-r-4 border-t-4 border-l-transparent border-r-transparent border-t-neutral-800 dark:border-t-neutral-900' />
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-            {/* Controls row */}
-            <div className='flex items-center justify-between gap-0 flex-wrap'>
-              {/* Left side controls */}
-              <div className='flex items-center min-w-0 flex-1 overflow-hidden'>
-                <button
-                  className='pt-1.5 px-2 rounded-lg text-neutral-500 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-white/10 dark:hover:bg-white/5 transition-all duration-200'
-                  onClick={() => {
-                    setSpinSettings(true)
-                    setSettingsOpen(true)
-                  }}
-                  title='Chat Settings'
-                >
-                  <Settings
-                    className={`h-5 w-5 ${spinSettings ? 'animate-[spin_0.6s_linear_1]' : ''}`}
-                    strokeWidth={2.25}
-                    aria-hidden='true'
-                    onAnimationEnd={() => setSpinSettings(false)}
-                  />
-                </button>
-                <div className='flex items-center gap-1 flex-nowrap min-w-0 flex-1 overflow-hidden'>
-                  {import.meta.env.VITE_ENVIRONMENT === 'electron' && extensions.length > 0 && (
-                    <Select
-                      value={selectedExtensionId || ''}
-                      onChange={handleExtensionSelection}
-                      blur='low'
-                      options={
-                        extensions.length > 0
-                          ? extensions.map(ext => ({
-                              value: ext.id,
-                              label: ext.workspaceName || `Extension ${ext.id.slice(0, 6)}`,
-                            }))
-                          : [{ value: '', label: 'No extensions connected' }]
-                      }
-                      placeholder='Select extension'
-                      disabled={extensions.length === 0}
-                      className='flex-1 basis-0 min-w-0 max-w-[200px] ml-2 text-xs sm:text-sm text-[14px] sm:text-[12px] md:text-[12px] lg:text-[12px] xl:text-[12px] 2xl:text-[13px] 3xl:text-[12px] 4xl:text-[22px] dark:text-neutral-200 break-words line-clamp-1 text-right'
-                      size='small'
-                    />
-                  )}
-
-                  {/* Provider selector - visibility controlled by user settings */}
-                  {import.meta.env.VITE_ENVIRONMENT === 'electron' && providerSettings.showProviderSelector && (
-                    <Select
-                      value={providers.currentProvider || ''}
-                      onChange={handleProviderSelect}
-                      options={providers.providers.map(p => p.name)}
-                      placeholder='Select a provider...'
-                      disabled={providers.providers.length === 0}
-                      className='w-[94px] min-w-[42px] max-w-[180px] shrink transition-[width,transform] duration-150 hover:w-[180px] focus-within:w-[180px] data-[open=true]:w-[180px] active:scale-97'
-                      searchBarVisible={true}
-                      size='large'
-                      dropdownMinWidth={220}
-                    />
-                  )}
-                  <ModelSelectControl
-                    provider={providers.currentProvider}
-                    selectedModelName={selectedModel?.name || ''}
-                    onChange={handleModelSelect}
-                    placeholder='Select a model...'
-                    blur='low'
-                    className='w-[120px] min-w-[42px] max-w-[170px] shrink transition-[width,transform] duration-150 hover:w-[170px] focus-within:w-[170px] data-[open=true]:w-[170px] active:scale-99 rounded-4xl'
-                    showFilters={true}
-                    footerContent={modelSelectFooter}
-                  />
-                </div>
-              </div>
-              {/* Right side controls */}
-              <div className='flex items-center gap-1 mr-2'>
-                {(isImageGenerationModel ||
-                  think ||
-                  (import.meta.env.VITE_ENVIRONMENT === 'electron' && conversationIdFromUrl)) && (
-                  <ActionPopover
-                    isActive={
-                      toolAutoApprove ||
-                      operationMode === 'plan' ||
-                      hermesMode ||
-                      !!imageConfig.aspectRatio ||
-                      !!imageConfig.imageSize ||
-                      (isOpenAIChatGPTProvider && fastServiceTierEnabled) ||
-                      (think && reasoningConfig.effort !== 'medium')
-                    }
-                    footer={
-                      <div className='flex flex-col gap-2'>
-                        {import.meta.env.VITE_ENVIRONMENT === 'electron' && conversationIdFromUrl && (
-                          <>
-                            <span className='text-black dark:text-neutral-200 text-[16px]'>Agent backend:</span>
-                            <Select
-                              value={hermesMode ? 'hermes' : 'default'}
-                              options={[
-                                { value: 'default', label: 'Default model backend' },
-                                { value: 'hermes', label: 'Hermes ACP backend' },
-                              ]}
-                              onChange={value => setHermesModeEnabled(value === 'hermes')}
-                              placeholder='Select backend'
-                              size='small'
-                              dropdownZIndex={ACTION_POPOVER_SELECT_DROPDOWN_Z_INDEX}
-                              disabled={!hermesModeAvailable}
-                            />
-
-                            <span className='text-black dark:text-neutral-200 text-[16px]'>Work directory:</span>
-                            <div className='flex gap-2'>
-                              <input
-                                type='text'
-                                value={ccCwd}
-                                onChange={e => setCcCwdFromUser(e.target.value)}
-                                placeholder='Working directory (optional)'
-                                className='flex-1 px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-900 rounded-lg bg-white dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-orange-500/60'
-                                style={
-                                  actionPopoverInputBorderColor
-                                    ? { borderColor: actionPopoverInputBorderColor }
-                                    : undefined
-                                }
-                                title='Specify the working directory used by local agent backends'
-                              />
-                              <button
-                                type='button'
-                                onClick={handleSelectProjectFolder}
-                                className='px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-900 rounded-lg bg-white dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-orange-500/60'
-                                style={
-                                  actionPopoverInputBorderColor
-                                    ? { borderColor: actionPopoverInputBorderColor }
-                                    : undefined
-                                }
-                                title='Select Folder to let the AI work in'
-                              >
-                                <svg
-                                  xmlns='http://www.w3.org/2000/svg'
-                                  className='h-4 w-4'
-                                  fill='none'
-                                  viewBox='0 0 24 24'
-                                  stroke='currentColor'
-                                >
-                                  <path
-                                    strokeLinecap='round'
-                                    strokeLinejoin='round'
-                                    strokeWidth={2}
-                                    d='M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z'
-                                  />
-                                </svg>
-                              </button>
-                            </div>
-                          </>
-                        )}
-
-                        {/* Image Generation Options - shown only for image generation models */}
-                        {isImageGenerationModel && (
-                          <>
-                            <h1 className='text-black dark:text-neutral-200 text-[16px]'>Image Options</h1>
-                            <div className='flex flex-col gap-1'>
-                              <label className='text-xs text-neutral-500 dark:text-neutral-400'>Aspect Ratio</label>
-                              <Select
-                                value={imageConfig.aspectRatio || ''}
-                                options={[
-                                  { value: '', label: 'Default' },
-                                  { value: '1:1', label: '1:1 (Square)' },
-                                  { value: '16:9', label: '16:9 (Landscape)' },
-                                  { value: '9:16', label: '9:16 (Portrait)' },
-                                  { value: '4:3', label: '4:3' },
-                                  { value: '3:4', label: '3:4' },
-                                  { value: '3:2', label: '3:2' },
-                                  { value: '2:3', label: '2:3' },
-                                  { value: '4:5', label: '4:5' },
-                                  { value: '5:4', label: '5:4' },
-                                  { value: '21:9', label: '21:9 (Ultrawide)' },
-                                ]}
-                                onChange={value =>
-                                  setImageConfig(prev => ({
-                                    ...prev,
-                                    aspectRatio: (value as ImageConfig['aspectRatio']) || undefined,
-                                  }))
-                                }
-                                placeholder='Select aspect ratio'
-                                size='small'
-                                dropdownZIndex={ACTION_POPOVER_SELECT_DROPDOWN_Z_INDEX}
-                              />
-                            </div>
-                            <div className='flex flex-col gap-1'>
-                              <label className='text-xs text-neutral-500 dark:text-neutral-400'>Image Size</label>
-                              <Select
-                                value={imageConfig.imageSize || ''}
-                                options={[
-                                  { value: '', label: 'Default' },
-                                  { value: '1K', label: '1K' },
-                                  { value: '2K', label: '2K' },
-                                  { value: '4K', label: '4K' },
-                                ]}
-                                onChange={value =>
-                                  setImageConfig(prev => ({
-                                    ...prev,
-                                    imageSize: (value as ImageConfig['imageSize']) || undefined,
-                                  }))
-                                }
-                                placeholder='Select image size'
-                                size='small'
-                                dropdownZIndex={ACTION_POPOVER_SELECT_DROPDOWN_Z_INDEX}
-                              />
-                            </div>
-                          </>
-                        )}
-                        {/* Reasoning Effort Options - shown when thinking is enabled */}
-                        {selectedModel?.thinking && (
-                          <>
-                            <h1 className='text-black dark:text-neutral-200 text-[16px]'>Reasoning Options</h1>
-                            <div className='flex flex-col gap-1'>
-                              <label className='text-xs text-neutral-500 dark:text-neutral-400'>Effort Level</label>
-                              <Select
-                                value={reasoningConfig.effort}
-                                options={REASONING_EFFORT_OPTIONS.map(option => ({
-                                  value: option,
-                                  label:
-                                    option === 'medium'
-                                      ? 'Medium (Default)'
-                                      : option === 'xhigh'
-                                        ? 'X-High'
-                                        : option.charAt(0).toUpperCase() + option.slice(1),
-                                }))}
-                                onChange={value =>
-                                  setReasoningConfig(prev => ({
-                                    ...prev,
-                                    effort: value as ReasoningConfig['effort'],
-                                  }))
-                                }
-                                placeholder='Select effort level'
-                                size='small'
-                                dropdownZIndex={ACTION_POPOVER_SELECT_DROPDOWN_Z_INDEX}
-                              />
-                            </div>
-                            <div className='flex items-center justify-between gap-3'>
-                              <div className='flex flex-col'>
-                                <span className='text-xs text-neutral-500 dark:text-neutral-400'>Fast mode</span>
-                                <span className='text-[11px] text-neutral-400 dark:text-neutral-500'>
-                                  {isOpenAIChatGPTProvider
-                                    ? 'Use OpenAI priority service tier'
-                                    : 'Only sent for OpenAI ChatGPT provider'}
-                                </span>
-                              </div>
-                              <button
-                                type='button'
-                                disabled={!isOpenAIChatGPTProvider}
-                                onClick={() => {
-                                  if (!isOpenAIChatGPTProvider) return
-                                  setFastServiceTierEnabled(prev => {
-                                    const next = !prev
-                                    try {
-                                      window.localStorage.setItem('chat:openaiFastServiceTier', String(next))
-                                    } catch {}
-                                    return next
-                                  })
-                                }}
-                                className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-                                  isOpenAIChatGPTProvider && fastServiceTierEnabled
-                                    ? 'bg-blue-600'
-                                    : 'bg-neutral-300 dark:bg-neutral-600'
-                                } ${!isOpenAIChatGPTProvider ? 'cursor-not-allowed opacity-50' : ''}`}
-                                title={
-                                  !isOpenAIChatGPTProvider
-                                    ? 'Fast service tier is only sent for OpenAI ChatGPT, not OpenRouter'
-                                    : fastServiceTierEnabled
-                                      ? 'Fast OpenAI service tier enabled'
-                                      : 'Use standard OpenAI service tier'
-                                }
-                              >
-                                <span
-                                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                                    isOpenAIChatGPTProvider && fastServiceTierEnabled
-                                      ? 'translate-x-4'
-                                      : 'translate-x-0.5'
-                                  }`}
-                                />
-                              </button>
-                            </div>
-                          </>
-                        )}
-                        {/* Orchestrator Mode Toggle */}
-                        <div className='flex items-center gap-2'>
-                          <span className='text-xs text-neutral-500 dark:text-neutral-400'>Orchestrator</span>
                           <button
-                            onClick={() => {
-                              const newState = toggleOrchestratorEnabled()
-                              setOrchestratorEnabledState(newState)
-                            }}
-                            className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                              orchestratorEnabled ? 'bg-blue-600' : 'bg-neutral-300 dark:bg-neutral-600'
-                            }`}
-                            title={
-                              orchestratorEnabled
-                                ? 'Subagent can use tools (click to disable)'
-                                : 'Subagent cannot use tools (click to enable)'
-                            }
+                            onClick={() => toggleTodoListCollapsed()}
+                            className='mt-1 rounded-lg px-2 py-0.5 transition-colors hover:bg-neutral-200 dark:hover:bg-neutral-700'
+                            title={effectiveTodoListCollapsed ? 'Expand todo list' : 'Collapse todo list'}
                           >
-                            <span
-                              className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                                orchestratorEnabled ? 'translate-x-4.5' : 'translate-x-1'
-                              }`}
-                            />
+                            <i
+                              className={`bx ${effectiveTodoListCollapsed ? 'bx-chevron-down' : 'bx-chevron-up'} text-sm text-neutral-500`}
+                            ></i>
                           </button>
                         </div>
                       </div>
-                    }
-                  >
-                    {import.meta.env.VITE_ENVIRONMENT === 'electron' && conversationIdFromUrl && (
-                      <>
-                        <Button
-                          variant='outline2'
-                          className='rounded-full'
-                          size='medium'
-                          onClick={() => setJobsModalOpen(true)}
-                          title={isElectronEnv ? 'View tool jobs' : 'Tool jobs are available in the desktop app'}
-                          disabled={!isElectronEnv}
-                        >
-                          <i className='bx bx-task pb-0.5' aria-hidden='true'></i>
-                          Jobs
-                        </Button>
-                        {/* Allow All / Ask toggle */}
-                        <Button
-                          variant='outline2'
-                          size='medium'
-                          onClick={() => dispatch(chatSliceActions.toolAutoApproveToggled())}
-                          className={
-                            toolAutoApprove
-                              ? customThemeEnabled
-                                ? 'dark:hover:bg-white/5'
-                                : 'text-orange-700 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/20 dark:hover:bg-white/5'
-                              : 'text-neutral-600 dark:text-neutral-200 dark:hover:bg-white/5'
-                          }
-                          style={toolAutoApprove && customThemeEnabled ? composerToggleActiveStyle : undefined}
-                          title={
-                            toolAutoApprove
-                              ? 'Auto-approving tools (click to disable)'
-                              : 'Asking for permission (click to auto-approve)'
-                          }
-                          aria-label={toolAutoApprove ? 'Disable auto-approve' : 'Enable auto-approve'}
-                        >
-                          <i className='bx bx-shield-quarter pr-1 pb-0.5'></i>
-                          {toolAutoApprove ? 'Allow all' : 'Ask'}
-                        </Button>
-
-                        {/* Chat / Agent toggle */}
-                        <Button
-                          variant='outline2'
-                          size='medium'
-                          onClick={() => dispatch(chatSliceActions.operationModeToggled())}
-                          className={
-                            operationMode === 'plan'
-                              ? 'text-fuchsia-700 dark:text-fuchsia-300 bg-blue-50 dark:bg-blue-900/30 hover:bg-blue-100 dark:hover:bg-white/5'
-                              : customThemeEnabled
-                                ? 'hover:bg-neutral-100 dark:hover:bg-white/5'
-                                : 'text-orange-700 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/20 hover:bg-orange-100 dark:hover:bg-white/5'
-                          }
-                          style={operationMode !== 'plan' && customThemeEnabled ? composerToggleActiveStyle : undefined}
-                          title={
-                            operationMode === 'plan'
-                              ? 'Plan mode enabled (tools will be blocked)'
-                              : 'Execution mode enabled (tools may modify files)'
-                          }
-                          aria-label={operationMode === 'plan' ? 'Switch to execution mode' : 'Switch to plan mode'}
-                        >
-                          <i
-                            className={`bx ${operationMode === 'plan' ? 'bx-clipboard' : 'bx-code-block'} mr-1 pb-0.5`}
-                          ></i>
-                          {operationMode === 'plan' ? 'Chat' : 'Agent'}
-                        </Button>
-                      </>
-                    )}
-                  </ActionPopover>
-                )}
-                {/* Thinking toggle - next to popover, disabled when not supported */}
-                <button
-                  className={`p-2 rounded-lg transition-all duration-200 ${
-                    selectedModel?.thinking
-                      ? 'text-neutral-500 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-white/10 dark:hover:bg-white/5'
-                      : 'text-neutral-300 dark:text-neutral-600 cursor-not-allowed'
-                  }`}
-                  onClick={() => setThink(t => !t)}
-                  disabled={!selectedModel?.thinking}
-                  title={selectedModel?.thinking ? 'Enable thinking' : 'Thinking not supported by this model'}
-                >
-                  {think ? (
-                    <>
-                      <img
-                        src={getAssetPath('img/thinkingonlightmode.svg')}
-                        alt='Thinking active'
-                        className='w-[22px] h-[22px] dark:hidden'
-                      />
-                      <img
-                        src={getAssetPath('img/thinkingondarkmode.svg')}
-                        alt='Thinking active'
-                        className='w-[22px] h-[22px] hidden dark:block'
-                      />
-                    </>
-                  ) : (
-                    <>
-                      <img
-                        src={getAssetPath('img/thinkingofflightmode.svg')}
-                        alt='Thinking'
-                        className='w-[22px] h-[22px] dark:hidden'
-                      />
-                      <img
-                        src={getAssetPath('img/thinkingoffdarkmode.svg')}
-                        alt='Thinking'
-                        className='w-[22px] h-[22px] hidden dark:block'
-                      />
-                    </>
+                      {!effectiveTodoListCollapsed && (
+                        <ul className='mt-1.5 max-h-40 space-y-1 overflow-y-auto pb-2 thin-scrollbar'>
+                          {latestTodoList.items.map((item, idx) => (
+                            <li
+                              key={`todo-item-${idx}`}
+                              className={`flex min-w-0 items-center gap-2 text-xs ${
+                                item.done
+                                  ? 'text-neutral-500 dark:text-neutral-400'
+                                  : 'text-neutral-800 dark:text-neutral-200'
+                              }`}
+                            >
+                              <span
+                                className={`shrink-0 whitespace-nowrap ${
+                                  item.done ? 'text-green-600 dark:text-green-400' : 'text-neutral-400'
+                                }`}
+                              >
+                                {item.done ? '[✓]' : '[ ]'}
+                              </span>
+                              <span className={`min-w-0 flex-1 truncate ${item.done ? 'line-through opacity-80' : ''}`}>
+                                {item.text}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
                   )}
-                </button>
-                {/* Attachment upload button */}
-                <input
-                  ref={attachmentInputRef}
-                  type='file'
-                  accept='application/pdf,image/*'
-                  multiple
-                  onChange={handleAttachmentInputChange}
-                  className='hidden'
-                  aria-hidden='true'
+                  {hasBranchFileMutations && (
+                    <div
+                      className={`${composerSummaryPanelClassName} rounded-[16px] bg-neutral-100/80 px-2 py-1 dark:bg-neutral-800/50`}
+                    >
+                      <div className='flex items-center justify-between gap-3'>
+                        <span className='min-w-0 flex items-center gap-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-400'>
+                          <i className='bx bx-file shrink-0 text-base'></i>
+                          <span className='truncate text-[12px]'>Modified Files</span>
+                          <span className='translate-y-px shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
+                            {branchFileMutationData.latestByPath.length} file
+                            {branchFileMutationData.latestByPath.length === 1 ? '' : 's'}
+                          </span>
+                        </span>
+                        <div className='flex shrink-0 items-center gap-2'>
+                          <button
+                            type='button'
+                            onClick={handleOpenWorkspaceMutationDiffs}
+                            className='text-[10px] font-medium text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
+                            title='Open modified files in Git diff'
+                          >
+                            Diffs
+                          </button>
+                          <button
+                            onClick={() => toggleWorkspaceMutationsCollapsed()}
+                            className='rounded-md px-1 py-0.5 text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
+                            title={
+                              effectiveWorkspaceMutationsCollapsed ? 'Expand modified files' : 'Collapse modified files'
+                            }
+                          >
+                            <i
+                              className={`bx ${effectiveWorkspaceMutationsCollapsed ? 'bx-chevron-down' : 'bx-chevron-up'} translate-y-px text-sm transition-transform duration-300 ease-in-out`}
+                            ></i>
+                          </button>
+                        </div>
+                      </div>
+                      <div
+                        className={`overflow-hidden transition-[max-height,opacity,margin] duration-300 ease-in-out ${
+                          effectiveWorkspaceMutationsCollapsed
+                            ? 'mt-0 max-h-0 opacity-0'
+                            : 'mt-1.5 max-h-44 opacity-100'
+                        }`}
+                        aria-hidden={effectiveWorkspaceMutationsCollapsed}
+                      >
+                        <ul className='max-h-40 space-y-1 overflow-y-auto pr-1 thin-scrollbar'>
+                          {branchFileMutationData.latestByPath.map(summary => {
+                            const latestMutation = summary.latestMutation
+                            const fileName = getWorkspaceFileBaseName(summary.path)
+                            return (
+                              <li key={`workspace-summary-${summary.path}`} className='px-1 py-1'>
+                                <div className='flex items-center gap-2'>
+                                  <span
+                                    className={`inline-flex h-5 shrink-0 items-center justify-center rounded-full px-1.5 text-[9px] font-semibold leading-none ${getWorkspaceMutationBadgeClassName(latestMutation.operation)}`}
+                                  >
+                                    {getWorkspaceMutationLabel(latestMutation.operation)}
+                                  </span>
+                                  <div className='min-w-0 flex-1'>
+                                    <div className='flex items-center justify-between gap-2'>
+                                      <div className='min-w-0 flex items-center gap-1.5'>
+                                        <span className='truncate text-[12px] font-medium text-neutral-800 dark:text-neutral-100'>
+                                          {fileName}
+                                        </span>
+                                        {summary.mutationCount > 1 && (
+                                          <span className='shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
+                                            ×{summary.mutationCount}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <button
+                                        type='button'
+                                        onClick={() => handleOpenWorkspaceMutationDiffForPath(summary.path)}
+                                        className='shrink-0 text-[12px] font-medium text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
+                                        title={`Open diff for ${fileName}`}
+                                      >
+                                        Diff
+                                      </button>
+                                    </div>
+                                    <div className='mt-0.5 truncate text-[10px] text-neutral-500 dark:text-neutral-400'>
+                                      {summary.path}
+                                    </div>
+                                  </div>
+                                </div>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              {showOpenAIUsagePanel && (
+                <div className='mx-2 mt-2 mb-1 rounded-[24px] bg-neutral-100/75 px-3 py-3 backdrop-blur-xl dark:bg-neutral-900/55'>
+                  <div className='flex items-start justify-between gap-3'>
+                    <div className='min-w-0'>
+                      <div className='text-xs font-semibold text-neutral-900 dark:text-neutral-100'>Codex usage</div>
+                      <div className='mt-0.5 text-[10px] text-neutral-500 dark:text-neutral-400'>
+                        {openAIUsageData?.planType ? `${openAIUsageData.planType} plan` : 'ChatGPT account limits'}
+                      </div>
+                    </div>
+                    <button
+                      type='button'
+                      className='inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/65 text-neutral-500 transition-all duration-200 hover:scale-105 hover:bg-white hover:text-neutral-900 active:scale-95 dark:bg-white/10 dark:text-neutral-400 dark:hover:bg-white/15 dark:hover:text-neutral-100'
+                      aria-label='Close OpenAI usage panel'
+                      onClick={() => setShowOpenAIUsagePanel(false)}
+                    >
+                      ×
+                    </button>
+                  </div>
+
+                  {openAIUsageLoading ? (
+                    <div className='mt-3 space-y-2'>
+                      {[0, 1].map(index => (
+                        <div key={`usage-loading-${index}`} className='rounded-2xl bg-white/45 px-3 py-2.5 dark:bg-black/20'>
+                          <div className='h-3 w-24 animate-pulse rounded-full bg-neutral-300/70 dark:bg-neutral-700/70' />
+                          <div className='mt-3 grid grid-cols-[repeat(14,minmax(0,1fr))] gap-1'>
+                            {Array.from({ length: 14 }).map((_, segmentIndex) => (
+                              <div
+                                key={`usage-loading-${index}-${segmentIndex}`}
+                                className='h-2 animate-pulse rounded-full bg-neutral-300/45 dark:bg-white/10'
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : openAIUsageError ? (
+                    <div className='mt-3 rounded-2xl bg-rose-500/10 px-3 py-2 text-xs text-rose-600 dark:text-rose-300'>
+                      {openAIUsageError}
+                    </div>
+                  ) : openAIUsageData ? (
+                    <div className='mt-3 space-y-2'>
+                      <OpenAIUsageMeter
+                        label='Session'
+                        usedPercent={openAIUsageData.session.usedPercent}
+                        resetAtIso={openAIUsageData.session.resetAtIso}
+                        note='Primary Codex window'
+                      />
+                      <OpenAIUsageMeter
+                        label='Weekly'
+                        usedPercent={openAIUsageData.weekly.usedPercent}
+                        resetAtIso={openAIUsageData.weekly.resetAtIso}
+                        note='Secondary limit window'
+                      />
+                      {openAIUsageData.reviews.usedPercent != null && (
+                        <OpenAIUsageMeter
+                          label='Reviews'
+                          usedPercent={openAIUsageData.reviews.usedPercent}
+                          resetAtIso={openAIUsageData.reviews.resetAtIso}
+                          note='Code review allowance'
+                        />
+                      )}
+                      {openAIUsageData.credits && openAIUsageData.credits.balance != null && (
+                        <div className='flex items-center justify-between gap-3 rounded-2xl bg-white/45 px-3 py-2 text-xs text-neutral-700 dark:bg-black/20 dark:text-neutral-200'>
+                          <span className='text-neutral-500 dark:text-neutral-400'>Credits</span>
+                          <span className='font-semibold tabular-nums'>{openAIUsageData.credits.balance.toFixed(2)}</span>
+                        </div>
+                      )}
+                      <div className='text-[10px] text-neutral-500 dark:text-neutral-500'>
+                        Updated {new Date(openAIUsageData.fetchedAtIso).toLocaleTimeString()}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className='mt-3 rounded-2xl bg-white/45 px-3 py-2 text-xs text-neutral-600 dark:bg-black/20 dark:text-neutral-300'>
+                      No usage data available.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {(benchEnabled || benchStatusMessage) && (
+                <div className='mx-2 mt-2 mb-1 rounded-[16px] border border-violet-300/80 dark:border-violet-600/50 bg-violet-100/70 dark:bg-violet-900/30 px-3 py-2'>
+                  <div className='flex items-center justify-between gap-2'>
+                    <div className='text-xs font-semibold text-violet-700 dark:text-violet-300'>
+                      Benchmark {benchEnabled ? 'ON' : 'OFF'}
+                    </div>
+                    {benchEnabled && (
+                      <div className='text-[10px] text-violet-700/80 dark:text-violet-300/80'>
+                        commits {benchCommitDurationsRef.current.length} • derives{' '}
+                        {benchDeriveDurationsRef.current.length}
+                      </div>
+                    )}
+                  </div>
+                  {benchStatusMessage && (
+                    <div className='mt-1 text-[11px] text-violet-700 dark:text-violet-200'>{benchStatusMessage}</div>
+                  )}
+                </div>
+              )}
+
+              {/* Textarea with shortcut hint */}
+              <div className=''>
+                <ChatInputController
+                  ref={inputControllerRef}
+                  conversationId={currentConversationId}
+                  initialValue={messageInput.content}
+                  onHasTextChange={setHasLocalInput}
+                  onSubmit={handleComposerSubmit}
+                  onBlurPersist={handleComposerBlurPersist}
+                  slashCommands={composerSlashCommands}
+                  onSlashCommandSelect={handleComposerSlashCommandSelect}
+                  onAddCurrentIdeContext={addCurrentIdeContextToMessage}
+                  onClearIdeContexts={clearIdeContexts}
+                  selectedIdeContextItems={addedIdeContextItems}
+                  fallbackFileSearchRoot={ccCwd}
+                  filterSelectedMentionFiles={showAddedFilesPills}
+                  imageDraftTarget={{ kind: 'composer' }}
+                  fontSizeOffset={fontSizeOffset}
                 />
-                <button
-                  className='p-2 rounded-lg text-neutral-500 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-white/10 dark:hover:bg-white/5 transition-all duration-200'
-                  onClick={() => attachmentInputRef.current?.click()}
-                  title='Attach files'
+              </div>
+              {/* Selected file chips moved from InputTextArea */}
+              {showAddedFilesPills && selectedFilesForChat && selectedFilesForChat.length > 0 && (
+                <div className='m-2 flex flex-wrap gap-2'>
+                  {selectedFilesForChat.map(file => {
+                    const displayName =
+                      file.name || file.relativePath.split('/').pop() || file.path.split('/').pop() || file.relativePath
+                    const directoryLabel =
+                      file.relativeDirectoryPath ||
+                      (file.relativePath.includes('/') ? file.relativePath.split('/').slice(0, -1).join('/') : '')
+                    const isExpanded = expandedFilePath === file.path
+                    const isClosing = closingFilePath === file.path
+                    const isOpening = openingFilePath === file.path
+                    return (
+                      <div
+                        key={file.path}
+                        className='relative group inline-flex max-w-full items-center gap-2 rounded-full bg-neutral-100/70 px-2.5 py-1 text-neutral-800 transition-all duration-150 hover:border-neutral-400 hover:bg-neutral-200/70 dark:border-neutral-700 dark:bg-neutral-900/70 dark:text-neutral-100 dark:hover:border-neutral-500 dark:hover:bg-neutral-800/80'
+                        title={file.relativePath || file.path}
+                        onClick={e => {
+                          if (!isExpanded) {
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                            setExpandedAnchor({ left: rect.left, top: rect.top })
+                            setOpeningFilePath(file.path)
+                            setExpandedFilePath(file.path)
+                            // Clear opening state after transition completes
+                            window.setTimeout(() => setOpeningFilePath(null), 130)
+                          }
+                        }}
+                      >
+                        <span className='inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-500/15 text-[11px] text-blue-700 dark:bg-blue-400/15 dark:text-blue-300'>
+                          📄
+                        </span>
+                        <span className='flex min-w-0 flex-col max-w-[110px] sm:max-w-[170px] md:max-w-[250px]'>
+                          <span className='truncate text-[12px] font-medium leading-tight'>{displayName}</span>
+                          {directoryLabel ? (
+                            <span className='truncate font-mono text-[10px] leading-tight text-neutral-600/90 dark:text-neutral-400/90'>
+                              {directoryLabel}
+                            </span>
+                          ) : null}
+                        </span>
+                        <button
+                          type='button'
+                          className='inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] text-neutral-500 transition-colors hover:bg-neutral-300/80 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-neutral-100'
+                          aria-label={`Remove ${displayName}`}
+                          onClick={e => {
+                            e.stopPropagation()
+                            handleRemoveFileSelection(file)
+                          }}
+                        >
+                          ✕
+                        </button>
+
+                        {/* Hover tooltip that can expand into anchored modal */}
+                        <div
+                          className={`absolute bottom-full left-0 mb-2 origin-bottom-left rounded-lg shadow-sm p-3 transform transition-all duration-100 ease-out ${
+                            isExpanded
+                              ? 'hidden'
+                              : 'z-50 dark:bg-neutral-900 bg-neutral-100 opacity-0 invisible scale-95 pointer-events-none w-64 sm:w-72 md:w-80 group-hover:opacity-100 group-hover:visible group-hover:scale-100'
+                          }`}
+                        >
+                          <div className='text-xs text-blue-600 dark:text-blue-300 font-medium mb-1 truncate'>
+                            {file.name || file.relativePath.split('/').pop() || file.path.split('/').pop()}
+                          </div>
+                          {directoryLabel ? (
+                            <div className='text-[10px] text-neutral-600 dark:text-neutral-400 mb-2 truncate'>
+                              {directoryLabel}
+                            </div>
+                          ) : null}
+                          <div
+                            className={`text-xs font-mono whitespace-pre-wrap break-words text-stone-800 dark:text-stone-300 ${isExpanded ? 'overflow-auto max-h-[60vh]' : isClosing ? 'overflow-hidden' : 'overflow-hidden line-clamp-6'} ${isOpening || isClosing ? 'opacity-50 ' : 'opacity-100 visible'} transition-opacity duration-50 overscroll-contain select-text`}
+                          >
+                            {file.contents}
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+            </div>
+
+            {/* Controls row */}
+            <div className='composer-controls-row relative z-10 mt-2 flex items-center justify-between gap-3'>
+                {/* Left side controls */}
+                <div
+                  className={`composer-controls-left group relative flex h-10 xl:h-12 min-w-0 flex-[0_1_58%] max-w-[58%] cursor-pointer items-center overflow-hidden rounded-full ${leftControlsBorderClasses} bg-neutral-100/40 px-2 py-1 md:py-1 xl:py-1.5 backdrop-blur-xl transition-all duration-300 dark:bg-neutral-900/40`}
+                  style={leftControlsTokenTintStyle}
                 >
-                  <svg width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='2'>
-                    <path d='m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.51a2 2 0 0 1-2.83-2.83l8.49-8.48' />
-                  </svg>
-                </button>
-                {!currentConversationId ? (
-                  <span className='text-xs text-neutral-400 dark:text-neutral-500 px-2'>Creating...</span>
-                ) : showGenerationLoadingAnimation ? (
                   <button
-                    onClick={handleStopGeneration}
-                    disabled={!streamState.active}
-                    title={
-                      isCurrentConversationCompacting
-                        ? 'Compacting context...'
-                        : streamState.active
-                          ? 'Stop generation'
-                          : 'Generating...'
-                    }
-                    className='cursor-pointer hover:scale-105 active:scale-95 transition-transform'
+                    className='flex h-9 w-9 items-center justify-center rounded-full bg-white/80 text-stone-700 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-105 hover:bg-white hover:text-stone-950 active:translate-y-0 active:scale-95 dark:bg-yBlack-900/80 dark:text-stone-200 dark:hover:bg-neutral-900 dark:hover:text-white'
+                    style={actionPopoverTriggerStyle}
+                    onClick={() => {
+                      setSpinSettings(true)
+                      setSettingsOpen(true)
+                    }}
+                    title='Chat Settings'
                   >
-                    <SendButtonLoadingAnimation
-                      animationType={sendButtonAnimation}
-                      bgColor={sendButtonAnimationThemeColor || sendButtonColor}
+                    <Settings
+                      className={`h-5 w-5 ${spinSettings ? 'animate-[spin_0.6s_linear_1]' : ''}`}
+                      strokeWidth={2.25}
+                      aria-hidden='true'
+                      onAnimationEnd={() => setSpinSettings(false)}
                     />
                   </button>
-                ) : (
-                  <button
-                    className={`ml-1 w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
-                      canSendLocal && currentConversationId
-                        ? 'bg-white dark:bg-neutral-200 text-black hover:bg-blue-500 hover:text-white hover:scale-105 active:scale-95 cursor-pointer'
-                        : 'bg-neutral-300 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400 cursor-not-allowed'
-                    }`}
-                    disabled={!canSendLocal || !currentConversationId}
-                    title='Send message'
-                    onClick={() => {
-                      handleSend(multiReplyCount)
-                    }}
-                  >
-                    <svg
-                      className='w-[24px] h-[24px] -rotate-45 relative'
-                      fill='none'
-                      viewBox='0 0 24 24'
-                      stroke='currentColor'
-                      strokeWidth={3}
+                  <div className='composer-controls-left-selectors flex items-center gap-1 flex-nowrap min-w-0 flex-1 overflow-hidden'>
+                    {import.meta.env.VITE_ENVIRONMENT === 'electron' && extensions.length > 0 && (
+                      <Select
+                        value={selectedExtensionId || ''}
+                        onChange={handleExtensionSelection}
+                        blur='low'
+                        options={
+                          extensions.length > 0
+                            ? extensions.map(ext => ({
+                                value: ext.id,
+                                label: ext.workspaceName || `Extension ${ext.id.slice(0, 6)}`,
+                              }))
+                            : [{ value: '', label: 'No extensions connected' }]
+                        }
+                        placeholder='Select extension'
+                        disabled={extensions.length === 0}
+                        className='ml-2 w-[94px] min-w-[42px] max-w-[180px] shrink transition-[width,transform] duration-150 hover:w-[180px] focus-within:w-[180px] data-[open=true]:w-[180px] active:scale-97 [&>button]:!rounded-full [&_.bx-chevron-down]:!text-[14px] 2xl:[&_.bx-chevron-down]:!text-[15px] 3xl:[&_.bx-chevron-down]:!text-xl 4xl:[&_.bx-chevron-down]:!text-2xl'
+                        searchBarVisible={true}
+                        size='large'
+                        dropdownMinWidth={220}
+                      />
+                    )}
+
+                    {/* Provider selector - visibility controlled by user settings */}
+                    {import.meta.env.VITE_ENVIRONMENT === 'electron' && providerSettings.showProviderSelector && (
+                      <Select
+                        value={providers.currentProvider || ''}
+                        onChange={handleProviderSelect}
+                        options={providers.providers.map(p => p.name)}
+                        placeholder='Select a provider...'
+                        disabled={providers.providers.length === 0}
+                        className='w-[94px] min-w-[42px] max-w-[180px] shrink transition-[width,transform] duration-150 hover:w-[180px] focus-within:w-[180px] data-[open=true]:w-[180px] active:scale-97 [&>button]:!rounded-full [&_.bx-chevron-down]:!text-[14px] 2xl:[&_.bx-chevron-down]:!text-[15px] 3xl:[&_.bx-chevron-down]:!text-xl 4xl:[&_.bx-chevron-down]:!text-2xl'
+                        searchBarVisible={true}
+                        size='large'
+                        dropdownMinWidth={220}
+                      />
+                    )}
+                    <ModelSelectControl
+                      provider={providers.currentProvider}
+                      selectedModelName={selectedModel?.name || ''}
+                      onChange={handleModelSelect}
+                      placeholder='Select a model...'
+                      blur='low'
+                      className='w-[120px] min-w-[42px] max-w-[170px] shrink transition-[width,transform] duration-150 hover:w-[170px] focus-within:w-[170px] data-[open=true]:w-[170px] active:scale-99 [&>button]:!rounded-full'
+                      showFilters={true}
+                      footerContent={modelSelectFooter}
+                    />
+                  </div>
+                  {showTokenUsageBar && showTokenUsageHoverDetails && (
+                    <div className='absolute left-1/2 bottom-full z-50 mb-2 -translate-x-1/2 opacity-0 invisible transition-all duration-200 group-hover:opacity-100 group-hover:visible'>
+                      <div className='rounded-lg bg-neutral-100 px-3 py-2 text-black shadow-lg whitespace-nowrap dark:bg-neutral-900 dark:text-white'>
+                        <div className='flex items-center gap-2 text-xs'>
+                          <span className='text-blue-700 dark:text-blue-400'>Context:</span>
+                          <span>
+                            {tokenUsage.totalContextTokens.toLocaleString()} /{' '}
+                            {tokenLimits.totalBudget.toLocaleString()}
+                          </span>
+                        </div>
+                        <div className='mt-1 flex items-center gap-2 text-xs'>
+                          <span className='text-neutral-700 dark:text-neutral-300'>Messages:</span>
+                          <span>{tokenUsage.messageTokens.toLocaleString()}</span>
+                        </div>
+                        <div className='mt-1 flex items-center gap-2 text-xs'>
+                          <span className='text-neutral-700 dark:text-neutral-300'>Prompts + Context:</span>
+                          <span>{tokenUsage.promptAndContextTokens.toLocaleString()}</span>
+                        </div>
+                        <div className='mt-1 flex items-center gap-2 text-xs'>
+                          <span className='text-neutral-700 dark:text-neutral-300'>Model window:</span>
+                          <span>{tokenLimits.totalContextLimit.toLocaleString()}</span>
+                        </div>
+                        <div className='mt-1 flex items-center gap-2 text-xs'>
+                          <span className='text-neutral-900 dark:text-neutral-200'>Credits:</span>
+                          <span>{(current_credits * 100).toFixed(3)}</span>
+                        </div>
+                        {/* Tooltip Arrow */}
+                        <div className='absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-x-4 border-t-4 border-x-transparent border-t-neutral-800 dark:border-t-neutral-900' />
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {/* Right side controls */}
+                <div
+                  className={`flex h-10 xl:h-12 shrink-0 items-center gap-1 rounded-full ${leftControlsBorderClasses} bg-neutral-100/40 px-2 py-1 md:py-1 xl:py-1.5 backdrop-blur-xl transition-all duration-300 dark:bg-neutral-900/40`}
+                  style={rightControlsTintStyle}
+                >
+                  {(isImageGenerationModel ||
+                    think ||
+                    (import.meta.env.VITE_ENVIRONMENT === 'electron' && conversationIdFromUrl)) && (
+                    <ActionPopover
+                      isActive={
+                        toolAutoApprove ||
+                        operationMode === 'plan' ||
+                        !!imageConfig.aspectRatio ||
+                        !!imageConfig.imageSize ||
+                        (isOpenAIChatGPTProvider && fastServiceTierEnabled) ||
+                        (think && reasoningConfig.effort !== 'medium')
+                      }
+                      footer={
+                        <div className='flex flex-col gap-2'>
+                          {import.meta.env.VITE_ENVIRONMENT === 'electron' && conversationIdFromUrl && (
+                            <>
+                              <span className='text-black dark:text-neutral-200 text-[16px]'>Work directory:</span>
+                              <div className='flex gap-2'>
+                                <input
+                                  type='text'
+                                  value={ccCwd}
+                                  onChange={e => setCcCwdFromUser(e.target.value)}
+                                  placeholder='Working directory (optional)'
+                                  className='flex-1 px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-900 rounded-lg bg-white dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-orange-500/60'
+                                  style={
+                                    actionPopoverInputBorderColor
+                                      ? { borderColor: actionPopoverInputBorderColor }
+                                      : undefined
+                                  }
+                                  title='Specify the working directory used by local agent backends'
+                                />
+                                <button
+                                  type='button'
+                                  onClick={handleSelectProjectFolder}
+                                  className='px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-900 rounded-lg bg-white dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-orange-500/60'
+                                  style={
+                                    actionPopoverInputBorderColor
+                                      ? { borderColor: actionPopoverInputBorderColor }
+                                      : undefined
+                                  }
+                                  title='Select Folder to let the AI work in'
+                                >
+                                  <svg
+                                    xmlns='http://www.w3.org/2000/svg'
+                                    className='h-4 w-4'
+                                    fill='none'
+                                    viewBox='0 0 24 24'
+                                    stroke='currentColor'
+                                  >
+                                    <path
+                                      strokeLinecap='round'
+                                      strokeLinejoin='round'
+                                      strokeWidth={2}
+                                      d='M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z'
+                                    />
+                                  </svg>
+                                </button>
+                              </div>
+                            </>
+                          )}
+
+                          {/* Image Generation Options - shown only for image generation models */}
+                          {isImageGenerationModel && (
+                            <>
+                              <h1 className='text-black dark:text-neutral-200 text-[16px]'>Image Options</h1>
+                              <div className='flex flex-col gap-1'>
+                                <label className='text-xs text-neutral-500 dark:text-neutral-400'>Aspect Ratio</label>
+                                <Select
+                                  value={imageConfig.aspectRatio || ''}
+                                  options={[
+                                    { value: '', label: 'Default' },
+                                    { value: '1:1', label: '1:1 (Square)' },
+                                    { value: '16:9', label: '16:9 (Landscape)' },
+                                    { value: '9:16', label: '9:16 (Portrait)' },
+                                    { value: '4:3', label: '4:3' },
+                                    { value: '3:4', label: '3:4' },
+                                    { value: '3:2', label: '3:2' },
+                                    { value: '2:3', label: '2:3' },
+                                    { value: '4:5', label: '4:5' },
+                                    { value: '5:4', label: '5:4' },
+                                    { value: '21:9', label: '21:9 (Ultrawide)' },
+                                  ]}
+                                  onChange={value =>
+                                    setImageConfig(prev => ({
+                                      ...prev,
+                                      aspectRatio: (value as ImageConfig['aspectRatio']) || undefined,
+                                    }))
+                                  }
+                                  placeholder='Select aspect ratio'
+                                  size='small'
+                                  dropdownZIndex={ACTION_POPOVER_SELECT_DROPDOWN_Z_INDEX}
+                                />
+                              </div>
+                              <div className='flex flex-col gap-1'>
+                                <label className='text-xs text-neutral-500 dark:text-neutral-400'>Image Size</label>
+                                <Select
+                                  value={imageConfig.imageSize || ''}
+                                  options={[
+                                    { value: '', label: 'Default' },
+                                    { value: '1K', label: '1K' },
+                                    { value: '2K', label: '2K' },
+                                    { value: '4K', label: '4K' },
+                                  ]}
+                                  onChange={value =>
+                                    setImageConfig(prev => ({
+                                      ...prev,
+                                      imageSize: (value as ImageConfig['imageSize']) || undefined,
+                                    }))
+                                  }
+                                  placeholder='Select image size'
+                                  size='small'
+                                  dropdownZIndex={ACTION_POPOVER_SELECT_DROPDOWN_Z_INDEX}
+                                />
+                              </div>
+                            </>
+                          )}
+                          {/* Reasoning Effort Options - shown when thinking is enabled */}
+                          {selectedModel?.thinking && (
+                            <>
+                              <h1 className='text-black dark:text-neutral-200 text-[16px]'>Reasoning Options</h1>
+                              <div className='flex flex-col gap-1'>
+                                <label className='text-xs text-neutral-500 dark:text-neutral-400'>Effort Level</label>
+                                <Select
+                                  value={reasoningConfig.effort}
+                                  options={REASONING_EFFORT_OPTIONS.map(option => ({
+                                    value: option,
+                                    label:
+                                      option === 'medium'
+                                        ? 'Medium (Default)'
+                                        : option === 'xhigh'
+                                          ? 'X-High'
+                                          : option.charAt(0).toUpperCase() + option.slice(1),
+                                  }))}
+                                  onChange={value =>
+                                    setReasoningConfig(prev => ({
+                                      ...prev,
+                                      effort: value as ReasoningConfig['effort'],
+                                    }))
+                                  }
+                                  placeholder='Select effort level'
+                                  size='small'
+                                  dropdownZIndex={ACTION_POPOVER_SELECT_DROPDOWN_Z_INDEX}
+                                />
+                              </div>
+                              <div className='flex items-center justify-between gap-3'>
+                                <div className='flex flex-col'>
+                                  <span className='text-xs text-neutral-500 dark:text-neutral-400'>Fast mode</span>
+                                  <span className='text-[11px] text-neutral-400 dark:text-neutral-500'>
+                                    {isOpenAIChatGPTProvider
+                                      ? 'Use OpenAI priority service tier'
+                                      : 'Only sent for OpenAI ChatGPT provider'}
+                                  </span>
+                                </div>
+                                <button
+                                  type='button'
+                                  disabled={!isOpenAIChatGPTProvider}
+                                  onClick={() => {
+                                    if (!isOpenAIChatGPTProvider) return
+                                    setFastServiceTierEnabled(prev => {
+                                      const next = !prev
+                                      try {
+                                        window.localStorage.setItem('chat:openaiFastServiceTier', String(next))
+                                      } catch {}
+                                      return next
+                                    })
+                                  }}
+                                  className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                                    isOpenAIChatGPTProvider && fastServiceTierEnabled
+                                      ? 'bg-blue-600'
+                                      : 'bg-neutral-300 dark:bg-neutral-600'
+                                  } ${!isOpenAIChatGPTProvider ? 'cursor-not-allowed opacity-50' : ''}`}
+                                  title={
+                                    !isOpenAIChatGPTProvider
+                                      ? 'Fast service tier is only sent for OpenAI ChatGPT, not OpenRouter'
+                                      : fastServiceTierEnabled
+                                        ? 'Fast OpenAI service tier enabled'
+                                        : 'Use standard OpenAI service tier'
+                                  }
+                                >
+                                  <span
+                                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                      isOpenAIChatGPTProvider && fastServiceTierEnabled
+                                        ? 'translate-x-4'
+                                        : 'translate-x-0.5'
+                                    }`}
+                                  />
+                                </button>
+                              </div>
+                            </>
+                          )}
+                          {/* Orchestrator Mode Toggle */}
+                          <div className='flex items-center gap-2'>
+                            <span className='text-xs text-neutral-500 dark:text-neutral-400'>Orchestrator</span>
+                            <button
+                              onClick={() => {
+                                const newState = toggleOrchestratorEnabled()
+                                setOrchestratorEnabledState(newState)
+                              }}
+                              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                                orchestratorEnabled ? 'bg-blue-600' : 'bg-neutral-300 dark:bg-neutral-600'
+                              }`}
+                              title={
+                                orchestratorEnabled
+                                  ? 'Subagent can use tools (click to disable)'
+                                  : 'Subagent cannot use tools (click to enable)'
+                              }
+                            >
+                              <span
+                                className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                                  orchestratorEnabled ? 'translate-x-4.5' : 'translate-x-1'
+                                }`}
+                              />
+                            </button>
+                          </div>
+                        </div>
+                      }
                     >
-                      <path d='m5 12 14 0' />
-                      <path d='m12 5 7 7-7 7' />
+                      {import.meta.env.VITE_ENVIRONMENT === 'electron' && conversationIdFromUrl && (
+                        <>
+                          <Button
+                            variant='outline2'
+                            className='rounded-full'
+                            size='medium'
+                            onClick={() => setJobsModalOpen(true)}
+                            title={isElectronEnv ? 'View tool jobs' : 'Tool jobs are available in the desktop app'}
+                            disabled={!isElectronEnv}
+                          >
+                            <i className='bx bx-task pb-0.5' aria-hidden='true'></i>
+                            Jobs
+                          </Button>
+                          {/* Allow All / Ask toggle */}
+                          <Button
+                            variant='outline2'
+                            size='medium'
+                            onClick={() => dispatch(chatSliceActions.toolAutoApproveToggled())}
+                            className={
+                              toolAutoApprove
+                                ? customThemeEnabled
+                                  ? 'dark:hover:bg-white/5'
+                                  : 'text-orange-700 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/20 dark:hover:bg-white/5'
+                                : 'text-neutral-600 dark:text-neutral-200 dark:hover:bg-white/5'
+                            }
+                            style={toolAutoApprove && customThemeEnabled ? composerToggleActiveStyle : undefined}
+                            title={
+                              toolAutoApprove
+                                ? 'Auto-approving tools (click to disable)'
+                                : 'Asking for permission (click to auto-approve)'
+                            }
+                            aria-label={toolAutoApprove ? 'Disable auto-approve' : 'Enable auto-approve'}
+                          >
+                            <i className='bx bx-shield-quarter pr-1 pb-0.5'></i>
+                            {toolAutoApprove ? 'Allow all' : 'Ask'}
+                          </Button>
+
+                          {/* Chat / Agent toggle */}
+                          <Button
+                            variant='outline2'
+                            size='medium'
+                            onClick={() => dispatch(chatSliceActions.operationModeToggled())}
+                            className={
+                              operationMode === 'plan'
+                                ? 'text-fuchsia-700 dark:text-fuchsia-300 bg-blue-50 dark:bg-blue-900/30 hover:bg-blue-100 dark:hover:bg-white/5'
+                                : customThemeEnabled
+                                  ? 'hover:bg-neutral-100 dark:hover:bg-white/5'
+                                  : 'text-orange-700 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/20 hover:bg-orange-100 dark:hover:bg-white/5'
+                            }
+                            style={
+                              operationMode !== 'plan' && customThemeEnabled ? composerToggleActiveStyle : undefined
+                            }
+                            title={
+                              operationMode === 'plan'
+                                ? 'Plan mode enabled (tools will be blocked)'
+                                : 'Execution mode enabled (tools may modify files)'
+                            }
+                            aria-label={operationMode === 'plan' ? 'Switch to execution mode' : 'Switch to plan mode'}
+                          >
+                            <i
+                              className={`bx ${operationMode === 'plan' ? 'bx-clipboard' : 'bx-code-block'} mr-1 pb-0.5`}
+                            ></i>
+                            {operationMode === 'plan' ? 'Chat' : 'Agent'}
+                          </Button>
+                        </>
+                      )}
+                    </ActionPopover>
+                  )}
+                  {/* Thinking toggle - next to popover, disabled when not supported */}
+                  <button
+                    className={`p-2 rounded-full transition-all duration-200 ${
+                      selectedModel?.thinking
+                        ? 'text-neutral-500 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-white/10 dark:hover:bg-white/5'
+                        : 'text-neutral-300 dark:text-neutral-600 cursor-not-allowed'
+                    }`}
+                    onClick={() => setThink(t => !t)}
+                    disabled={!selectedModel?.thinking}
+                    title={selectedModel?.thinking ? 'Enable thinking' : 'Thinking not supported by this model'}
+                  >
+                    {think ? (
+                      <>
+                        <img
+                          src={getAssetPath('img/thinkingonlightmode.svg')}
+                          alt='Thinking active'
+                          className='w-[22px] h-[22px] dark:hidden'
+                        />
+                        <img
+                          src={getAssetPath('img/thinkingondarkmode.svg')}
+                          alt='Thinking active'
+                          className='w-[22px] h-[22px] hidden dark:block'
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <img
+                          src={getAssetPath('img/thinkingofflightmode.svg')}
+                          alt='Thinking'
+                          className='w-[22px] h-[22px] dark:hidden'
+                        />
+                        <img
+                          src={getAssetPath('img/thinkingoffdarkmode.svg')}
+                          alt='Thinking'
+                          className='w-[22px] h-[22px] hidden dark:block'
+                        />
+                      </>
+                    )}
+                  </button>
+                  {/* Attachment upload button */}
+                  <input
+                    ref={attachmentInputRef}
+                    type='file'
+                    accept='application/pdf,image/*'
+                    multiple
+                    onChange={handleAttachmentInputChange}
+                    className='hidden'
+                    aria-hidden='true'
+                  />
+                  <button
+                    className='p-2 rounded-full text-neutral-500 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-white/10 dark:hover:bg-white/5 transition-all duration-200'
+                    onClick={() => attachmentInputRef.current?.click()}
+                    title='Attach files'
+                  >
+                    <svg width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='2'>
+                      <path d='m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.51a2 2 0 0 1-2.83-2.83l8.49-8.48' />
                     </svg>
                   </button>
-                )}
-              </div>
-              {/* <Button
+                  {!currentConversationId ? (
+                    <span className='text-xs text-neutral-400 dark:text-neutral-500 px-2'>Creating...</span>
+                  ) : showGenerationLoadingAnimation ? (
+                    <button
+                      onClick={handleStopGeneration}
+                      disabled={!streamState.active}
+                      title={
+                        isCurrentConversationCompacting
+                          ? 'Compacting context...'
+                          : streamState.active
+                            ? 'Stop generation'
+                            : 'Generating...'
+                      }
+                      className='cursor-pointer hover:scale-105 active:scale-95 transition-transform'
+                    >
+                      <SendButtonLoadingAnimation
+                        animationType={sendButtonAnimation}
+                        bgColor={
+                          sendButtonAnimationThemeColor || (isDarkMode ? sendButtonDarkColor : sendButtonLightColor)
+                        }
+                      />
+                    </button>
+                  ) : (
+                    <button
+                      className={`ml-1 w-9 h-9 flex items-center justify-center rounded-full transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
+                        canSendLocal && currentConversationId
+                          ? 'bg-white dark:bg-neutral-200 text-black hover:bg-blue-500 hover:text-white hover:scale-105 active:scale-95 cursor-pointer'
+                          : 'bg-neutral-300 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400 cursor-not-allowed'
+                      }`}
+                      disabled={!canSendLocal || !currentConversationId}
+                      title='Send message'
+                      onClick={() => {
+                        handleSend(multiReplyCount)
+                      }}
+                    >
+                      <svg
+                        className='w-[24px] h-[24px] -rotate-45 relative'
+                        fill='none'
+                        viewBox='0 0 24 24'
+                        stroke='currentColor'
+                        strokeWidth={3}
+                      >
+                        <path d='m5 12 14 0' />
+                        <path d='m12 5 7 7-7 7' />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+                {/* <Button
                   variant={canSendLocal && currentConversationId ? 'primary' : 'secondary'}
                   disabled={!canSendLocal || !currentConversationId}
                   onClick={() => handleSend(multiReplyCount)}
@@ -7215,10 +7540,10 @@ function Chat() {
                         ? 'Sending...'
                         : 'Send'}
                 </Button> */}
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
       {/* SEPARATOR - Hidden on mobile */}
       {heimdallVisible && !isMobile && (

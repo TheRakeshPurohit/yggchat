@@ -1,4 +1,5 @@
 export type HookEventName = 'UserPromptSubmit' | 'PreToolUse' | 'PostToolUse' | 'PostToolUseFailure' | 'Stop'
+export type HookExecutionMode = 'sync' | 'async'
 
 export interface HookToolCall {
   id?: string | null
@@ -23,6 +24,11 @@ export interface HookTurnContext {
   lastAssistantMessageId?: string | null
 }
 
+export interface HookProjectContext {
+  projectId?: string | null
+  projectName?: string | null
+}
+
 export interface HookRunRequest {
   event: HookEventName
   conversationId?: string | null
@@ -41,6 +47,7 @@ export interface HookRunRequest {
   lineage?: HookLineage | null
   lookup?: HookLookup | null
   turn?: HookTurnContext | null
+  project?: HookProjectContext | null
 }
 
 export interface HookRunResult {
@@ -54,6 +61,8 @@ export interface HookRunResult {
   permissionDecisionReason?: string
   additionalContext?: string
   errors?: string[]
+  asyncHookCount?: number
+  launchedAsyncHookCount?: number
 }
 
 export interface NormalizedHookHandler {
@@ -63,6 +72,7 @@ export interface NormalizedHookHandler {
   matcher?: string | string[]
   workingDirectory?: string
   enabled?: boolean
+  executionMode?: HookExecutionMode
 }
 
 export interface NormalizedHookEntry {

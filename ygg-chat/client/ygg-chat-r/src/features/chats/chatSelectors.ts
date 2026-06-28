@@ -208,12 +208,14 @@ export const selectCurrentViewStream = createSelector(
 
         const candidateIds = [
           stream.liveMessageId ?? stream.streamingMessageId,
+          stream.currentBranchAnchorMessageId,
           stream.branchAnchorMessageId,
           stream.lastCompletedMessageId,
           stream.finalMessageId,
           stream.messageId,
-          stream.lineage.rootMessageId,
+          stream.triggerUserMessageId,
           stream.lineage.originMessageId,
+          stream.lineage.rootMessageId,
         ]
 
         for (const candidate of candidateIds) {
@@ -393,3 +395,17 @@ export const selectToolByName = createSelector(
 
 // CC Slash Commands selector
 export const selectCCSlashCommands = createSelector([selectChatState], chat => chat.ccSlashCommands)
+
+export const selectStreamUndoRoot = createSelector([selectChatState], chat => chat.streamUndo)
+
+export const selectStreamUndoSummariesForParentMessage = (parentMessageId: MessageId | string) =>
+  createSelector([selectStreamUndoRoot], undo => {
+    const streamIds = undo.streamIdsByParentMessageId[String(parentMessageId)] || []
+    return streamIds.map(id => undo.byStreamId[id]).filter(Boolean)
+  })
+
+export const selectStreamUndoRestoringByStreamId = (streamId: string) =>
+  createSelector([selectStreamUndoRoot], undo => undo.restoringByStreamId[streamId] ?? false)
+
+export const selectStreamUndoErrorByStreamId = (streamId: string) =>
+  createSelector([selectStreamUndoRoot], undo => undo.errorByStreamId[streamId] ?? null)

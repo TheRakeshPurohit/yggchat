@@ -118,7 +118,9 @@ class FakeProviderRouter {
   async generate(provider: string, input: any): Promise<any> {
     this.calls.push({ provider, input })
     if (this.queuedOutputs.length > 0) {
-      return this.queuedOutputs.shift()
+      const next = this.queuedOutputs.shift()
+      if (next instanceof Error) throw next
+      return next
     }
     return { content: 'default' }
   }
@@ -198,6 +200,46 @@ describeIfSqlite('ToolLoopService', () => {
     expect(providerRouter.calls[1].input.history.some((entry: any) => entry.role === 'tool' && entry.tool_call_id === 'call-1')).toBe(true)
   })
 
+  it('persists a user-facing assistant response when OpenAI fails after retries', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue(
+      new Error(
+        'ChatGPT backend request failed (429): {"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_at":1782168563}}'
+      )
+    )
+
+    const service = new ToolLoopService({
+      messageRepo,
+      providerRouter: providerRouter as unknown as ProviderRouter,
+      maxTurns: 3,
+    })
+
+    const events: any[] = []
+    await expect(
+      service.run(
+        {
+          provider: 'openaichatgpt',
+          modelName: 'gpt-5.4-mini',
+          conversationId: 'c1',
+          assistantParentId: null,
+          history: [],
+          userContent: 'hello',
+        },
+        event => events.push(event)
+      )
+    ).rejects.toMatchObject({ name: 'ProviderErrorAssistantResponse' })
+
+    const messages = statements.getMessagesByConversationId.all('c1') as any[]
+    const assistant = messages.find((msg: any) => msg.role === 'assistant')
+    expect(assistant.content).toContain('I could not complete the OpenAI ChatGPT (gpt-5.4-mini) response after retrying')
+    expect(assistant.content).toContain('The usage limit has been reached')
+    expect(assistant.content).toContain('HTTP status: 429')
+    expect(assistant.content).toContain('Error type: usage_limit_reached')
+    expect(events.some((evt: any) => evt.type === 'chunk' && evt.part === 'text' && evt.delta.includes('usage limit'))).toBe(true)
+    expect(events.some((evt: any) => evt.type === 'assistant_message_persisted' && evt.message.id === assistant.id)).toBe(true)
+    expect(events.some((evt: any) => evt.type === 'error')).toBe(false)
+  })
+
   it('continues loop when all tool executions fail', async () => {
     const providerRouter = new FakeProviderRouter()
     providerRouter.enqueue({
@@ -235,5 +277,180 @@ describeIfSqlite('ToolLoopService', () => {
     expect(events.some((evt: any) => evt.type === 'tool_loop' && evt.status === 'turn_completed' && evt.turn === 1 && evt.continued === true)).toBe(
       true
     )
+  })
+})
+
+
+describeIfSqlite('ToolLoopService model-facing tool result sanitization', () => {
+  let db: Database.Database
+  let statements: any
+  let messageRepo: MessageRepo
+
+  beforeEach(() => {
+    if (!BetterSqlite3Ctor) {
+      throw new Error('better-sqlite3 is unavailable in this runtime')
+    }
+
+    db = new BetterSqlite3Ctor(':memory:')
+    createSchema(db)
+    statements = createStatements(db)
+
+    const now = new Date().toISOString()
+    statements.upsertConversation.run('c1', null, 'u1', 'Conversation', 'gpt-5.1-codex-mini', null, null, null, null, 'local', now, now)
+
+    messageRepo = new MessageRepo({ db, statements })
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  it('keeps raw plan_md display content persisted while sending only modelContent to continuation history', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({
+      content: '',
+      toolCalls: [{ id: 'call-plan', name: 'plan_md', arguments: { action: 'display', name: 'sample-plan' } }],
+      contentBlocks: [{ type: 'tool_use', id: 'call-plan', name: 'plan_md', input: { action: 'display', name: 'sample-plan' } }],
+    })
+    providerRouter.enqueue({ content: 'Plan displayed above' })
+
+    const rawToolResult = {
+      displayed: true,
+      exists: true,
+      name: 'sample-plan',
+      content: '# Long plan\n\nThis should be rendered but not sent back to the model.',
+      modelContent: 'Plan "sample-plan" was displayed to the user in the chat view. Do not repeat the plan unless the user asks.',
+    }
+
+    const service = new ToolLoopService({
+      messageRepo,
+      providerRouter: providerRouter as unknown as ProviderRouter,
+      executeTool: async () => rawToolResult,
+      maxTurns: 4,
+    })
+
+    await service.run({
+      provider: 'openaichatgpt',
+      modelName: 'gpt-5.1-codex-mini',
+      conversationId: 'c1',
+      assistantParentId: null,
+      history: [],
+      userContent: 'display the plan',
+    })
+
+    const messages = statements.getMessagesByConversationId.all('c1') as any[]
+    const firstAssistant = messages.find((msg: any) => msg.role === 'assistant' && msg.content === '')
+    const firstBlocks = JSON.parse(firstAssistant.content_blocks || '[]') as any[]
+    const persistedToolResult = firstBlocks.find((block: any) => block.type === 'tool_result' && block.tool_use_id === 'call-plan')
+    expect(JSON.parse(persistedToolResult.content).content).toContain('# Long plan')
+
+    expect(providerRouter.calls).toHaveLength(2)
+    const continuationToolMessage = providerRouter.calls[1].input.history.find(
+      (entry: any) => entry.role === 'tool' && entry.tool_call_id === 'call-plan'
+    )
+    expect(continuationToolMessage.content).toBe(
+      'Plan "sample-plan" was displayed to the user in the chat view. Do not repeat the plan unless the user asks.'
+    )
+    expect(continuationToolMessage.content).not.toContain('# Long plan')
+  })
+})
+
+describeIfSqlite('ToolLoopService plan mode runtime block list', () => {
+  let db: Database.Database
+  let statements: any
+  let messageRepo: MessageRepo
+
+  beforeEach(() => {
+    if (!BetterSqlite3Ctor) {
+      throw new Error('better-sqlite3 is unavailable in this runtime')
+    }
+
+    db = new BetterSqlite3Ctor(':memory:')
+    createSchema(db)
+    statements = createStatements(db)
+
+    const now = new Date().toISOString()
+    statements.upsertConversation.run('c1', null, 'u1', 'Conversation', 'gpt-5.1-codex-mini', null, null, null, null, 'local', now, now)
+
+    messageRepo = new MessageRepo({ db, statements })
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  it('allows bash and powershell execution in plan mode before invoking the executor', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({
+      content: '',
+      toolCalls: [
+        { id: 'call-bash', name: 'bash', arguments: { command: 'pwd', description: 'print working directory' } },
+        { id: 'call-powershell', name: 'powershell', arguments: { command: 'Get-Location', description: 'print working directory' } },
+      ],
+    })
+    providerRouter.enqueue({ content: 'done' })
+
+    const executedToolNames: string[] = []
+    const service = new ToolLoopService({
+      messageRepo,
+      providerRouter: providerRouter as unknown as ProviderRouter,
+      executeTool: async toolCall => {
+        executedToolNames.push(toolCall.name)
+        return `${toolCall.name}-ok`
+      },
+      maxTurns: 3,
+    })
+
+    await service.run(
+      {
+        provider: 'openaichatgpt',
+        modelName: 'gpt-5.1-codex-mini',
+        conversationId: 'c1',
+        assistantParentId: null,
+        history: [],
+        userContent: 'inspect',
+        operationMode: 'plan',
+      },
+      () => {}
+    )
+
+    expect(executedToolNames).toEqual(['bash', 'powershell'])
+  })
+
+  it('blocks mutating tools in plan mode before invoking the executor', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({
+      content: '',
+      toolCalls: [{ id: 'call-edit', name: 'edit_file', arguments: { path: 'README.md' } }],
+    })
+    providerRouter.enqueue({ content: 'recovered' })
+
+    let executorCalled = false
+    const service = new ToolLoopService({
+      messageRepo,
+      providerRouter: providerRouter as unknown as ProviderRouter,
+      executeTool: async () => {
+        executorCalled = true
+        return 'should-not-run'
+      },
+      maxTurns: 3,
+    })
+
+    const events: any[] = []
+    await service.run(
+      {
+        provider: 'openaichatgpt',
+        modelName: 'gpt-5.1-codex-mini',
+        conversationId: 'c1',
+        assistantParentId: null,
+        history: [],
+        userContent: 'edit',
+        operationMode: 'plan',
+      },
+      event => events.push(event)
+    )
+
+    expect(executorCalled).toBe(false)
+    expect(events.some((event: any) => event.type === 'tool_execution' && event.status === 'failed')).toBe(true)
   })
 })

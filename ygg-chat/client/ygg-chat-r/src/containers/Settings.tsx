@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { ArrowLeft, ChevronDown, LogOut, Moon, RefreshCw, Star, Sun, Trash2, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import { useNavigate } from 'react-router-dom'
 import rehypeHighlight from 'rehype-highlight'
@@ -24,6 +25,10 @@ import {
   isOpenAIAuthenticated,
   saveTokens,
 } from '../features/chats/openaiOAuth'
+import {
+  clearOpenAIChatGPTTokensFromHeadless,
+  persistOpenAIChatGPTTokensToHeadless,
+} from '../features/chats/openaiHeadlessAuth'
 import { getAllTools } from '../features/chats/toolDefinitions'
 import {
   CHAT_REASONING_SETTINGS_CHANGE_EVENT,
@@ -35,10 +40,12 @@ import {
 import {
   loadAutoCompactionEnabled,
   loadHeimdallNotePreviewHoverPaddingEnabled,
+  loadShowAddedFilesPills,
   loadShowTokenUsageBar,
   loadShowTokenUsageHoverDetails,
   saveAutoCompactionEnabled,
   saveHeimdallNotePreviewHoverPaddingEnabled,
+  saveShowAddedFilesPills,
   saveShowTokenUsageBar,
   saveShowTokenUsageHoverDetails,
 } from '../helpers/chatUiSettingsStorage'
@@ -54,6 +61,8 @@ import {
   AppFontSettings,
   applyAppFontSettings,
   clearStoredLocalFont,
+  DEFAULT_GOOGLE_FONT_FAMILY,
+  DEFAULT_GOOGLE_FONT_URL,
   FONT_SETTINGS_CHANGE_EVENT,
   hasStoredLocalFont,
   isSupportedLocalFontFile,
@@ -63,14 +72,6 @@ import {
   saveUploadedLocalFont,
   validateGoogleFontUrl,
 } from '../helpers/fontSettingsStorage'
-import {
-  HERMES_RUNTIME_SETTINGS_CHANGE_EVENT,
-  HERMES_RUNTIME_SETTINGS_STORAGE_KEY,
-  HermesLaunchModeSetting,
-  HermesRuntimeSettings,
-  loadHermesRuntimeSettings,
-  saveHermesRuntimeSettings,
-} from '../helpers/hermesRuntimeSettingsStorage'
 import {
   addChatModePrompt,
   DEFAULT_CHAT_MODE_PROMPT_ID,
@@ -83,6 +84,13 @@ import {
   selectChatModePrompt,
   updateChatModePrompt,
 } from '../helpers/operationModePromptStorage'
+import {
+  loadPlanModeResponseSettings,
+  PLAN_MODE_RESPONSE_SETTINGS_CHANGE_EVENT,
+  PlanModeResponseSettings,
+  PLAN_MODE_VERBOSITY_OPTIONS,
+  savePlanModeResponseSettings,
+} from '../helpers/planModeResponseSettingsStorage'
 import {
   DEFAULT_LMSTUDIO_BASE_URL,
   loadProviderSettings,
@@ -142,12 +150,89 @@ import { API_BASE, getLocalServerLanOrigin, getLocalServerOrigin, localApi } fro
 const MAX_UPLOAD_SIZE_BYTES = 8 * 1024 * 1024 // 8MB
 const LOCAL_FONT_ACCEPT = '.woff2,.ttf,.otf'
 
+const circularControlClass =
+  'group/control inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/75 text-stone-700 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-105 hover:bg-white hover:text-stone-950 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 dark:bg-yBlack-900/75 dark:text-stone-200 dark:hover:bg-neutral-900 dark:hover:text-white dark:focus-visible:ring-orange-400/70'
+const circularDangerControlClass =
+  'group/control inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-rose-50/85 text-rose-500 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-105 hover:bg-rose-100 hover:text-rose-600 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/70 dark:bg-rose-900/30 dark:text-rose-300 dark:hover:bg-rose-900/50 dark:hover:text-rose-100'
+const settingsSectionClass = 'rounded-[2.5rem] bg-white/55 p-6 backdrop-blur-2xl dark:bg-black/20 sm:p-7'
+const settingsInputClass =
+  'rounded-full border-transparent bg-white/70 px-4 py-3 text-sm text-stone-900 outline-none backdrop-blur-xl transition focus:bg-white/85 focus:ring-2 focus:ring-emerald-400/40 dark:bg-yBlack-900/70 dark:text-stone-100 dark:focus:bg-yBlack-900/85'
+const settingsTextAreaClass =
+  'rounded-[1.75rem] border-transparent bg-white/70 px-4 py-3 text-sm text-stone-900 outline-none backdrop-blur-xl transition focus:bg-white/85 focus:ring-2 focus:ring-emerald-400/40 dark:bg-yBlack-900/70 dark:text-stone-100 dark:focus:bg-yBlack-900/85'
+const settingsToggleClass = (enabled: boolean) =>
+  `relative inline-flex h-8 w-14 shrink-0 items-center rounded-full p-1 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 active:scale-95 ${
+    enabled ? 'bg-emerald-500/90 dark:bg-emerald-500/80' : 'bg-stone-300/80 dark:bg-stone-700/80'
+  }`
+const settingsToggleKnobClass = (enabled: boolean) =>
+  `inline-block h-6 w-6 transform rounded-full bg-white transition-transform duration-200 ${enabled ? 'translate-x-6' : 'translate-x-0'}`
+const SETTINGS_SECTION_PREVIEW_LIMIT = 4
+
+type SettingsSectionProps = {
+  title: string
+  description: React.ReactNode
+  features: string[]
+  children: React.ReactNode
+  className?: string
+  style?: React.CSSProperties
+}
+
+const SettingsSection: React.FC<SettingsSectionProps> = ({ title, description, features, children, className = '', style }) => {
+  const [expanded, setExpanded] = useState(false)
+  const previewFeatures = features.slice(0, SETTINGS_SECTION_PREVIEW_LIMIT)
+  const hiddenFeatureCount = Math.max(features.length - previewFeatures.length, 0)
+
+  return (
+    <section className={`${settingsSectionClass} ${className}`.trim()} style={style}>
+      <button
+        type='button'
+        onClick={() => setExpanded(value => !value)}
+        className='group flex w-full items-start justify-between gap-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 rounded-[2rem]'
+        aria-expanded={expanded}
+      >
+        <span className='min-w-0 flex-1'>
+          <span className='block text-xl font-semibold text-stone-900 dark:text-stone-100'>{title}</span>
+          <span className='mt-1 block text-sm text-stone-500 dark:text-stone-200'>{description}</span>
+          <span className='mt-4 flex flex-wrap gap-2'>
+            {previewFeatures.map(feature => (
+              <span
+                key={feature}
+                className='rounded-full bg-white/55 px-3 py-1.5 text-xs font-medium text-stone-600 backdrop-blur-xl dark:bg-white/10 dark:text-stone-300'
+              >
+                {feature}
+              </span>
+            ))}
+            {hiddenFeatureCount > 0 && (
+              <span className='rounded-full bg-white/35 px-3 py-1.5 text-xs font-medium text-stone-500 backdrop-blur-xl dark:bg-white/5 dark:text-stone-400'>
+                +{hiddenFeatureCount} more
+              </span>
+            )}
+          </span>
+        </span>
+        <span className={circularControlClass} aria-hidden='true'>
+          <ChevronDown
+            size={20}
+            strokeWidth={2.25}
+            className={`transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`}
+          />
+        </span>
+      </button>
+      <div
+        className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+          expanded ? 'mt-5 grid-rows-[1fr] opacity-100' : 'mt-0 grid-rows-[0fr] opacity-0'
+        }`}
+      >
+        <div className='overflow-hidden'>{children}</div>
+      </div>
+    </section>
+  )
+}
+
 type StatusMessage = {
   type: 'success' | 'error' | 'info'
   text: string
 }
 
-const formatSize = (size?: number) => {
+const formatSize = (size?: number | null) => {
   if (!size) {
     return 'n/a'
   }
@@ -162,6 +247,18 @@ const formatSize = (size?: number) => {
   }
 
   return `${(kilo / 1024).toFixed(1)} MB`
+}
+
+const formatMemoryUpdatedAt = (value?: string | null) => {
+  if (!value) return 'Not created yet'
+  const timestamp = new Date(value)
+  if (Number.isNaN(timestamp.getTime())) return 'Updated recently'
+  return timestamp.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 interface GoogleDriveStatus {
@@ -188,6 +285,34 @@ interface LocalMergeResult {
   message?: string
 }
 
+type MemoryFileKind = 'global' | 'recent' | 'project'
+
+interface MemoryFileSummary {
+  id: string
+  kind: MemoryFileKind
+  label: string
+  description?: string
+  projectName?: string | null
+  exists: boolean
+  path?: string | null
+  sizeBytes?: number | null
+  updatedAt?: string | null
+}
+
+interface MemoryFilesResponse {
+  success: boolean
+  files: MemoryFileSummary[]
+  directory?: string
+  error?: string
+}
+
+interface MemoryFileContentResponse {
+  success: boolean
+  file?: MemoryFileSummary | null
+  content: string
+  error?: string
+}
+
 const Settings: React.FC = () => {
   const navigate = useNavigate()
   const dispatch = useAppDispatch()
@@ -203,8 +328,6 @@ const Settings: React.FC = () => {
 
   // Tools state
   const tools = getAllTools()
-  const [toolsExpanded, setToolsExpanded] = useState(false)
-  const [htmlToolsExpanded, setHtmlToolsExpanded] = useState(false)
   const [updatingTools, setUpdatingTools] = useState<Set<string>>(new Set())
   const [reloadingTools, setReloadingTools] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -258,6 +381,14 @@ const Settings: React.FC = () => {
   const [lmStudioBaseUrlInput, setLmStudioBaseUrlInput] = useState<string>(() => loadProviderSettings().lmStudioBaseUrl ?? '')
   const [lmStudioBaseUrlTouched, setLmStudioBaseUrlTouched] = useState(false)
   const [memoryBackfillRunning, setMemoryBackfillRunning] = useState(false)
+  const [memoryFiles, setMemoryFiles] = useState<MemoryFileSummary[]>([])
+  const [memoryFilesLoading, setMemoryFilesLoading] = useState(false)
+  const [memoryFilesError, setMemoryFilesError] = useState<string | null>(null)
+  const [selectedMemoryFile, setSelectedMemoryFile] = useState<MemoryFileSummary | null>(null)
+  const [memoryModalOpen, setMemoryModalOpen] = useState(false)
+  const [memoryContent, setMemoryContent] = useState('')
+  const [memoryContentLoading, setMemoryContentLoading] = useState(false)
+  const [memoryContentError, setMemoryContentError] = useState<string | null>(null)
   const [compactionSystemPromptInput, setCompactionSystemPromptInput] = useState<string>(
     () => loadProviderSettings().compactionSystemPrompt
   )
@@ -285,6 +416,9 @@ const Settings: React.FC = () => {
   const [operationModePromptSettings, setOperationModePromptSettings] = useState<OperationModePromptSettings>(() =>
     loadOperationModePromptSettings()
   )
+  const [planModeResponseSettings, setPlanModeResponseSettings] = useState<PlanModeResponseSettings>(() =>
+    loadPlanModeResponseSettings()
+  )
   const [chatModePromptNameInput, setChatModePromptNameInput] = useState('')
   const [chatModePromptInput, setChatModePromptInput] = useState('')
   const [showTokenUsageBar, setShowTokenUsageBar] = useState<boolean>(() => loadShowTokenUsageBar())
@@ -292,6 +426,7 @@ const Settings: React.FC = () => {
     loadShowTokenUsageHoverDetails()
   )
   const [autoCompactionEnabled, setAutoCompactionEnabled] = useState<boolean>(() => loadAutoCompactionEnabled())
+  const [showAddedFilesPills, setShowAddedFilesPills] = useState<boolean>(() => loadShowAddedFilesPills())
   const [heimdallNotePreviewHoverPaddingEnabled, setHeimdallNotePreviewHoverPaddingEnabled] = useState<boolean>(() =>
     loadHeimdallNotePreviewHoverPaddingEnabled()
   )
@@ -301,10 +436,6 @@ const Settings: React.FC = () => {
     String(loadSubagentToolSettings().maxTurns)
   )
   const [subagentMaxTurnsTouched, setSubagentMaxTurnsTouched] = useState(false)
-  const [hermesRuntimeSettings, setHermesRuntimeSettings] = useState<HermesRuntimeSettings>(() =>
-    loadHermesRuntimeSettings()
-  )
-  const [electronPlatform, setElectronPlatform] = useState<string>('')
   const compactionProviderForModels = providerSettings.compactionProvider || providers.currentProvider || 'OpenRouter'
   const { data: compactionModelsData } = useModels(compactionProviderForModels)
   const normalizedRemoteBaseUrlInput = normalizeRemoteBaseUrl(remoteBaseUrlInput)
@@ -315,6 +446,12 @@ const Settings: React.FC = () => {
     : null
   const subagentProviderForModels = subagentSettings.defaultProvider || providers.currentProvider || 'OpenRouter'
   const { data: subagentModelsData } = useModels(subagentProviderForModels)
+  const selectedSubagentModelValue =
+    subagentModelsData?.models?.find(
+      model => model.id === subagentSettings.defaultModel || model.name === subagentSettings.defaultModel
+    )?.id ||
+    subagentSettings.defaultModel ||
+    ''
   const defaultChatModePrompt = getDefaultChatModePrompt()
   const selectedChatModePrompt =
     operationModePromptSettings.selectedChatPromptId === DEFAULT_CHAT_MODE_PROMPT_ID
@@ -323,7 +460,6 @@ const Settings: React.FC = () => {
           prompt => prompt.id === operationModePromptSettings.selectedChatPromptId
         ) ?? defaultChatModePrompt
   const isDefaultChatModePromptSelected = selectedChatModePrompt.id === DEFAULT_CHAT_MODE_PROMPT_ID
-  const isWindowsElectron = electronPlatform === 'win32'
 
   const handleLogout = async () => {
     await signOut()
@@ -372,28 +508,6 @@ const Settings: React.FC = () => {
     if (import.meta.env.VITE_ENVIRONMENT !== 'electron') return
 
     let active = true
-
-    window.electronAPI?.platformInfo
-      ?.get()
-      .then(info => {
-        if (active) {
-          setElectronPlatform(info.platform)
-        }
-      })
-      .catch(error => {
-        console.error('Failed to detect Electron platform in Settings:', error)
-      })
-
-    window.electronAPI?.storage
-      ?.get(HERMES_RUNTIME_SETTINGS_STORAGE_KEY)
-      .then(stored => {
-        if (!active || !stored || typeof stored !== 'object') return
-        const saved = saveHermesRuntimeSettings(stored as HermesRuntimeSettings)
-        setHermesRuntimeSettings(saved)
-      })
-      .catch(error => {
-        console.error('Failed to hydrate Hermes runtime settings from Electron storage:', error)
-      })
 
     window.electronAPI?.storage
       ?.get(BROWSER_SETTINGS_STORAGE_KEY)
@@ -479,19 +593,6 @@ const Settings: React.FC = () => {
     return () =>
       window.removeEventListener(SUBAGENT_TOOL_SETTINGS_CHANGE_EVENT, handleSubagentSettingsChange as EventListener)
   }, [subagentMaxTurnsTouched])
-
-  useEffect(() => {
-    const handleHermesRuntimeSettingsChange = (e: CustomEvent<HermesRuntimeSettings>) => {
-      setHermesRuntimeSettings(e.detail)
-    }
-
-    window.addEventListener(HERMES_RUNTIME_SETTINGS_CHANGE_EVENT, handleHermesRuntimeSettingsChange as EventListener)
-    return () =>
-      window.removeEventListener(
-        HERMES_RUNTIME_SETTINGS_CHANGE_EVENT,
-        handleHermesRuntimeSettingsChange as EventListener
-      )
-  }, [])
 
   useEffect(() => {
     const handleBrowserSettingsChange = (e: CustomEvent<BrowserSettings>) => {
@@ -674,6 +775,22 @@ const Settings: React.FC = () => {
   }, [])
 
   useEffect(() => {
+    const handlePlanModeResponseSettingsChange = (e: CustomEvent<PlanModeResponseSettings>) => {
+      setPlanModeResponseSettings(e.detail)
+    }
+
+    window.addEventListener(
+      PLAN_MODE_RESPONSE_SETTINGS_CHANGE_EVENT,
+      handlePlanModeResponseSettingsChange as EventListener
+    )
+    return () =>
+      window.removeEventListener(
+        PLAN_MODE_RESPONSE_SETTINGS_CHANGE_EVENT,
+        handlePlanModeResponseSettingsChange as EventListener
+      )
+  }, [])
+
+  useEffect(() => {
     let active = true
 
     hasStoredLocalFont()
@@ -760,20 +877,6 @@ const Settings: React.FC = () => {
     setCompactionSystemPromptTouched(true)
   }
 
-  const handleOpenAiPromptCacheRetentionChange = (value: string) => {
-    const retention: ProviderSettings['openAiPromptCacheRetention'] = value === '24h' ? '24h' : 'in_memory'
-    const updated = {
-      ...providerSettings,
-      openAiPromptCacheRetention: retention,
-    }
-    saveProviderSettings(updated)
-    setProviderSettings(updated)
-    showStatus({
-      type: 'success',
-      text: retention === '24h' ? 'OpenAI prompt cache retention set to 24h.' : 'OpenAI prompt cache retention set to in-memory.',
-    })
-  }
-
   const commitCompactionSystemPromptChange = (value: string) => {
     const normalized = value.trim()
     const fallback = loadProviderSettings().compactionSystemPrompt
@@ -849,13 +952,15 @@ const Settings: React.FC = () => {
       }
 
       const signedInEmail = typeof data.email === 'string' && data.email.trim() ? data.email.trim() : null
-      saveTokens({
+      const tokens = {
         accessToken: data.accessToken,
         refreshToken: data.refreshToken,
         expiresAt: data.expiresAt,
         accountId: data.accountId,
         email: signedInEmail,
-      })
+      }
+      saveTokens(tokens)
+      await persistOpenAIChatGPTTokensToHeadless(tokens, [userId])
       setOpenaiAccountEmail(signedInEmail)
 
       dispatch(chatSliceActions.providerSelected('OpenAI (ChatGPT)'))
@@ -947,12 +1052,27 @@ const Settings: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openaiLoginModalOpen, openaiAuthFlow?.state])
 
-  const handleOpenAIChatGPTSignOut = () => {
+  const handleOpenAIChatGPTSignOut = async () => {
     clearOpenAITokens()
+
+    const failedHeadlessTokenDeletes: unknown[] = []
+    const results = await Promise.allSettled([clearOpenAIChatGPTTokensFromHeadless([userId])])
+    failedHeadlessTokenDeletes.push(...results.filter(result => result.status === 'rejected'))
+
     setOpenaiAccountEmail(null)
     if (providers.currentProvider === 'OpenAI (ChatGPT)') {
       dispatch(chatSliceActions.providerSelected('OpenRouter'))
     }
+
+    if (failedHeadlessTokenDeletes.length > 0) {
+      console.error('Failed to clear one or more headless OpenAI ChatGPT tokens:', failedHeadlessTokenDeletes)
+      showStatus({
+        type: 'error',
+        text: 'Signed out locally, but failed to clear one or more headless ChatGPT tokens. Try signing out again.',
+      })
+      return
+    }
+
     showStatus({ type: 'success', text: 'Signed out of OpenAI ChatGPT.' })
   }
 
@@ -1251,6 +1371,71 @@ const Settings: React.FC = () => {
     setLmStudioBaseUrlTouched(true)
   }
 
+  const loadMemoryFiles = async () => {
+    if (import.meta.env.VITE_ENVIRONMENT !== 'electron') return
+
+    setMemoryFilesLoading(true)
+    setMemoryFilesError(null)
+    try {
+      const response = await localApi.get<MemoryFilesResponse>('/memory/files')
+      const files = Array.isArray(response.files) ? response.files : []
+      setMemoryFiles(
+        [...files].sort((a, b) => {
+          const rank = (file: MemoryFileSummary) => (file.kind === 'global' ? 0 : file.kind === 'recent' ? 1 : 2)
+          const rankDiff = rank(a) - rank(b)
+          if (rankDiff !== 0) return rankDiff
+          if (a.kind === 'project' && b.kind === 'project') {
+            const aUpdated = a.updatedAt ? new Date(a.updatedAt).getTime() : 0
+            const bUpdated = b.updatedAt ? new Date(b.updatedAt).getTime() : 0
+            if (aUpdated !== bUpdated) return bUpdated - aUpdated
+          }
+          return a.label.localeCompare(b.label)
+        })
+      )
+    } catch (error) {
+      console.error('Failed to load memory files:', error)
+      const message = error instanceof Error ? error.message : 'Failed to load memory files.'
+      setMemoryFilesError(message)
+    } finally {
+      setMemoryFilesLoading(false)
+    }
+  }
+
+  const openMemoryFile = async (file: MemoryFileSummary) => {
+    setSelectedMemoryFile(file)
+    setMemoryModalOpen(true)
+    setMemoryContent('')
+    setMemoryContentError(null)
+    setMemoryContentLoading(true)
+
+    try {
+      const response = await localApi.get<MemoryFileContentResponse>(`/memory/file?id=${encodeURIComponent(file.id)}`)
+      setMemoryContent(response.content || '')
+      if (response.file) {
+        setSelectedMemoryFile(response.file)
+      }
+    } catch (error) {
+      console.error('Failed to load memory file:', error)
+      setMemoryContentError(error instanceof Error ? error.message : 'Failed to load memory file.')
+    } finally {
+      setMemoryContentLoading(false)
+    }
+  }
+
+  const closeMemoryModal = () => {
+    setMemoryModalOpen(false)
+    setSelectedMemoryFile(null)
+    setMemoryContent('')
+    setMemoryContentError(null)
+    setMemoryContentLoading(false)
+  }
+
+  const refreshSelectedMemoryFile = async () => {
+    if (!selectedMemoryFile) return
+    await openMemoryFile(selectedMemoryFile)
+    await loadMemoryFiles()
+  }
+
   const handleMemoryBackfill = async () => {
     if (import.meta.env.VITE_ENVIRONMENT !== 'electron') {
       showStatus({ type: 'info', text: 'Memory indexing is only available in the Electron app.' })
@@ -1290,6 +1475,7 @@ const Settings: React.FC = () => {
           ? `Memory backfill finished. Embedded ${result.embedded}/${result.processed} notes${result.failed ? `, ${result.failed} failed` : ''}${result.skipped ? `, ${result.skipped} skipped` : ''}.`
           : 'Memory backfill finished.',
       })
+      await loadMemoryFiles()
     } catch (error) {
       console.error('Failed to backfill memory embeddings:', error)
       showStatus({
@@ -1342,44 +1528,6 @@ const Settings: React.FC = () => {
     saveSubagentToolSettings(nextSettings)
     setSubagentSettings(nextSettings)
     showStatus({ type: 'success', text: successText })
-  }
-
-  const persistHermesRuntimeSettings = (nextSettings: HermesRuntimeSettings, successText: string) => {
-    const saved = saveHermesRuntimeSettings(nextSettings)
-    setHermesRuntimeSettings(saved)
-    showStatus({ type: 'success', text: successText })
-  }
-
-  const handleHermesLaunchModeChange = (value: string) => {
-    const nextLaunchMode: HermesLaunchModeSetting = value === 'native' || value === 'wsl' ? value : 'auto'
-    persistHermesRuntimeSettings(
-      {
-        ...hermesRuntimeSettings,
-        launchMode: nextLaunchMode,
-      },
-      nextLaunchMode === 'wsl'
-        ? 'Hermes will launch through WSL for new sessions.'
-        : nextLaunchMode === 'native'
-          ? 'Hermes will launch natively for new sessions.'
-          : 'Hermes runtime launch mode set to auto.'
-    )
-  }
-
-  const handleHermesWslDistroChange = (value: string) => {
-    const saved = saveHermesRuntimeSettings({
-      ...hermesRuntimeSettings,
-      wslDistro: value,
-    })
-    setHermesRuntimeSettings(saved)
-  }
-
-  const handleHermesWslDistroBlur = () => {
-    const trimmed = hermesRuntimeSettings.wslDistro.trim()
-    if (trimmed) {
-      showStatus({ type: 'success', text: `Hermes WSL distro set to ${trimmed}.` })
-    } else {
-      showStatus({ type: 'info', text: 'Hermes WSL distro cleared. Default WSL distro will be used.' })
-    }
   }
 
   const commitSubagentMaxTurnsChange = (value: string) => {
@@ -1575,6 +1723,11 @@ const Settings: React.FC = () => {
     fetchLocalUsers()
   }, [userId])
 
+  useEffect(() => {
+    if (import.meta.env.VITE_ENVIRONMENT !== 'electron') return
+    loadMemoryFiles()
+  }, [])
+
   const handleDefaultThinkingToggle = () => {
     const updated: ChatReasoningSettings = {
       ...chatReasoningSettings,
@@ -1612,10 +1765,29 @@ const Settings: React.FC = () => {
     })
   }
 
+  const handleAddedFilesPillsToggle = () => {
+    const nextValue = !showAddedFilesPills
+    saveShowAddedFilesPills(nextValue)
+    setShowAddedFilesPills(nextValue)
+    showStatus({
+      type: 'success',
+      text: nextValue ? 'Added file pills shown in Chat.' : 'Added file pills hidden in Chat.',
+    })
+  }
+
   const handleChatModePromptSelect = (promptId: string) => {
     const saved = selectChatModePrompt(promptId)
     setOperationModePromptSettings(saved)
     showStatus({ type: 'success', text: 'Chat Mode prompt selected.' })
+  }
+
+  const handlePlanModeVerbosityChange = (value: string) => {
+    const verbosity = PLAN_MODE_VERBOSITY_OPTIONS.includes(value as PlanModeResponseSettings['verbosity'])
+      ? (value as PlanModeResponseSettings['verbosity'])
+      : 'concise'
+    const saved = savePlanModeResponseSettings({ ...planModeResponseSettings, verbosity })
+    setPlanModeResponseSettings(saved)
+    showStatus({ type: 'success', text: `Plan verbosity set to ${verbosity}.` })
   }
 
   const handleSaveNewChatModePrompt = () => {
@@ -1714,9 +1886,11 @@ const Settings: React.FC = () => {
   const handleResetAppFont = async () => {
     await persistAndApplyFontSettings({
       ...fontSettings,
-      source: 'default',
+      source: 'google',
+      googleFontUrl: DEFAULT_GOOGLE_FONT_URL,
+      googleFontFamily: DEFAULT_GOOGLE_FONT_FAMILY,
     })
-    showStatus({ type: 'success', text: 'App font reset to DM Sans.' })
+    showStatus({ type: 'success', text: `App font reset to ${DEFAULT_GOOGLE_FONT_FAMILY}.` })
   }
 
   const handleLocalFontUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1786,7 +1960,9 @@ const Settings: React.FC = () => {
 
       const nextSettings: AppFontSettings = {
         ...fontSettings,
-        source: fontSettings.source === 'local' ? 'default' : fontSettings.source,
+        source: fontSettings.source === 'local' ? 'google' : fontSettings.source,
+        googleFontUrl: fontSettings.source === 'local' ? DEFAULT_GOOGLE_FONT_URL : fontSettings.googleFontUrl,
+        googleFontFamily: fontSettings.source === 'local' ? DEFAULT_GOOGLE_FONT_FAMILY : fontSettings.googleFontFamily,
       }
 
       await persistAndApplyFontSettings(nextSettings)
@@ -1829,17 +2005,18 @@ const Settings: React.FC = () => {
   }, [subagentSettings.maxTurns, subagentMaxTurnsTouched])
 
   useEffect(() => {
-    if (!isChangelogOpen) return
+    if (!isChangelogOpen && !memoryModalOpen) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setIsChangelogOpen(false)
+        closeMemoryModal()
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isChangelogOpen])
+  }, [isChangelogOpen, memoryModalOpen])
 
   const handleToolCallTimeoutInputChange = (value: string) => {
     setToolCallTimeoutInput(value)
@@ -2117,14 +2294,37 @@ const Settings: React.FC = () => {
     }
 
     return (
-      <div className={`rounded-lg border px-4 py-2 text-sm ${colors[statusMessage.type]}`}>{statusMessage.text}</div>
+      <div className={`rounded-full border px-4 py-2 text-sm backdrop-blur-xl ${colors[statusMessage.type]}`}>{statusMessage.text}</div>
     )
   }
 
+  const globalMemoryFiles = memoryFiles.filter(file => file.kind !== 'project')
+  const projectMemoryFiles = memoryFiles.filter(file => file.kind === 'project')
+
+  const renderMemoryFileButton = (file: MemoryFileSummary) => (
+    <button
+      key={file.id}
+      type='button'
+      onClick={() => openMemoryFile(file)}
+      className='group flex w-full items-center justify-between gap-3 rounded-[1.75rem] bg-white/55 px-4 py-3 text-left backdrop-blur-xl transition hover:-translate-y-0.5 hover:bg-white/75 active:translate-y-0 active:scale-[0.99] dark:bg-white/5 dark:hover:bg-white/10'
+      aria-label={`View ${file.label}`}
+    >
+      <span className='min-w-0'>
+        <span className='block truncate text-sm font-medium text-stone-800 dark:text-stone-100'>{file.label}</span>
+        <span className='mt-0.5 block truncate text-xs text-stone-500 dark:text-stone-400'>
+          {file.description || 'memory file'} • {file.exists ? formatSize(file.sizeBytes) : 'not created'}
+        </span>
+      </span>
+      <span className='shrink-0 text-right text-[11px] text-stone-400 transition group-hover:text-stone-600 dark:text-stone-500 dark:group-hover:text-stone-300'>
+        {formatMemoryUpdatedAt(file.updatedAt)}
+      </span>
+    </button>
+  )
+
   return (
     <div className='h-full overflow-y-auto thin-scrollbar bg-transparent min-h-full'>
-      <div className='mx-auto flex max-w-6xl flex-col gap-6 px-4 py-8'>
-        <header className='flex flex-wrap items-center justify-between gap-4'>
+      <div className='mx-auto flex max-w-6xl flex-col gap-5 px-4 py-8'>
+        <header className='flex flex-wrap items-center justify-between gap-4 rounded-[2.25rem] bg-white/35 p-3 pl-5 backdrop-blur-2xl dark:bg-black/15'>
           <div>
             {/* <p className='text-sm uppercase tracking-[0.3em] video-light:text-neutral-100 video-dark:text-neutral-900'>
               Config
@@ -2137,26 +2337,28 @@ const Settings: React.FC = () => {
             <button
               type='button'
               onClick={() => setIsChangelogOpen(true)}
-              className='rounded-full border border-stone-300 bg-stone-100 px-3 py-1 font-mono text-xs tracking-wide text-stone-700 transition hover:bg-stone-200 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700'
+              className='rounded-full bg-white/70 px-4 py-2 font-mono text-xs tracking-wide text-stone-700 backdrop-blur-xl transition hover:-translate-y-0.5 hover:bg-white active:translate-y-0 active:scale-95 dark:bg-white/10 dark:text-stone-200 dark:hover:bg-white/15'
             >
               CHANGELOG
             </button>
-            <Button variant='acrylic' onClick={() => navigate(-1)} className='group'>
-              <p className='transition-transform duration-100 group-active:scale-95'>Home</p>
-            </Button>
-            <Button
-              variant='acrylic'
-              size='circle'
+            <button
+              type='button'
+              onClick={() => navigate(-1)}
+              className={circularControlClass}
+              title='Home'
+              aria-label='Home'
+            >
+              <ArrowLeft size={18} strokeWidth={2.25} aria-hidden='true' />
+            </button>
+            <button
+              type='button'
               onClick={handleLogout}
-              rounded='full'
+              className={circularControlClass}
               title='Logout'
               aria-label='Logout'
             >
-              <i
-                className='bx transform -translate-x-0.5 bx-log-out text-lg sm:text-lg 2xl:text-2xl mx-0.5 my-1.5 transition-all hover:scale-96 duration-200'
-                aria-hidden='true'
-              ></i>
-            </Button>
+              <LogOut size={18} strokeWidth={2.25} aria-hidden='true' />
+            </button>
           </div>
         </header>
 
@@ -2168,21 +2370,21 @@ const Settings: React.FC = () => {
             onClick={() => setIsChangelogOpen(false)}
           >
             <div
-              className='w-full max-w-4xl max-h-[85vh] overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-2xl dark:border-stone-700 dark:bg-zinc-900'
+              className='w-full max-w-4xl max-h-[85vh] overflow-hidden rounded-[2.5rem] bg-white/90 backdrop-blur-xl dark:bg-zinc-900/95'
               onClick={event => event.stopPropagation()}
             >
-              <div className='flex items-center justify-between border-b border-stone-200 px-4 py-3 dark:border-stone-700'>
+              <div className='flex items-center justify-between bg-white/60 px-4 py-3 backdrop-blur-xl dark:bg-zinc-900/70'>
                 <p className='font-mono text-sm tracking-wide text-stone-800 dark:text-stone-100'>CHANGELOG</p>
                 <button
                   type='button'
                   onClick={() => setIsChangelogOpen(false)}
-                  className='rounded-md px-2 py-1 text-stone-600 transition hover:bg-stone-100 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-stone-800 dark:hover:text-stone-100'
+                  className='rounded-full p-2 text-stone-500 transition hover:bg-white/70 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-stone-100'
                 >
-                  ✕
+                  <X size={18} strokeWidth={2.25} aria-hidden='true' />
                 </button>
               </div>
               <div className='max-h-[calc(85vh-60px)] overflow-y-auto thin-scrollbar p-4'>
-                <div className='prose prose-sm max-w-none dark:prose-invert prose-headings:font-semibold prose-pre:rounded-lg prose-pre:border prose-pre:border-stone-300 dark:prose-pre:border-stone-700'>
+                <div className='prose prose-sm max-w-none dark:prose-invert prose-headings:font-semibold prose-pre:rounded-lg'>
                   <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, rehypeKatex]}>
                     {changelogMarkdown}
                   </ReactMarkdown>
@@ -2192,13 +2394,65 @@ const Settings: React.FC = () => {
           </div>
         )}
 
-        <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-          <div className='flex flex-col gap-1'>
-            <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Chat Interface</h2>
-            <p className='text-sm text-stone-500 dark:text-stone-200'>Control optional chat UI elements.</p>
+        {memoryModalOpen && selectedMemoryFile && (
+          <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4' onClick={closeMemoryModal}>
+            <div
+              className='w-full max-w-4xl max-h-[85vh] overflow-hidden rounded-[2.5rem] bg-white/90 backdrop-blur-xl dark:bg-zinc-900/95'
+              onClick={event => event.stopPropagation()}
+            >
+              <div className='flex items-start justify-between gap-4 px-5 py-4'>
+                <div className='min-w-0'>
+                  <p className='truncate text-sm font-semibold text-stone-900 dark:text-stone-100'>{selectedMemoryFile.label}</p>
+                  <p className='mt-1 truncate text-xs text-stone-500 dark:text-stone-400'>
+                    {selectedMemoryFile.description || 'memory.md'} • {selectedMemoryFile.exists ? formatSize(selectedMemoryFile.sizeBytes) : 'not created'}
+                  </p>
+                </div>
+                <div className='flex shrink-0 items-center gap-2'>
+                  <button
+                    type='button'
+                    onClick={refreshSelectedMemoryFile}
+                    disabled={memoryContentLoading}
+                    className='rounded-full bg-white/70 px-4 py-2 text-xs font-medium text-stone-600 backdrop-blur-xl transition hover:bg-white disabled:opacity-60 dark:bg-white/10 dark:text-stone-300 dark:hover:bg-white/15'
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    type='button'
+                    onClick={closeMemoryModal}
+                    aria-label='Close memory preview'
+                    className='rounded-full p-2 text-stone-600 transition hover:bg-white/70 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-stone-100'
+                  >
+                    <X size={18} strokeWidth={2.25} aria-hidden='true' />
+                  </button>
+                </div>
+              </div>
+              <div className='max-h-[calc(85vh-76px)] overflow-y-auto thin-scrollbar px-5 pb-5'>
+                {memoryContentLoading ? (
+                  <p className='rounded-[1.75rem] bg-white/55 px-4 py-3 text-sm text-stone-500 dark:bg-stone-800/45 dark:text-stone-300'>
+                    Loading memory file…
+                  </p>
+                ) : memoryContentError ? (
+                  <p className='rounded-[1.75rem] bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:bg-rose-900/30 dark:text-rose-200'>
+                    {memoryContentError}
+                  </p>
+                ) : (
+                  <div className='prose prose-sm max-w-none dark:prose-invert prose-headings:font-semibold prose-pre:rounded-lg prose-pre:bg-stone-950'>
+                    <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, rehypeKatex]}>
+                      {memoryContent || '_This memory file is empty._'}
+                    </ReactMarkdown>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
+        )}
 
-          <div className='mt-4 flex flex-col gap-4'>
+        <SettingsSection
+          title='Chat Interface'
+          description='Control optional chat UI elements.'
+          features={['Token usage bar', 'Hover details', 'Added file pills', 'Auto compaction', 'Heimdall hover padding']}
+        >
+          <div className='flex flex-col gap-4'>
             <div className='flex items-center justify-between'>
               <div>
                 <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Show Token Usage Bar</p>
@@ -2208,19 +2462,15 @@ const Settings: React.FC = () => {
               </div>
               <button
                 onClick={handleTokenUsageBarToggle}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  showTokenUsageBar ? 'bg-emerald-500 dark:bg-emerald-600' : 'bg-stone-300 dark:bg-stone-600'
-                }`}
+                className={settingsToggleClass(showTokenUsageBar)}
               >
                 <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    showTokenUsageBar ? 'translate-x-6' : 'translate-x-1'
-                  }`}
+                  className={settingsToggleKnobClass(showTokenUsageBar)}
                 />
               </button>
             </div>
 
-            <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
+            <div className='flex items-center justify-between pt-2 pt-2'>
               <div>
                 <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Show Token Usage Hover Details</p>
                 <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2229,19 +2479,32 @@ const Settings: React.FC = () => {
               </div>
               <button
                 onClick={handleTokenUsageHoverDetailsToggle}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  showTokenUsageHoverDetails ? 'bg-emerald-500 dark:bg-emerald-600' : 'bg-stone-300 dark:bg-stone-600'
-                }`}
+                className={settingsToggleClass(showTokenUsageHoverDetails)}
               >
                 <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    showTokenUsageHoverDetails ? 'translate-x-6' : 'translate-x-1'
-                  }`}
+                  className={settingsToggleKnobClass(showTokenUsageHoverDetails)}
                 />
               </button>
             </div>
 
-            <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
+            <div className='flex items-center justify-between pt-2 pt-2'>
+              <div>
+                <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Show Added File Pills</p>
+                <p className='text-sm text-stone-500 dark:text-stone-400'>
+                  Display selected @ files as removable pills below the chat input.
+                </p>
+              </div>
+              <button
+                onClick={handleAddedFilesPillsToggle}
+                className={settingsToggleClass(showAddedFilesPills)}
+              >
+                <span
+                  className={settingsToggleKnobClass(showAddedFilesPills)}
+                />
+              </button>
+            </div>
+
+            <div className='flex items-center justify-between pt-2 pt-2'>
               <div>
                 <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Auto Compaction</p>
                 <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2251,19 +2514,15 @@ const Settings: React.FC = () => {
               </div>
               <button
                 onClick={handleAutoCompactionToggle}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  autoCompactionEnabled ? 'bg-emerald-500 dark:bg-emerald-600' : 'bg-stone-300 dark:bg-stone-600'
-                }`}
+                className={settingsToggleClass(autoCompactionEnabled)}
               >
                 <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    autoCompactionEnabled ? 'translate-x-6' : 'translate-x-1'
-                  }`}
+                  className={settingsToggleKnobClass(autoCompactionEnabled)}
                 />
               </button>
             </div>
 
-            <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
+            <div className='flex items-center justify-between pt-2 pt-2'>
               <div>
                 <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Heimdall Note Hover Padding</p>
                 <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2273,31 +2532,22 @@ const Settings: React.FC = () => {
               </div>
               <button
                 onClick={handleHeimdallNotePreviewHoverPaddingToggle}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  heimdallNotePreviewHoverPaddingEnabled
-                    ? 'bg-emerald-500 dark:bg-emerald-600'
-                    : 'bg-stone-300 dark:bg-stone-600'
-                }`}
+                className={settingsToggleClass(heimdallNotePreviewHoverPaddingEnabled)}
               >
                 <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    heimdallNotePreviewHoverPaddingEnabled ? 'translate-x-6' : 'translate-x-1'
-                  }`}
+                  className={settingsToggleKnobClass(heimdallNotePreviewHoverPaddingEnabled)}
                 />
               </button>
             </div>
           </div>
-        </section>
+        </SettingsSection>
 
-        <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-          <div className='flex flex-col gap-1'>
-            <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Chat Mode Prompt</h2>
-            <p className='text-sm text-stone-500 dark:text-stone-200'>
-              Used when the composer is in Chat Mode. Chat Mode is read-only/planning-oriented.
-            </p>
-          </div>
-
-          <div className='mt-4 flex flex-col gap-4'>
+        <SettingsSection
+          title='Chat Mode Prompt'
+          description='Used when the composer is in Chat Mode. Chat Mode is read-only/planning-oriented.'
+          features={['Active prompt', 'Plan verbosity', 'Prompt editor', 'Saved prompts']}
+        >
+          <div className='flex flex-col gap-4'>
             <div className='flex flex-col gap-2'>
               <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Active Prompt</p>
               <Select
@@ -2311,20 +2561,36 @@ const Settings: React.FC = () => {
               />
             </div>
 
-            <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+            <div className='flex flex-col gap-2 pt-2 pt-2'>
+              <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Plan Verbosity</p>
+              <p className='text-sm text-stone-500 dark:text-stone-400'>
+                Controls how much detail Plan Mode asks the model to include in implementation plans.
+              </p>
+              <Select
+                value={planModeResponseSettings.verbosity}
+                onChange={handlePlanModeVerbosityChange}
+                options={PLAN_MODE_VERBOSITY_OPTIONS.map(option => ({
+                  value: option,
+                  label: option === 'concise' ? 'Concise' : option === 'normal' ? 'Normal' : 'Detailed',
+                }))}
+                className='max-w-xs'
+              />
+            </div>
+
+            <div className='flex flex-col gap-2 pt-2 pt-2'>
               <label className='text-sm font-medium text-stone-700 dark:text-stone-200'>Prompt Name</label>
               <input
                 type='text'
                 value={chatModePromptNameInput}
                 onChange={e => setChatModePromptNameInput(e.target.value)}
-                className='w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                className={`w-full ${settingsInputClass}`}
               />
               <label className='text-sm font-medium text-stone-700 dark:text-stone-200'>Prompt</label>
               <textarea
                 value={chatModePromptInput}
                 onChange={e => setChatModePromptInput(e.target.value)}
                 rows={8}
-                className='w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                className={`w-full ${settingsTextAreaClass}`}
               />
               <div className='flex flex-wrap gap-2'>
                 <Button onClick={handleSaveNewChatModePrompt}>Save as New</Button>
@@ -2342,10 +2608,10 @@ const Settings: React.FC = () => {
               </div>
             </div>
 
-            <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+            <div className='flex flex-col gap-2 pt-2 pt-2'>
               <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Saved Prompts</p>
               <div className='flex flex-col gap-2'>
-                <div className='flex items-center justify-between rounded-lg border border-stone-200 px-3 py-2 text-sm dark:border-stone-700'>
+                <div className='flex items-center justify-between rounded-full bg-white/45 px-4 py-3 text-sm backdrop-blur-xl dark:bg-white/5'>
                   <span className='text-stone-800 dark:text-stone-100'>{defaultChatModePrompt.name}</span>
                   <span className='text-xs text-stone-500 dark:text-stone-400'>
                     {selectedChatModePrompt.id === defaultChatModePrompt.id ? 'Selected default' : 'Default'}
@@ -2354,7 +2620,7 @@ const Settings: React.FC = () => {
                 {operationModePromptSettings.chatPrompts.map(prompt => (
                   <div
                     key={prompt.id}
-                    className='flex flex-wrap items-center justify-between gap-2 rounded-lg border border-stone-200 px-3 py-2 text-sm dark:border-stone-700'
+                    className='flex flex-wrap items-center justify-between gap-2 rounded-[1.75rem] bg-white/45 px-4 py-3 text-sm backdrop-blur-xl dark:bg-white/5'
                   >
                     <span className='text-stone-800 dark:text-stone-100'>{prompt.name}</span>
                     <div className='flex items-center gap-2'>
@@ -2373,18 +2639,14 @@ const Settings: React.FC = () => {
               </div>
             </div>
           </div>
-        </section>
+        </SettingsSection>
 
-        <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-          <div className='flex flex-col gap-1'>
-            <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Chat Reasoning Defaults</h2>
-            <p className='text-sm text-stone-500 dark:text-stone-200'>
-              These defaults are loaded every time Chat opens, then applied when the selected model supports
-              reasoning/thinking.
-            </p>
-          </div>
-
-          <div className='mt-4 flex flex-col gap-4'>
+        <SettingsSection
+          title='Chat Reasoning Defaults'
+          description='These defaults are loaded every time Chat opens, then applied when the selected model supports reasoning/thinking.'
+          features={['Default thinking', 'Reasoning effort']}
+        >
+          <div className='flex flex-col gap-4'>
             <div className='flex items-center justify-between'>
               <div>
                 <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Default Thinking</p>
@@ -2394,21 +2656,15 @@ const Settings: React.FC = () => {
               </div>
               <button
                 onClick={handleDefaultThinkingToggle}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  chatReasoningSettings.defaultThinkingEnabled
-                    ? 'bg-emerald-500 dark:bg-emerald-600'
-                    : 'bg-stone-300 dark:bg-stone-600'
-                }`}
+                className={settingsToggleClass(chatReasoningSettings.defaultThinkingEnabled)}
               >
                 <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    chatReasoningSettings.defaultThinkingEnabled ? 'translate-x-6' : 'translate-x-1'
-                  }`}
+                  className={settingsToggleKnobClass(chatReasoningSettings.defaultThinkingEnabled)}
                 />
               </button>
             </div>
 
-            <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+            <div className='flex flex-col gap-2 pt-2 pt-2'>
               <div>
                 <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Default Reasoning Effort</p>
                 <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2430,19 +2686,16 @@ const Settings: React.FC = () => {
               />
             </div>
           </div>
-        </section>
+        </SettingsSection>
 
         {/* Provider Settings Section */}
         {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Provider Settings</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Configure how providers appear in the chat interface.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
+          <SettingsSection
+            title='Provider Settings'
+            description='Configure how providers appear in the chat interface.'
+            features={['Provider selector', 'Default provider', 'Auto-compaction provider', 'LM Studio URL', 'Provider credentials', 'ChatGPT OAuth']}
+          >
+            <div className='flex flex-col gap-4'>
               {/* Visibility Toggle */}
               <div className='flex items-center justify-between'>
                 <div>
@@ -2453,23 +2706,17 @@ const Settings: React.FC = () => {
                 </div>
                 <button
                   onClick={handleProviderVisibilityToggle}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    providerSettings.showProviderSelector
-                      ? 'bg-emerald-500 dark:bg-emerald-600'
-                      : 'bg-stone-300 dark:bg-stone-600'
-                  }`}
+                  className={settingsToggleClass(providerSettings.showProviderSelector)}
                 >
                   <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      providerSettings.showProviderSelector ? 'translate-x-6' : 'translate-x-1'
-                    }`}
+                    className={settingsToggleKnobClass(providerSettings.showProviderSelector)}
                   />
                 </button>
               </div>
 
               {/* Default Provider Selection - shown when selector is hidden */}
               {!providerSettings.showProviderSelector && (
-                <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+                <div className='flex flex-col gap-2 pt-2 pt-2'>
                   <div>
                     <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Default Provider</p>
                     <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2491,8 +2738,47 @@ const Settings: React.FC = () => {
                   )}
                 </div>
               )}
-
-              <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <div className='flex flex-col gap-2 pt-2 pt-2'>
+                <div>
+                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>OpenAI ChatGPT Account</p>
+                  <p className='text-sm text-stone-500 dark:text-stone-400'>
+                    Sign in or out to manage local ChatGPT OAuth tokens used by the OpenAI (ChatGPT) provider.
+                  </p>
+                </div>
+                <div className='flex flex-wrap items-center gap-3'>
+                  <span
+                    className={`text-xs px-2 py-1 rounded-full border ${
+                      isOpenAIAuthenticated()
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-900/30 dark:border-emerald-700 dark:text-emerald-300'
+                        : 'bg-stone-100 border-stone-200 text-stone-600 dark:bg-stone-800 dark:border-stone-700 dark:text-stone-300'
+                    }`}
+                  >
+                    {isOpenAIAuthenticated() ? 'Signed in' : 'Signed out'}
+                  </span>
+                  {isOpenAIAuthenticated() && openaiAccountEmail && (
+                    <span className='max-w-full truncate rounded-full border border-stone-200 bg-stone-50 px-2 py-1 text-xs text-stone-600 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-300'>
+                      {openaiAccountEmail}
+                    </span>
+                  )}
+                  <Button
+                    variant='outline2'
+                    size='small'
+                    onClick={handleOpenAIChatGPTSignIn}
+                    disabled={isOpenAIAuthenticated()}
+                  >
+                    Sign in to ChatGPT
+                  </Button>
+                  <Button
+                    variant='outline2'
+                    size='small'
+                    onClick={handleOpenAIChatGPTSignOut}
+                    disabled={!isOpenAIAuthenticated()}
+                  >
+                    Sign out of ChatGPT
+                  </Button>
+                </div>
+              </div>
+              <div className='flex flex-col gap-2 pt-2 pt-2'>
                 <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Auto-Compaction Provider</p>
                   <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2534,12 +2820,12 @@ const Settings: React.FC = () => {
                     onChange={e => handleCompactionSystemPromptInputChange(e.target.value)}
                     onBlur={e => commitCompactionSystemPromptChange(e.target.value)}
                     rows={6}
-                    className='w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                    className={`w-full ${settingsTextAreaClass}`}
                   />
                 </div>
               </div>
 
-              <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <div className='flex flex-col gap-2 pt-2 pt-2'>
                 <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>LM Studio Server URL</p>
                   <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2558,7 +2844,7 @@ const Settings: React.FC = () => {
                         e.currentTarget.blur()
                       }
                     }}
-                    className='w-full max-w-xl rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                    className={`w-full max-w-xl ${settingsInputClass}`}
                   />
                   {providerSettings.lmStudioBaseUrl && (
                     <Button
@@ -2576,7 +2862,7 @@ const Settings: React.FC = () => {
                 </p>
               </div>
 
-              <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <div className='flex flex-col gap-2 pt-2 pt-2'>
                 <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>OpenRouter Temperature</p>
                   <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2598,7 +2884,7 @@ const Settings: React.FC = () => {
                         e.currentTarget.blur()
                       }
                     }}
-                    className='w-40 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                    className={`w-40 ${settingsInputClass}`}
                   />
                   {providerSettings.openRouterTemperature !== null && (
                     <Button
@@ -2616,30 +2902,8 @@ const Settings: React.FC = () => {
                 </p>
               </div>
 
-              <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
-                <div>
-                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>OpenAI Prompt Cache Retention</p>
-                  <p className='text-sm text-stone-500 dark:text-stone-400'>
-                    Uses the conversation ID as the OpenAI prompt cache key for ChatGPT/Codex requests.
-                  </p>
-                </div>
-                <Select
-                  value={providerSettings.openAiPromptCacheRetention}
-                  onChange={handleOpenAiPromptCacheRetentionChange}
-                  options={[
-                    { value: 'in_memory', label: 'In-memory (default)' },
-                    { value: '24h', label: '24 hours' },
-                  ]}
-                  className='max-w-xs'
-                />
-                {providerSettings.openAiPromptCacheRetention === '24h' && (
-                  <p className='rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200'>
-                    24h prompt cache retention is not Zero Data Retention eligible because OpenAI may retain derived cache artifacts for longer.
-                  </p>
-                )}
-              </div>
 
-              <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <div className='flex flex-col gap-2 pt-2 pt-2'>
                 <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Z.AI / GLM API Key</p>
                   <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2666,7 +2930,7 @@ const Settings: React.FC = () => {
                         void handleSaveZaiApiKey()
                       }
                     }}
-                    className='w-full max-w-md rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                    className={`w-full max-w-md ${settingsInputClass}`}
                   />
                   <Button variant='outline2' size='small' onClick={handleSaveZaiApiKey} disabled={zaiApiKeySaving || !zaiApiKeyInput.trim()}>
                     {zaiApiKeyConfigured ? 'Replace key' : 'Save key'}
@@ -2677,7 +2941,7 @@ const Settings: React.FC = () => {
                 </div>
               </div>
 
-              <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <div className='flex flex-col gap-2 pt-2 pt-2'>
                 <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Amazon Bedrock Credentials</p>
                   <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2699,14 +2963,14 @@ const Settings: React.FC = () => {
                     value={bedrockRegionInput}
                     placeholder='AWS region, e.g. us-east-1'
                     onChange={e => setBedrockRegionInput(e.target.value)}
-                    className='w-full max-w-xs rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                    className={`w-full max-w-xs ${settingsInputClass}`}
                   />
                   <input
                     type='password'
                     value={bedrockAccessKeyIdInput}
                     placeholder={bedrockCredentialsConfigured ? 'Enter new access key ID to replace' : 'AWS access key ID'}
                     onChange={e => setBedrockAccessKeyIdInput(e.target.value)}
-                    className='w-full max-w-md rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                    className={`w-full max-w-md ${settingsInputClass}`}
                   />
                   <input
                     type='password'
@@ -2718,7 +2982,7 @@ const Settings: React.FC = () => {
                         void handleSaveBedrockCredentials()
                       }
                     }}
-                    className='w-full max-w-md rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                    className={`w-full max-w-md ${settingsInputClass}`}
                   />
                   <input
                     type='password'
@@ -2730,7 +2994,7 @@ const Settings: React.FC = () => {
                         void handleSaveBedrockCredentials()
                       }
                     }}
-                    className='w-full max-w-md rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                    className={`w-full max-w-md ${settingsInputClass}`}
                   />
                   <Button
                     variant='outline2'
@@ -2759,61 +3023,19 @@ const Settings: React.FC = () => {
                 </p>
               </div>
 
-              <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
-                <div>
-                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>OpenAI ChatGPT Account</p>
-                  <p className='text-sm text-stone-500 dark:text-stone-400'>
-                    Sign in or out to manage local ChatGPT OAuth tokens used by the OpenAI (ChatGPT) provider.
-                  </p>
-                </div>
-                <div className='flex flex-wrap items-center gap-3'>
-                  <span
-                    className={`text-xs px-2 py-1 rounded-full border ${
-                      isOpenAIAuthenticated()
-                        ? 'bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-900/30 dark:border-emerald-700 dark:text-emerald-300'
-                        : 'bg-stone-100 border-stone-200 text-stone-600 dark:bg-stone-800 dark:border-stone-700 dark:text-stone-300'
-                    }`}
-                  >
-                    {isOpenAIAuthenticated() ? 'Signed in' : 'Signed out'}
-                  </span>
-                  {isOpenAIAuthenticated() && openaiAccountEmail && (
-                    <span className='max-w-full truncate rounded-full border border-stone-200 bg-stone-50 px-2 py-1 text-xs text-stone-600 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-300'>
-                      {openaiAccountEmail}
-                    </span>
-                  )}
-                  <Button
-                    variant='outline2'
-                    size='small'
-                    onClick={handleOpenAIChatGPTSignIn}
-                    disabled={isOpenAIAuthenticated()}
-                  >
-                    Sign in to ChatGPT
-                  </Button>
-                  <Button
-                    variant='outline2'
-                    size='small'
-                    onClick={handleOpenAIChatGPTSignOut}
-                    disabled={!isOpenAIAuthenticated()}
-                  >
-                    Sign out of ChatGPT
-                  </Button>
-                </div>
-              </div>
+              
             </div>
-          </section>
+          </SettingsSection>
         )}
 
         {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Memory</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Build note embeddings for local memory search using your LM Studio embedding model. This does not run automatically.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
-              <div className='rounded-lg border border-stone-200 bg-stone-50/70 px-4 py-3 text-sm text-stone-600 dark:border-stone-700 dark:bg-stone-800/40 dark:text-stone-300'>
+          <SettingsSection
+            title='Memory'
+            description='Build note embeddings for local memory search using your LM Studio embedding model. This does not run automatically.'
+            features={['Manual indexing', 'Runtime memory files', 'Global memory', 'Project memory']}
+          >
+            <div className='flex flex-col gap-4'>
+              <div className='rounded-[1.75rem] bg-white/55 px-4 py-3 text-sm text-stone-600 dark:bg-stone-800/40 dark:text-stone-300'>
                 <p className='font-medium text-stone-800 dark:text-stone-100'>Manual memory indexing</p>
                 <p className='mt-1'>
                   This sends note summaries to LM Studio using <code>text-embedding-nomic-embed-text-v1.5</code>, stores the returned vectors in the local sqlite-vec index, and marks indexed notes as ready for hybrid memory search.
@@ -2831,20 +3053,69 @@ const Settings: React.FC = () => {
                   Uses the LM Studio server configured below. Nothing runs until you click the button.
                 </p>
               </div>
+
+              <div className='mt-2 flex flex-col gap-3'>
+                <div className='flex flex-wrap items-center justify-between gap-3'>
+                  <div>
+                    <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Runtime memory files</p>
+                    <p className='text-sm text-stone-500 dark:text-stone-400'>
+                      View the markdown memory files currently used by local runtime hooks.
+                    </p>
+                  </div>
+                  <Button variant='outline2' size='small' onClick={loadMemoryFiles} disabled={memoryFilesLoading}>
+                    {memoryFilesLoading ? 'Refreshing…' : 'Refresh'}
+                  </Button>
+                </div>
+
+                {memoryFilesError && (
+                  <p className='rounded-[1.75rem] bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:bg-rose-900/30 dark:text-rose-200'>
+                    {memoryFilesError}
+                  </p>
+                )}
+
+                <div className='grid gap-3 md:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]'>
+                  <div className='rounded-[1.75rem] bg-white/45 p-3 dark:bg-stone-800/25'>
+                    <p className='px-1 pb-2 text-xs font-semibold uppercase tracking-wide text-stone-500 dark:text-stone-400'>
+                      Global
+                    </p>
+                    <div className='flex flex-col gap-2'>
+                      {globalMemoryFiles.length > 0 ? (
+                        globalMemoryFiles.map(renderMemoryFileButton)
+                      ) : (
+                        <p className='px-3 py-2 text-sm text-stone-500 dark:text-stone-400'>No global memory files found.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className='rounded-[1.75rem] bg-white/45 p-3 dark:bg-stone-800/25'>
+                    <p className='px-1 pb-2 text-xs font-semibold uppercase tracking-wide text-stone-500 dark:text-stone-400'>
+                      Project memory
+                    </p>
+                    <div className='max-h-64 overflow-y-auto thin-scrollbar pr-1'>
+                      <div className='flex flex-col gap-2'>
+                        {projectMemoryFiles.length > 0 ? (
+                          projectMemoryFiles.map(renderMemoryFileButton)
+                        ) : (
+                          <p className='px-3 py-2 text-sm text-stone-500 dark:text-stone-400'>
+                            No project memory files found yet.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
-          </section>
+          </SettingsSection>
         )}
 
                 {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Subagent</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Configure default subagent behavior used by the <code>subagent</code> tool.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
+          <SettingsSection
+            title='Subagent'
+            description={<>Configure default subagent behavior used by the <code>subagent</code> tool.</>}
+            features={['Provider', 'Model', 'Max turns', 'Orchestrator tool calls']}
+          >
+            <div className='flex flex-col gap-4'>
               <div className='flex flex-col gap-2'>
                 <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Subagent Provider</p>
@@ -2871,7 +3142,7 @@ const Settings: React.FC = () => {
                 )}
               </div>
 
-              <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <div className='flex flex-col gap-2 pt-2 pt-2'>
                 <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Subagent Model</p>
                   <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2880,13 +3151,13 @@ const Settings: React.FC = () => {
                   </p>
                 </div>
                 <Select
-                  value={subagentSettings.defaultModel || ''}
+                  value={selectedSubagentModelValue}
                   onChange={handleSubagentModelChange}
                   options={[
                     { value: '', label: 'Use provider selected/default model' },
                     ...((subagentModelsData?.models || []).map(model => ({
-                      value: model.name,
-                      label: model.name,
+                      value: model.id || model.name,
+                      label: model.displayName || model.name,
                     })) as any[]),
                   ]}
                   placeholder='Use provider selected/default model'
@@ -2898,7 +3169,7 @@ const Settings: React.FC = () => {
                 </p>
               </div>
 
-              <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between pt-2 pt-2'>
                 <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Subagent Max Turns</p>
                   <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -2917,11 +3188,11 @@ const Settings: React.FC = () => {
                       e.currentTarget.blur()
                     }
                   }}
-                  className='w-32 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                  className={`w-32 ${settingsInputClass}`}
                 />
               </div>
 
-              <div className='flex items-center justify-between pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <div className='flex items-center justify-between pt-2 pt-2'>
                 <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
                     Enable Orchestrator Tool Calls
@@ -2932,60 +3203,31 @@ const Settings: React.FC = () => {
                 </div>
                 <button
                   onClick={handleSubagentOrchestratorToggle}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    subagentSettings.orchestratorEnabled
-                      ? 'bg-emerald-500 dark:bg-emerald-600'
-                      : 'bg-stone-300 dark:bg-stone-600'
-                  }`}
+                  className={settingsToggleClass(subagentSettings.orchestratorEnabled)}
                 >
                   <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      subagentSettings.orchestratorEnabled ? 'translate-x-6' : 'translate-x-1'
-                    }`}
+                    className={settingsToggleKnobClass(subagentSettings.orchestratorEnabled)}
                   />
                 </button>
               </div>
 
-              <p className='text-xs text-stone-500 dark:text-stone-400 pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <p className='text-xs text-stone-500 dark:text-stone-400 pt-2 pt-2'>
                 Note: subagent turn/tool quota args and verbose return summary have been removed for a simpler output.
               </p>
             </div>
-          </section>
+          </SettingsSection>
         )}
 
         {/* Tools Settings Section - Collapsible */}
         {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <button
-              onClick={() => setToolsExpanded(!toolsExpanded)}
-              className='w-full flex items-center justify-between text-left'
-            >
-              <div className='flex flex-col gap-1'>
-                <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100'>Tools Configuration</h2>
-                <p className='text-sm text-stone-500 dark:text-stone-200'>
-                  Enable or disable AI tools. Changes apply to all new conversations.
-                </p>
-              </div>
-              <div className='flex items-center gap-2'>
-                <span className='text-sm text-stone-500 dark:text-stone-400'>
-                  {tools.filter(t => t.enabled).length}/{tools.length} enabled
-                </span>
-                <i
-                  className={`bx bx-chevron-down text-2xl text-stone-500 dark:text-stone-400 transition-transform duration-200 ${
-                    toolsExpanded ? 'rotate-180' : ''
-                  }`}
-                ></i>
-              </div>
-            </button>
-
-            {/* Collapsible content */}
-            <div
-              className={`transition-all duration-300 ease-in-out overflow-hidden ${
-                toolsExpanded ? ' opacity-100 my-4' : 'max-h-0 opacity-0'
-              }`}
-            >
+          <SettingsSection
+            title='Tools Configuration'
+            description='Enable or disable AI tools. Changes apply to all new conversations.'
+            features={['Tool toggles', 'Tool call timeout', 'Bash timeout', 'Reload tools']}
+          >
+            <div>
               <div className='mb-3 space-y-3'>
-                <div className='rounded-lg border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-stone-800/30'>
+                <div className='rounded-[1.75rem] bg-white/45 p-3 dark:bg-stone-800/30'>
                   <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
                     <div>
                       <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
@@ -3008,7 +3250,7 @@ const Settings: React.FC = () => {
                           e.currentTarget.blur()
                         }
                       }}
-                      className='w-44 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                      className={`w-44 ${settingsInputClass}`}
                     />
                   </div>
                   <p className='mt-2 text-xs text-stone-500 dark:text-stone-400'>
@@ -3016,7 +3258,7 @@ const Settings: React.FC = () => {
                   </p>
                 </div>
 
-                <div className='rounded-lg border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-stone-800/30'>
+                <div className='rounded-[1.75rem] bg-white/45 p-3 dark:bg-stone-800/30'>
                   <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
                     <div>
                       <p className='text-base font-medium text-stone-900 dark:text-stone-100'>
@@ -3039,7 +3281,7 @@ const Settings: React.FC = () => {
                           e.currentTarget.blur()
                         }
                       }}
-                      className='w-44 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                      className={`w-44 ${settingsInputClass}`}
                     />
                   </div>
                   <p className='mt-2 text-xs text-stone-500 dark:text-stone-400'>
@@ -3057,7 +3299,7 @@ const Settings: React.FC = () => {
                   disabled={reloadingTools}
                   className='flex items-center gap-1.5'
                 >
-                  <i className={`bx bx-refresh text-base ${reloadingTools ? 'animate-spin' : ''}`}></i>
+                  <RefreshCw size={16} strokeWidth={2.25} className={reloadingTools ? 'animate-spin' : ''} aria-hidden='true' />
                   {reloadingTools ? 'Reloading...' : 'Reload Tools'}
                 </Button>
               </div>
@@ -3065,14 +3307,14 @@ const Settings: React.FC = () => {
               {/* Tools list */}
               <div className='space-y-2'>
                 {tools.length === 0 ? (
-                  <div className='rounded-xl border-2 border-dashed border-stone-200 bg-stone-50/80 p-6 text-center text-sm text-stone-500 dark:border-stone-700 dark:bg-zinc-900/60 dark:text-stone-400'>
+                  <div className='rounded-[1.75rem] border border-dashed border-stone-200 bg-stone-50/80 p-6 text-center text-sm text-stone-500 dark:border-stone-700 dark:bg-zinc-900/60 dark:text-stone-400'>
                     No tools available. Reload to check for new tools.
                   </div>
                 ) : (
                   tools.map(tool => (
                     <div
                       key={tool.name}
-                      className={`flex items-center justify-between p-3 rounded-lg border ${
+                      className={`flex items-center justify-between rounded-[1.75rem] p-4 ${
                         tool.isCustom
                           ? 'border-orange-300 dark:border-orange-600/50 bg-orange-50/50 dark:bg-orange-900/10'
                           : 'border-stone-200 dark:border-stone-700 bg-stone-50/50 dark:bg-stone-800/30'
@@ -3084,7 +3326,7 @@ const Settings: React.FC = () => {
                             {tool.name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
                           </span>
                           {tool.isCustom && (
-                            <span className='text-xs px-1.5 py-0.5 rounded bg-orange-100 dark:bg-orange-900/40 text-orange-600 dark:text-orange-300 flex-shrink-0'>
+                            <span className='shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-xs text-orange-600 dark:bg-orange-900/40 dark:text-orange-300'>
                               Custom
                             </span>
                           )}
@@ -3094,14 +3336,10 @@ const Settings: React.FC = () => {
                       <button
                         onClick={() => handleToolToggle(tool.name, tool.enabled)}
                         disabled={updatingTools.has(tool.name)}
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ml-3 flex-shrink-0 ${
-                          tool.enabled ? 'bg-emerald-500 dark:bg-emerald-600' : 'bg-stone-300 dark:bg-stone-600'
-                        } ${updatingTools.has(tool.name) ? 'opacity-50 cursor-wait' : ''}`}
+                        className={`${settingsToggleClass(tool.enabled)} ml-3 ${updatingTools.has(tool.name) ? 'cursor-wait opacity-50' : ''}`}
                       >
                         <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            tool.enabled ? 'translate-x-6' : 'translate-x-1'
-                          }`}
+                          className={settingsToggleKnobClass(tool.enabled)}
                         />
                       </button>
                     </div>
@@ -3109,42 +3347,21 @@ const Settings: React.FC = () => {
                 )}
               </div>
             </div>
-          </section>
+          </SettingsSection>
         )}
 
         {/* HTML Tools Management Section - Collapsible */}
         {htmlRegistry && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <button
-              onClick={() => setHtmlToolsExpanded(!htmlToolsExpanded)}
-              className='w-full flex items-center justify-between text-left'
-            >
-              <div className='flex flex-col gap-1'>
-                <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100'>HTML Tools Cache</h2>
-                <p className='text-sm text-stone-500 dark:text-stone-200'>
-                  Manage cached HTML tool outputs. Remove problematic tools without rendering them.
-                </p>
-              </div>
-              <div className='flex items-center gap-2'>
-                <span className='text-sm text-stone-500 dark:text-stone-400'>{htmlEntries.length} cached</span>
-                <i
-                  className={`bx bx-chevron-down text-2xl text-stone-500 dark:text-stone-400 transition-transform duration-200 ${
-                    htmlToolsExpanded ? 'rotate-180' : ''
-                  }`}
-                ></i>
-              </div>
-            </button>
-
-            {/* Collapsible content */}
-            <div
-              className={`transition-all duration-300 ease-in-out overflow-hidden ${
-                htmlToolsExpanded ? 'max-h-[2000px] opacity-100 mt-4' : 'max-h-0 opacity-0'
-              }`}
-            >
+          <SettingsSection
+            title='HTML Tools Cache'
+            description='Manage cached HTML tool outputs. Remove problematic tools without rendering them.'
+            features={['Cached outputs', 'Favorites', 'Hibernate/restore', 'Remove cache entries']}
+          >
+            <div>
               {/* Tools list */}
               <div className='space-y-2'>
                 {htmlEntries.length === 0 ? (
-                  <div className='rounded-xl border-2 border-dashed border-stone-200 bg-stone-50/80 p-6 text-center text-sm text-stone-500 dark:border-stone-700 dark:bg-zinc-900/60 dark:text-stone-400'>
+                  <div className='rounded-[1.75rem] border border-dashed border-stone-200 bg-stone-50/80 p-6 text-center text-sm text-stone-500 dark:border-stone-700 dark:bg-zinc-900/60 dark:text-stone-400'>
                     No HTML tools cached. Tools will appear here when AI generates interactive outputs.
                   </div>
                 ) : (
@@ -3158,7 +3375,7 @@ const Settings: React.FC = () => {
                     return (
                       <div
                         key={entry.key}
-                        className={`flex items-center justify-between p-3 rounded-lg border ${
+                        className={`flex items-center justify-between rounded-[1.75rem] p-4 ${
                           isHibernated
                             ? 'border-stone-300 dark:border-stone-600 bg-stone-100/50 dark:bg-stone-800/50 opacity-60'
                             : isFavorite
@@ -3172,12 +3389,12 @@ const Settings: React.FC = () => {
                               {entry.label || 'Unnamed Tool'}
                             </span>
                             {isFavorite && (
-                              <span className='text-xs px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-600 dark:text-amber-300 flex-shrink-0'>
+                              <span className='shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-600 dark:bg-amber-900/40 dark:text-amber-300'>
                                 ★ Favorite
                               </span>
                             )}
                             {isHibernated && (
-                              <span className='text-xs px-1.5 py-0.5 rounded bg-stone-200 dark:bg-stone-700 text-stone-600 dark:text-stone-400 flex-shrink-0'>
+                              <span className='shrink-0 rounded-full bg-stone-200 px-2 py-0.5 text-xs text-stone-600 dark:bg-stone-700 dark:text-stone-400'>
                                 Hibernated
                               </span>
                             )}
@@ -3196,14 +3413,14 @@ const Settings: React.FC = () => {
                                 text: entry.favorite ? 'Removed from favorites.' : 'Added to favorites.',
                               })
                             }}
-                            className={`p-2 rounded-lg transition-colors ${
+                            className={`${circularControlClass} ${
                               isFavorite
                                 ? 'bg-amber-100 text-amber-600 dark:bg-amber-900/40 dark:text-amber-400'
-                                : 'bg-stone-100 text-stone-500 hover:bg-stone-200 dark:bg-stone-700 dark:text-stone-400 dark:hover:bg-stone-600'
+                                : ''
                             }`}
                             title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                           >
-                            <i className={`bx ${isFavorite ? 'bxs-star' : 'bx-star'} text-base`}></i>
+                            <Star size={18} strokeWidth={2.25} fill={isFavorite ? 'currentColor' : 'none'} aria-hidden='true' />
                           </button>
                           {/* Hibernate/Restore toggle */}
                           <button
@@ -3216,10 +3433,10 @@ const Settings: React.FC = () => {
                                 showStatus({ type: 'info', text: 'Tool hibernated.' })
                               }
                             }}
-                            className='p-2 rounded-lg bg-stone-100 text-stone-500 hover:bg-stone-200 dark:bg-stone-700 dark:text-stone-400 dark:hover:bg-stone-600 transition-colors'
+                            className={circularControlClass}
                             title={isHibernated ? 'Restore tool' : 'Hibernate tool'}
                           >
-                            <i className={`bx ${isHibernated ? 'bx-sun' : 'bx-moon'} text-base`}></i>
+                            {isHibernated ? <Sun size={18} strokeWidth={2.25} aria-hidden='true' /> : <Moon size={18} strokeWidth={2.25} aria-hidden='true' />}
                           </button>
                           {/* Remove button */}
                           <button
@@ -3227,10 +3444,10 @@ const Settings: React.FC = () => {
                               htmlRegistry.removeEntry(entry.key)
                               showStatus({ type: 'info', text: 'Tool removed from cache.' })
                             }}
-                            className='p-2 rounded-lg bg-rose-50 text-rose-500 hover:bg-rose-100 dark:bg-rose-900/30 dark:text-rose-400 dark:hover:bg-rose-900/50 transition-colors'
+                            className={circularDangerControlClass}
                             title='Remove tool'
                           >
-                            <i className='bx bx-trash text-base'></i>
+                            <Trash2 size={18} strokeWidth={2.25} aria-hidden='true' />
                           </button>
                         </div>
                       </div>
@@ -3256,19 +3473,16 @@ const Settings: React.FC = () => {
                 </div>
               )}
             </div>
-          </section>
+          </SettingsSection>
         )}
 
                 {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>API Keys</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Store local tool credentials securely in your OS keychain via keytar.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
+          <SettingsSection
+            title='API Keys'
+            description='Store local tool credentials securely in your OS keychain via keytar.'
+            features={['Brave Search key', 'Secure keychain storage', 'Save/remove credentials']}
+          >
+            <div className='flex flex-col gap-4'>
               <div className='flex flex-col gap-2'>
                 <div className='flex flex-wrap items-center gap-3'>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Brave Search API Key</p>
@@ -3290,7 +3504,7 @@ const Settings: React.FC = () => {
                   value={braveApiKeyInput}
                   placeholder='Enter Brave Search API key'
                   onChange={e => setBraveApiKeyInput(e.target.value)}
-                  className='w-full max-w-xl rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                  className={`w-full max-w-xl ${settingsInputClass}`}
                 />
                 <div className='flex flex-wrap items-center gap-2'>
                   <Button
@@ -3315,84 +3529,16 @@ const Settings: React.FC = () => {
                 </p>
               </div>
             </div>
-          </section>
+          </SettingsSection>
         )}
 
         {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Hermes Runtime</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Choose how Ygg launches Hermes ACP for Hermes-backed chats. Changes apply to new Hermes runs.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
-              <div className='flex flex-col gap-2'>
-                <div>
-                  <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Launch Mode</p>
-                  <p className='text-sm text-stone-500 dark:text-stone-400'>
-                    Auto uses the native launcher by default. Use WSL only when Ygg is on Windows and Hermes is
-                    installed inside WSL.
-                  </p>
-                </div>
-                <Select
-                  value={hermesRuntimeSettings.launchMode}
-                  onChange={handleHermesLaunchModeChange}
-                  options={[
-                    { value: 'auto', label: 'Auto (recommended)' },
-                    { value: 'native', label: 'Native' },
-                    ...(isWindowsElectron || hermesRuntimeSettings.launchMode === 'wsl'
-                      ? [{ value: 'wsl', label: 'WSL' }]
-                      : []),
-                  ]}
-                  className='max-w-xs'
-                />
-              </div>
-
-              {isWindowsElectron && hermesRuntimeSettings.launchMode === 'wsl' && (
-                <div className='flex flex-col gap-2 pt-2 border-t border-stone-200 dark:border-stone-700'>
-                  <div>
-                    <p className='text-base font-medium text-stone-900 dark:text-stone-100'>WSL Distribution</p>
-                    <p className='text-sm text-stone-500 dark:text-stone-400'>
-                      Optional. Leave blank to use your default WSL distro.
-                    </p>
-                  </div>
-                  <input
-                    type='text'
-                    value={hermesRuntimeSettings.wslDistro}
-                    onChange={event => handleHermesWslDistroChange(event.target.value)}
-                    onBlur={handleHermesWslDistroBlur}
-                    placeholder='e.g. Ubuntu-24.04'
-                    className='max-w-md rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
-                  />
-                </div>
-              )}
-
-              <div className='rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-xs text-stone-600 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-300'>
-                <p>
-                  Current setting: <code>{hermesRuntimeSettings.launchMode}</code>
-                  {isWindowsElectron && hermesRuntimeSettings.launchMode === 'wsl'
-                    ? hermesRuntimeSettings.wslDistro
-                      ? ` via distro ${hermesRuntimeSettings.wslDistro}`
-                      : ' via default WSL distro'
-                    : ''}
-                </p>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Built-in Browser</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Control optional features for the Electron right-dock browser pane.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
+          <SettingsSection
+            title='Built-in Browser'
+            description='Control optional features for the Electron right-dock browser pane.'
+            features={['Guest page DevTools', 'Browser pane setting']}
+          >
+            <div className='flex flex-col gap-4'>
               <div className='flex items-center justify-between'>
                 <div>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Guest Page DevTools</p>
@@ -3402,40 +3548,31 @@ const Settings: React.FC = () => {
                 </div>
                 <button
                   onClick={handleBrowserGuestDevToolsToggle}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    browserSettings.guestDevToolsEnabled
-                      ? 'bg-emerald-500 dark:bg-emerald-600'
-                      : 'bg-stone-300 dark:bg-stone-600'
-                  }`}
+                  className={settingsToggleClass(browserSettings.guestDevToolsEnabled)}
                 >
                   <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      browserSettings.guestDevToolsEnabled ? 'translate-x-6' : 'translate-x-1'
-                    }`}
+                    className={settingsToggleKnobClass(browserSettings.guestDevToolsEnabled)}
                   />
                 </button>
               </div>
 
-              <div className='rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-xs text-stone-600 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-300'>
+              <div className='rounded-[1.75rem] bg-white/45 px-4 py-3 text-xs text-stone-600 dark:bg-zinc-900 dark:text-stone-300'>
                 <p>
                   Current setting:{' '}
                   <code>{browserSettings.guestDevToolsEnabled ? 'enabled' : 'disabled'}</code>
                 </p>
               </div>
             </div>
-          </section>
+          </SettingsSection>
         )}
 
         {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Remote Mobile Access</h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Configure a LAN URL for your phone/tablet (same Wi-Fi), then open or scan the QR code.
-              </p>
-            </div>
-
-            <div className='mt-4 grid gap-5 lg:grid-cols-[minmax(0,1fr)_240px]'>
+          <SettingsSection
+            title='Remote Mobile Access'
+            description='Configure a LAN URL for your phone/tablet (same Wi-Fi), then open or scan the QR code.'
+            features={['Remote server URL', 'Mobile URL actions', 'QR code', 'Detected local origin']}
+          >
+            <div className='grid gap-5 lg:grid-cols-[minmax(0,1fr)_240px]'>
               <div className='flex flex-col gap-3'>
                 <div className='flex flex-col gap-2'>
                   <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Remote Server Base URL</p>
@@ -3444,7 +3581,7 @@ const Settings: React.FC = () => {
                     value={remoteBaseUrlInput}
                     placeholder='http://192.168.0.119:3002'
                     onChange={event => setRemoteBaseUrlInput(event.target.value)}
-                    className='w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                    className={`w-full ${settingsInputClass}`}
                   />
                   <p className='text-xs text-stone-500 dark:text-stone-400'>
                     Leave blank to use detected local origin: {detectedLocalServerOrigin || 'resolving...'}
@@ -3487,7 +3624,7 @@ const Settings: React.FC = () => {
                   </Button>
                 </div>
 
-                <div className='rounded-lg border border-stone-200 bg-stone-50/70 px-3 py-2 text-xs text-stone-600 dark:border-stone-700 dark:bg-stone-800/40 dark:text-stone-300 break-all'>
+                <div className='rounded-[1.75rem] bg-white/45 px-3 py-2 text-xs text-stone-600 dark:bg-stone-800/40 dark:text-stone-300 break-all'>
                   <p className='font-medium mb-1 text-stone-700 dark:text-stone-200'>Effective mobile URL</p>
                   <p>{effectiveRemoteMobileUrl || 'Unavailable'}</p>
                 </div>
@@ -3499,10 +3636,10 @@ const Settings: React.FC = () => {
                   <img
                     src={remoteQrCodeImageUrl}
                     alt='QR code for remote mobile URL'
-                    className='h-[220px] w-[220px] rounded-lg border border-stone-200 bg-white p-2 dark:border-stone-700'
+                    className='h-[220px] w-[220px] rounded-[1.75rem] bg-white p-3 dark:border-stone-700'
                   />
                 ) : (
-                  <div className='flex h-[220px] w-[220px] items-center justify-center rounded-lg border border-dashed border-stone-300 text-xs text-stone-500 dark:border-stone-600 dark:text-stone-400'>
+                  <div className='flex h-[220px] w-[220px] items-center justify-center rounded-[1.75rem] border border-dashed border-stone-300 text-xs text-stone-500 dark:border-stone-600 dark:text-stone-400'>
                     Enter or detect a URL to render QR
                   </div>
                 )}
@@ -3511,21 +3648,16 @@ const Settings: React.FC = () => {
                 </p>
               </div>
             </div>
-          </section>
+          </SettingsSection>
         )}
 
         {import.meta.env.VITE_ENVIRONMENT === 'electron' && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-            <div className='flex flex-col gap-1'>
-              <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>
-                Local Ownership Migration
-              </h2>
-              <p className='text-sm text-stone-500 dark:text-stone-200'>
-                Manually move local project/conversation ownership from one user ID to another.
-              </p>
-            </div>
-
-            <div className='mt-4 flex flex-col gap-4'>
+          <SettingsSection
+            title='Local Ownership Migration'
+            description='Manually move local project/conversation ownership from one user ID to another.'
+            features={['Source user', 'Destination user', 'Refresh users', 'Migrate ownership']}
+          >
+            <div className='flex flex-col gap-4'>
               <div className='flex flex-col gap-2'>
                 <p className='text-base font-medium text-stone-900 dark:text-stone-100'>From User</p>
                 <Select
@@ -3554,7 +3686,7 @@ const Settings: React.FC = () => {
                 </p>
               </div>
 
-              <div className='flex flex-wrap items-center gap-3 pt-2 border-t border-stone-200 dark:border-stone-700'>
+              <div className='flex flex-wrap items-center gap-3 pt-2 pt-2'>
                 <Button
                   variant='outline2'
                   size='small'
@@ -3585,18 +3717,15 @@ const Settings: React.FC = () => {
                 This only updates local SQLite ownership (projects, conversations, provider costs).
               </p>
             </div>
-          </section>
+          </SettingsSection>
         )}
 
-                <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-          <div className='flex flex-col gap-1'>
-            <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Typography</h2>
-            <p className='text-sm text-stone-500 dark:text-stone-200'>
-              Set app font from a Google Fonts URL or a local font file.
-            </p>
-          </div>
-
-          <div className='mt-4 flex flex-col gap-5'>
+                <SettingsSection
+          title='Typography'
+          description='Set app font from a Google Fonts URL or a local font file.'
+          features={['Google Fonts URL', 'Local font upload', 'Use local font', 'Reset app font']}
+        >
+          <div className='flex flex-col gap-5'>
             <div className='flex flex-col gap-2'>
               <p className='text-base font-medium text-stone-900 dark:text-stone-100'>Google Fonts URL</p>
               <p className='text-sm text-stone-500 dark:text-stone-400'>
@@ -3606,20 +3735,20 @@ const Settings: React.FC = () => {
                 type='url'
                 value={googleFontUrlInput}
                 onChange={event => setGoogleFontUrlInput(event.target.value)}
-                placeholder='https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap'
-                className='w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-stone-700 dark:bg-zinc-900 dark:text-stone-100'
+                placeholder={DEFAULT_GOOGLE_FONT_URL}
+                className={`w-full ${settingsInputClass}`}
               />
               <div className='flex flex-wrap items-center gap-2'>
                 <Button variant='primary' size='small' onClick={handleGoogleFontUrlApply}>
                   Apply Google Font
                 </Button>
                 <Button variant='outline2' size='small' onClick={handleResetAppFont}>
-                  Reset to DM Sans
+                  Reset to {DEFAULT_GOOGLE_FONT_FAMILY}
                 </Button>
               </div>
             </div>
 
-            <div className='pt-3 border-t border-stone-200 dark:border-stone-700 flex flex-col gap-2'>
+            <div className='pt-3 pt-2 flex flex-col gap-2'>
               <input
                 ref={fontFileInputRef}
                 type='file'
@@ -3658,25 +3787,19 @@ const Settings: React.FC = () => {
               </p>
             </div>
           </div>
-        </section>
+        </SettingsSection>
 
-        <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
-          <div className='flex flex-col gap-1'>
-            <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Custom Upload</h2>
-            <p className='text-sm text-stone-500 dark:text-stone-200'>
-              Drag in an MP4 or WebM and we’ll keep it ready for whenever you want that motion.
-            </p>
-            <p className='mt-1 text-sm video-light:text-neutral-100 video-dark:text-neutral-900'>
-              Upload up to 8MB MP4/WebM clips and switch between them in one place.
-            </p>
-          </div>
-
-          <div className='mt-2 flex flex-col gap-4 lg:flex-row lg:items-center'>
+        <SettingsSection
+          title='Custom Upload'
+          description='Drag in an MP4 or WebM and keep it ready for motion wallpapers.'
+          features={['MP4/WebM upload', '8MB limit', 'Wallpaper gallery']}
+        >
+          <div className='flex flex-col gap-4 lg:flex-row lg:items-center'>
             <div className='flex-1 space-y-1 py-2'>
               <p className='text-sm mb-4 text-stone-500 dark:text-stone-200'>
                 Accepted formats: MP4, WebM · Max size 8MB.
               </p>
-              <div className='rounded-xl border border-dashed border-stone-200 bg-stone-50/80 p-4 text-sm text-stone-500 dark:border-stone-700 dark:bg-zinc-800/60 dark:text-stone-200'>
+              <div className='rounded-[1.75rem] bg-white/45 p-4 text-sm text-stone-500 dark:bg-zinc-800/60 dark:text-stone-200'>
                 <p>Uploaded wallpapers appear below. You can switch between them at any time.</p>
               </div>
             </div>
@@ -3694,7 +3817,7 @@ const Settings: React.FC = () => {
                 size='large'
                 onClick={() => fileInputRef.current?.click()}
                 disabled={uploading}
-                className='group shadow-md'
+                className='group'
               >
                 <p className='transition-transform duration-100 group-active:scale-95'>
                   {uploading ? 'Processing…' : 'Browse for video'}
@@ -3702,37 +3825,31 @@ const Settings: React.FC = () => {
               </Button>
             </div>
           </div>
-        </section>
+        </SettingsSection>
 
-        <section
-          className={`rounded-2xl border border-neutral-200 p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20 ${customThemeEnabled ? '' : 'mica dark:bg-zinc-900/60'}`}
+        <SettingsSection
+          title='Solid Color Background'
+          description='Pick colors for light and dark themes.'
+          features={['Video/solid mode', 'Light color', 'Dark color', 'Transparent option']}
           style={{ backgroundColor: customThemeEnabled ? settingsSolidColorSectionBackground : undefined }}
         >
-          <div className='flex flex-col gap-1'>
-            <div className='flex flex-wrap items-center justify-between gap-3'>
-              <div>
-                <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100'>Solid Color Background</h2>
-                <p className='text-sm text-stone-500 dark:text-stone-400'>Pick colors for light and dark themes.</p>
-              </div>
-              <div className='flex flex-wrap gap-2'>
-                <Button
-                  variant={backgroundMode === 'video' ? 'primary' : 'outline2'}
-                  size='small'
-                  onClick={() => handleBackgroundModeChange('video')}
-                  className='group'
-                >
-                  <p className='transition-transform duration-100 group-active:scale-95'>Video wallpaper</p>
-                </Button>
-                <Button
-                  variant={backgroundMode === 'color' ? 'primary' : 'outline2'}
-                  size='small'
-                  onClick={() => handleBackgroundModeChange('color')}
-                  className='group'
-                >
-                  <p className='transition-transform duration-100 group-active:scale-95'>Solid colors</p>
-                </Button>
-              </div>
-            </div>
+          <div className='flex flex-wrap justify-end gap-2'>
+            <Button
+              variant={backgroundMode === 'video' ? 'primary' : 'outline2'}
+              size='small'
+              onClick={() => handleBackgroundModeChange('video')}
+              className='group'
+            >
+              <p className='transition-transform duration-100 group-active:scale-95'>Video wallpaper</p>
+            </Button>
+            <Button
+              variant={backgroundMode === 'color' ? 'primary' : 'outline2'}
+              size='small'
+              onClick={() => handleBackgroundModeChange('color')}
+              className='group'
+            >
+              <p className='transition-transform duration-100 group-active:scale-95'>Solid colors</p>
+            </Button>
           </div>
           <div className='mt-5 grid gap-4 md:grid-cols-2'>
             {(['light', 'dark'] as const).map(mode => {
@@ -3747,7 +3864,7 @@ const Settings: React.FC = () => {
               return (
                 <div
                   key={mode}
-                  className='rounded-xl border border-stone-200 bg-stone-50/70 p-4 transition dark:border-stone-700 dark:bg-zinc-900/70'
+                  className='rounded-[1.75rem] bg-white/45 p-4 transition dark:bg-zinc-900/70'
                 >
                   <div className='flex items-start justify-between gap-3'>
                     <div>
@@ -3793,29 +3910,25 @@ const Settings: React.FC = () => {
             Solid colors automatically switch with the theme, and you can still set either theme to transparent if you
             want. When you’re ready for motion, switch back to video wallpapers.
           </p>
-        </section>
+        </SettingsSection>
 
-        <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:bg-zinc-900 dark:shadow-black/20'>
-          <div className='flex flex-col gap-1'>
-            <div className='flex flex-wrap items-center justify-between gap-3'>
-              <div>
-                <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100'>Saved Wallpapers</h2>
-                <p className='text-sm text-stone-500 dark:text-stone-400'>Select or delete any saved clip.</p>
-              </div>
-              <div className='flex flex-wrap gap-2'>
-                <Button variant='outline2' size='small' onClick={handleResetToDefault} className='group'>
-                  <p className='transition-transform duration-100 group-active:scale-95'>Reset to Default</p>
-                </Button>
-                <Button variant='outline2' size='small' onClick={handleClearGallery} className='group'>
-                  <p className='transition-transform duration-100 group-active:scale-95'>Clear Gallery</p>
-                </Button>
-              </div>
-            </div>
+        <SettingsSection
+          title='Saved Wallpapers'
+          description='Select or delete any saved clip.'
+          features={['Wallpaper selection', 'Text color mode', 'Reset default', 'Clear gallery']}
+        >
+          <div className='flex flex-wrap justify-end gap-2'>
+            <Button variant='outline2' size='small' onClick={handleResetToDefault} className='group'>
+              <p className='transition-transform duration-100 group-active:scale-95'>Reset to Default</p>
+            </Button>
+            <Button variant='outline2' size='small' onClick={handleClearGallery} className='group'>
+              <p className='transition-transform duration-100 group-active:scale-95'>Clear Gallery</p>
+            </Button>
           </div>
 
           <div className='mt-5 grid gap-4 md:grid-cols-2'>
             {videos.length === 0 ? (
-              <div className='col-span-full rounded-xl border-2 border-dashed border-stone-200 bg-stone-50/80 p-6 text-center text-sm text-stone-500 dark:border-stone-700 dark:bg-zinc-900/60 dark:text-stone-400'>
+              <div className='col-span-full rounded-[1.75rem] border border-dashed border-stone-200 bg-stone-50/80 p-6 text-center text-sm text-stone-500 dark:border-stone-700 dark:bg-zinc-900/60 dark:text-stone-400'>
                 No saved wallpapers yet. Upload a video to get started.
               </div>
             ) : (
@@ -3824,7 +3937,7 @@ const Settings: React.FC = () => {
                 return (
                   <div
                     key={video.id}
-                    className={`flex flex-col gap-3 rounded-xl border p-4 transition ${
+                    className={`flex flex-col gap-3 rounded-[1.75rem] p-4 transition ${
                       isActive
                         ? 'border-emerald-300 bg-emerald-50/40 dark:border-emerald-500/60 dark:bg-emerald-900/40'
                         : 'border-stone-200 bg-stone-50/70 hover:border-indigo-400 dark:hover:bg-neutral-700/40 dark:border-stone-700 dark:bg-zinc-900/70 dark:hover:border-sky-600'
@@ -3876,7 +3989,7 @@ const Settings: React.FC = () => {
                             <button
                               key={mode}
                               onClick={() => handleTextColorModeChange(video.id, mode)}
-                              className={`px-2 py-1 text-xs rounded-md transition-colors ${
+                              className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
                                 isSelected
                                   ? 'bg-indigo-500 text-white dark:bg-indigo-600'
                                   : 'bg-stone-200 text-stone-600 hover:bg-stone-300 dark:bg-zinc-700 dark:text-stone-300 dark:hover:bg-zinc-600'
@@ -3900,10 +4013,10 @@ const Settings: React.FC = () => {
               })
             )}
           </div>
-        </section>
+        </SettingsSection>
 
         {false && (
-          <section className='rounded-2xl border border-neutral-200 mica p-6 shadow-lg shadow-neutral-200/30 dark:border-neutral-800 dark:shadow-black/20'>
+          <section className={settingsSectionClass}>
             <div className='flex flex-col gap-1'>
               <h2 className='text-xl font-semibold text-stone-900 dark:text-stone-100 mb-2'>Services</h2>
               <p className='text-sm text-stone-500 dark:text-stone-200'>
@@ -3978,7 +4091,7 @@ const Settings: React.FC = () => {
             onClick={closeOpenaiLoginModal}
           >
             <div
-              className='w-full max-w-md rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-900'
+              className='w-full max-w-md rounded-[2.5rem] bg-white/90 p-6 backdrop-blur-xl dark:bg-zinc-900/95'
               onClick={e => e.stopPropagation()}
             >
               <h3 className='mb-2 text-[20px] font-semibold text-stone-900 dark:text-stone-100'>Sign in to OpenAI</h3>
@@ -3994,7 +4107,7 @@ const Settings: React.FC = () => {
                   </div>
                 )}
 
-                <div className='rounded-lg border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-900/50 dark:bg-emerald-900/20'>
+                <div className='rounded-2xl bg-emerald-50 p-3 dark:bg-emerald-900/20'>
                   <div className='flex items-center gap-2 text-sm text-emerald-800 dark:text-emerald-200'>
                     {(openaiAuthPolling || openaiAuthLoading) && (
                       <i className='bx bx-loader-alt animate-spin text-lg text-emerald-600 dark:text-emerald-300'></i>

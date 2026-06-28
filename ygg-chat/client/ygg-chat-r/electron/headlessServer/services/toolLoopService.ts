@@ -8,6 +8,9 @@ import type {
 } from '../providers/openRouterProvider.js'
 import { ProviderRouter, normalizeProviderRoute } from './providerRouter.js'
 import { persistWithFallback, type ToolResultPersistencePolicy } from './toolResultPersistenceService.js'
+import { sanitizeToolResultContentForModel } from '../providers/toolResultSanitizer.js'
+import { formatProviderErrorForAssistant, type FormattedProviderError } from '../providers/providerErrorFormatter.js'
+import { assertToolAllowedForOperationMode } from '../../../../../shared/operationModeToolPolicy.js'
 
 export interface ToolExecutionContext {
   conversationId: string
@@ -64,6 +67,21 @@ export interface ToolLoopRunInput {
 export interface ToolLoopRunResult {
   finalAssistantMessage: any
   turnsUsed: number
+  providerError?: FormattedProviderError
+}
+
+export class ProviderErrorAssistantResponse extends Error {
+  readonly assistantMessage: any
+  readonly providerError: FormattedProviderError
+  readonly turnsUsed: number
+
+  constructor(input: { assistantMessage: any; providerError: FormattedProviderError; turnsUsed: number }) {
+    super(input.providerError.originalMessage)
+    this.name = 'ProviderErrorAssistantResponse'
+    this.assistantMessage = input.assistantMessage
+    this.providerError = input.providerError
+    this.turnsUsed = input.turnsUsed
+  }
 }
 
 const DEFAULT_MAX_TURNS = 400
@@ -110,6 +128,16 @@ function toToolResultContent(result: any): string {
     return JSON.stringify(result)
   } catch {
     return String(result)
+  }
+}
+
+function toModelToolResultContent(content: string, toolName?: string | null): string {
+  const sanitized = sanitizeToolResultContentForModel(content, toolName ?? null)
+  if (typeof sanitized === 'string') return sanitized
+  try {
+    return JSON.stringify(sanitized ?? null)
+  } catch {
+    return String(sanitized)
   }
 }
 
@@ -249,6 +277,28 @@ export class ToolLoopService {
           `Provider turn ${turn}/${this.maxTurns}`
         )
       } catch (error) {
+        const providerError = formatProviderErrorForAssistant(error, {
+          provider: input.provider,
+          modelName: input.modelName,
+        })
+
+        if (providerError) {
+          const assistantMessage = this.messageRepo.createMessage({
+            conversationId: input.conversationId,
+            parentId: currentParentId,
+            role: 'assistant',
+            content: providerError.message,
+            modelName: input.modelName,
+            contentBlocks: [{ type: 'text', content: providerError.message }],
+          })
+
+          if (!streamedTextDuringTurn) {
+            emit({ type: 'chunk', part: 'text', delta: providerError.message })
+          }
+          emit({ type: 'assistant_message_persisted', message: assistantMessage })
+          throw new ProviderErrorAssistantResponse({ assistantMessage, providerError, turnsUsed: turn })
+        }
+
         const message = error instanceof Error ? error.message : String(error)
         emit({ type: 'error', error: `Continuation generation failed on turn ${turn}/${this.maxTurns}: ${message}` })
         throw error
@@ -331,12 +381,15 @@ export class ToolLoopService {
         const startedAt = Date.now()
 
         try {
+          const operationMode = input.operationMode ?? 'execute'
+          assertToolAllowedForOperationMode(toolCall, operationMode)
+
           const result = await this.executeTool(toolCall, {
             conversationId: input.conversationId,
             messageId: assistantMessage.id,
             streamId: input.streamId ?? null,
             rootPath: input.rootPath ?? null,
-            operationMode: input.operationMode ?? 'execute',
+            operationMode,
             timeoutMs: input.toolTimeoutMs,
           })
 
@@ -386,7 +439,7 @@ export class ToolLoopService {
         history.push({
           role: 'tool',
           tool_call_id: toolCall.id,
-          content: toolResultContent,
+          content: toModelToolResultContent(toolResultContent, toolCall.name),
         })
       }
 

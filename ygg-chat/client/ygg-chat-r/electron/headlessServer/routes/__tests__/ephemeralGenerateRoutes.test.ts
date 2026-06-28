@@ -1,4 +1,7 @@
 import express from 'express'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -9,8 +12,19 @@ describe('registerEphemeralGenerateRoutes', () => {
   let appServer: Server
   let baseUrl = ''
   let tokenStore: ProviderTokenStore
+  let previousXdgConfigHome: string | undefined
+  let tempConfigDir = ''
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    previousXdgConfigHome = process.env.XDG_CONFIG_HOME
+    tempConfigDir = await mkdtemp(join(tmpdir(), 'ygg-ephemeral-routes-'))
+    process.env.XDG_CONFIG_HOME = tempConfigDir
+    delete process.env.OPENAI_CHATGPT_ACCESS_TOKEN
+    delete process.env.OPENAI_ACCESS_TOKEN
+    delete process.env.OPENAI_CHATGPT_ACCOUNT_ID
+    delete process.env.YGG_APP_ACCESS_TOKEN
+    delete process.env.YGG_ACCESS_TOKEN
+    delete process.env.SUPABASE_ACCESS_TOKEN
     tokenStore = new ProviderTokenStore()
     const app = express()
     app.use(express.json())
@@ -24,6 +38,15 @@ describe('registerEphemeralGenerateRoutes', () => {
   })
 
   afterEach(async () => {
+    delete process.env.OPENAI_CHATGPT_ACCESS_TOKEN
+    delete process.env.OPENAI_ACCESS_TOKEN
+    delete process.env.OPENAI_CHATGPT_ACCOUNT_ID
+    delete process.env.YGG_APP_ACCESS_TOKEN
+    delete process.env.YGG_ACCESS_TOKEN
+    delete process.env.SUPABASE_ACCESS_TOKEN
+    if (previousXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = previousXdgConfigHome
+    if (tempConfigDir) await rm(tempConfigDir, { recursive: true, force: true })
     vi.restoreAllMocks()
     await new Promise<void>((resolve, reject) => {
       appServer.close(error => {
@@ -57,6 +80,59 @@ describe('registerEphemeralGenerateRoutes', () => {
     const payload = (await res.json()) as any
     expect(payload.success).toBe(false)
     expect(payload.error).toContain('OpenAI ChatGPT auth missing')
+  })
+
+  it('ephemeral chat normalizes ChatGPT display labels and enables commentary fallback', async () => {
+    process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1yb3V0ZSJ9fQ.sig'
+    const nativeFetch = globalThis.fetch.bind(globalThis)
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const body = JSON.parse(String(init?.body || '{}'))
+      expect(body.model).toBe('gpt-5.4-mini')
+      const events = [
+        {
+          type: 'response.output_item.added',
+          item: { id: 'msg-commentary', type: 'message', role: 'assistant', phase: 'commentary' },
+        },
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg-commentary',
+          delta: 'VISIBLE_TEXT_OK',
+        },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp-commentary-route',
+            output: [
+              {
+                id: 'msg-commentary',
+                type: 'message',
+                role: 'assistant',
+                phase: 'commentary',
+                content: [],
+              },
+            ],
+          },
+        },
+      ]
+      const bodyText = `${events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`
+      return new Response(bodyText, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      }) as any
+    })
+
+    const res = await nativeFetch(`${baseUrl}/api/headless/ephemeral/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content: 'hello', modelName: 'GPT-5.4 Mini', history: [] }),
+    })
+
+    expect(res.status).toBe(200)
+    const payload = (await res.json()) as any
+    expect(payload.success).toBe(true)
+    expect(payload.provider).toBe('openaichatgpt')
+    expect(payload.message?.content).toBe('VISIBLE_TEXT_OK')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('ephemeral chat routes explicit openrouter requests through openrouter handling', async () => {

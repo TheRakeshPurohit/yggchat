@@ -76,6 +76,7 @@ export interface CreateProjectPayload {
   conversation_id?: number | string
   context?: string
   system_prompt?: string
+  cwd?: string | null
   storageMode?: StorageMode // NEW PARAMETER
 }
 
@@ -94,16 +95,18 @@ export const createProject = createAsyncThunk<Project, CreateProjectPayload, { e
         name: restPayload.name,
         context: restPayload.context || null,
         system_prompt: restPayload.system_prompt || null,
-        storage_mode: 'local'
+        cwd: restPayload.cwd || null,
+        storage_mode: 'local',
       })
       return project
     }
 
-    // Cloud mode: existing behavior
+    // Cloud mode: existing behavior. Project cwd is local-only, so do not send it to cloud APIs.
+    const { cwd: _cwd, ...cloudPayload } = restPayload
     const response = await apiCall('/projects', auth.accessToken, {
       method: 'POST',
       body: JSON.stringify({
-        ...restPayload,
+        ...cloudPayload,
         userId: auth.userId,
       }),
     })
@@ -125,6 +128,7 @@ export interface UpdateProjectPayload {
   name: string
   context?: string
   system_prompt?: string
+  cwd?: string | null
   storage_mode?: StorageMode
 }
 
@@ -147,15 +151,17 @@ export const updateProject = createAsyncThunk<Project, UpdateProjectPayload, { e
         name: updateData.name,
         context: updateData.context || null,
         system_prompt: updateData.system_prompt || null,
-        storage_mode: effectiveMode
+        cwd: updateData.cwd ?? null,
+        storage_mode: effectiveMode,
       })
       return project
     }
 
-    // Cloud mode: existing behavior
+    // Cloud mode: existing behavior. Project cwd is local-only, so do not send it to cloud APIs.
+    const { cwd: _cwd, ...cloudUpdateData } = updateData
     const response = await apiCall(`/projects/${id}`, auth.accessToken, {
       method: 'PUT',
-      body: JSON.stringify(updateData),
+      body: JSON.stringify(cloudUpdateData),
     })
     const project = response as Project
 
