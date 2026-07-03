@@ -475,9 +475,12 @@ export const chatSlice = createSlice({
       // Get or create the target stream
       const stream = getOrCreateStream(state, streamId)
 
-      if (chunk.type !== 'reset' && !stream.active) {
+      if (chunk.type !== 'reset' && chunk.type !== 'error' && !stream.active) {
         // Late chunks can arrive after abort/completion. Do not let them mutate
         // visible branch state after the stream has left the in-flight set.
+        // 'error' is exempt: the send/edit/branch thunks dispatch sendingCompleted (which sets
+        // active=false) BEFORE the error chunk on a client-side failure, so without this exemption
+        // the error was silently swallowed and a dropped stream looked like a clean completion.
         stream.suppressedEventCount = (stream.suppressedEventCount ?? 0) + 1
         return
       }

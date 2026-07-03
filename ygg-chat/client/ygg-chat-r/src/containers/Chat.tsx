@@ -4167,10 +4167,11 @@ function Chat() {
         // Use virtualizer to scroll to the message index
         scrollToMessageRowIndex(targetIndex, 'start')
 
-        // Record that we've scrolled to this focused target to avoid later auto-scrolls fighting it
-        if (typeof targetId === 'number') {
-          lastFocusedScrollIdRef.current = targetId
-        }
+        // Record that we've scrolled to this focused target so the hash/search focus effect below
+        // skips a redundant second scroll. Record regardless of id type — in local/electron mode ids
+        // are strings, and the previous numeric-only guard let every user click run both effects
+        // (double scroll + a forced userScrolled during streams).
+        lastFocusedScrollIdRef.current = targetId
       }
 
       // After handling, reset so programmatic path changes (e.g., during send/stream) won't recenter
