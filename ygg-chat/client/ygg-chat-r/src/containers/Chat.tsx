@@ -1146,10 +1146,18 @@ function Chat() {
     dispatch(fetchConversationStreamUndo(currentConversationId))
   }, [currentConversationId, dispatch])
 
+  // Refetch stream-edit undo summaries when a stream ends. Keyed on streamState.active going
+  // false (not streamState.finished, which is unreachable in this view — the selector drops the
+  // stream the tick it goes inactive).
+  const prevStreamActiveForUndoRef = useRef(false)
   useEffect(() => {
-    if (currentConversationId == null || !streamState.finished) return
-    dispatch(fetchConversationStreamUndo(currentConversationId))
-  }, [currentConversationId, dispatch, streamState.finished, streamState.id, streamState.finalMessageId])
+    const wasActive = prevStreamActiveForUndoRef.current
+    prevStreamActiveForUndoRef.current = streamState.active
+    if (currentConversationId == null) return
+    if (wasActive && !streamState.active) {
+      dispatch(fetchConversationStreamUndo(currentConversationId))
+    }
+  }, [currentConversationId, dispatch, streamState.active])
 
   const conversationMessages = useAppSelector(selectConversationMessages)
   const displayMessages = useAppSelector(selectDisplayMessages)
@@ -1965,10 +1973,6 @@ function Chat() {
   const userScrolledDuringStreamRef = useRef<boolean>(false)
   const streamActiveRef = useRef<boolean>(false)
   const finalTextStreamingStartedRef = useRef<boolean>(false)
-  const hasFinalTextStreamingRef = useRef<boolean>(false)
-  const lastTrustedScrollTopRef = useRef<number | null>(null)
-  const isProgrammaticStreamingScrollRef = useRef<boolean>(false)
-  const streamingProgrammaticScrollResetTimeoutRef = useRef<number | null>(null)
   const liveStreamingContentRef = useRef<HTMLDivElement>(null)
   const skippedInitialLiveTailFollowRef = useRef<boolean>(false)
   const previousFocusedChatMessageIdRef = useRef<MessageId | null>(null)
@@ -2466,10 +2470,11 @@ function Chat() {
     [messageRowIndexByMessageId]
   )
 
-  // Calculate padding for end of list - allows last message to scroll to middle of viewport
-  const virtualizerPaddingEnd = useMemo(() => {
-    return Math.max(500, containerHeight * 0.6)
-  }, [containerHeight])
+  // Trailing scroll room is provided by the in-flow bottom sentinel (see the message list render),
+  // NOT by virtualizer paddingEnd. paddingEnd lives inside the totalSize div, i.e. above the
+  // out-of-flow live streaming tail, so any non-zero value would open a visible gap between the
+  // last persisted message and the streaming reply, and would corrupt the near-bottom metric.
+  const virtualizerPaddingEnd = 0
 
   // Determine if optimistic/streaming messages should be shown (all modes for instant feedback)
   const showOptimisticMessage = !!optimisticMessage
@@ -2512,9 +2517,6 @@ function Chat() {
     Boolean(streamState.thinkingBuffer) || streamState.toolCalls.length > 0 || streamState.events.length > 0
   const hasStreamingMessageContent = hasFinalTextStreaming || hasProcessStreamingContent
 
-  useEffect(() => {
-    hasFinalTextStreamingRef.current = hasFinalTextStreaming
-  }, [hasFinalTextStreaming])
   const shouldPreserveProcessStreamRow = streamState.status === 'waiting_for_tool' || hasRunningToolJobForCurrentBranch
   const liveDuplicateSuppressionMessageId = streamState.liveMessageId ?? streamState.streamingMessageId
   const completedDuplicateSuppressionMessageId =
@@ -2544,7 +2546,11 @@ function Chat() {
   const showStreamingThinkingInputTab = streamingThinkingIndicatorPlacement === 'input-tab'
   const showGenerationLoaderRow = showGenerationLoadingAnimation && showStreamingThinkingMessageRow
   const showGenerationLoaderInVirtualList = showGenerationLoaderRow && !showLiveStreamingTail
-  const bottomSentinelBaseHeight = Math.max(100, containerHeight - 300)
+  // The in-flow bottom sentinel is the sole trailing spacer (paddingEnd is 0). Sized to mirror the
+  // previous paddingEnd so scroll-to-bottom lands the last message in the same place. It must be
+  // flexShrink:0 in the render, otherwise the flex column collapses it to 0 and there is no room to
+  // scroll the last message above the composer overlay.
+  const bottomSentinelBaseHeight = Math.max(500, containerHeight * 0.6)
   const liveStreamingBottomClearance = Math.max(inputAreaHeight + 34, 170)
   // While the final answer streams outside the virtualizer, the clearance belongs to
   // the live tail itself. The bottom sentinel remains for explicit scroll-to-latest,
@@ -2725,8 +2731,13 @@ function Chat() {
   const NEAR_BOTTOM_PX = 600
   const AUTO_FOLLOW_BOTTOM_PX = 120
   const isNearBottom = (el: HTMLElement, threshold = NEAR_BOTTOM_PX) => {
-    // Distance remaining to bottom within the scroll container
-    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight
+    // Distance from the viewport bottom to the bottom of the last real content — NOT to the bottom
+    // of the scrollable area. The scrollable area always ends with the bottom sentinel (and, while
+    // streaming, the live-tail clearance), neither of which is message content. Measuring to
+    // scrollHeight made a user parked at the last message read as ~600-800px "far from bottom", so
+    // auto-follow never engaged and the scroll-to-bottom button showed permanently.
+    const trailingNonContent = bottomSentinelHeight + (showLiveStreamingTail ? liveStreamingBottomClearance : 0)
+    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight - trailingNonContent
     return remaining <= threshold
   }
 
@@ -2737,9 +2748,8 @@ function Chat() {
     getScrollElement: () => messagesContainerRef.current,
     estimateSize: () => 100, // Estimated average message height
     overscan: 6, // Buffer rows above/below viewport
-    // Keep paddingEnd stable through the transition into final text streaming. Changing
-    // it at the same time as live-tail mount changes total virtual size and causes
-    // TanStack/browser scroll compensation that looks like a user scroll to bottom.
+    // No paddingEnd: trailing scroll room comes from the in-flow bottom sentinel instead, so the
+    // out-of-flow live tail sits flush under the last persisted message.
     paddingEnd: virtualizerPaddingEnd,
   })
 
@@ -3958,9 +3968,6 @@ function Chat() {
   useEffect(() => {
     return () => {
       if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
-      if (streamingProgrammaticScrollResetTimeoutRef.current != null) {
-        window.clearTimeout(streamingProgrammaticScrollResetTimeoutRef.current)
-      }
     }
   }, [])
 
@@ -3968,31 +3975,19 @@ function Chat() {
     streamActiveRef.current = streamState.active
   }, [streamState.active])
 
-  const markStreamingProgrammaticScroll = useCallback(() => {
-    if (typeof window === 'undefined') return
-
-    isProgrammaticStreamingScrollRef.current = true
-    if (streamingProgrammaticScrollResetTimeoutRef.current != null) {
-      window.clearTimeout(streamingProgrammaticScrollResetTimeoutRef.current)
-    }
-    streamingProgrammaticScrollResetTimeoutRef.current = window.setTimeout(() => {
-      isProgrammaticStreamingScrollRef.current = false
-      streamingProgrammaticScrollResetTimeoutRef.current = null
-    }, 300)
-  }, [])
-
-  // Listen for user scroll intent. While final text is streaming, ANY user scroll/wheel/touch
-  // means "stop following the growing message" until the stream finishes. The live final answer
-  // is rendered outside TanStack Virtual, so we deliberately avoid per-token scroll correction.
+  // Detect user scroll intent during a stream from INPUT events only — wheel, touch, keyboard
+  // navigation, and scrollbar drags. The previous version inferred intent from raw scrollTop
+  // deltas, but app follow-scrolls and the virtualizer's own resize adjustments also dispatch
+  // trusted `scroll` events, so they were misread as "the user scrolled" (killing follow on its
+  // own), while inside the 300ms programmatic window real downward drags were ignored entirely
+  // ("scrolling down does not stop it"). Any real scroll input means "stop following" until the
+  // stream ends or the user hits scroll-to-bottom.
   useEffect(() => {
     const el = messagesContainerRef.current
     if (!el) return
 
-    const disableFollowForUserIntent = () => {
+    const markUserIntent = () => {
       if (!streamActiveRef.current) return
-      if (!hasFinalTextStreamingRef.current) return
-      // Programmatic scrolls do not emit wheel/touch events; if we see one, it is the user
-      // asking to read. Stop bottom-follow immediately, even if a follow scroll was just queued.
       userScrolledDuringStreamRef.current = true
       if (scrollRafRef.current != null) {
         cancelAnimationFrame(scrollRafRef.current)
@@ -4000,38 +3995,24 @@ function Chat() {
       }
     }
 
-    const onScroll = (e: Event) => {
-      if (!e.isTrusted || !streamActiveRef.current) return
-
-      const currentTop = el.scrollTop
-      const previousTop = lastTrustedScrollTopRef.current
-      lastTrustedScrollTopRef.current = currentTop
-
-      if (isProgrammaticStreamingScrollRef.current) {
-        if (hasFinalTextStreamingRef.current && previousTop != null && currentTop < previousTop - 1) {
-          userScrolledDuringStreamRef.current = true
-        }
-        return
-      }
-
-      if (hasFinalTextStreamingRef.current) {
-        if (previousTop == null || Math.abs(currentTop - previousTop) > 1) {
-          userScrolledDuringStreamRef.current = true
-        }
-        return
-      }
-
-      const nearBottom = isNearBottom(el, AUTO_FOLLOW_BOTTOM_PX)
-      userScrolledDuringStreamRef.current = !nearBottom
+    const navKeys = new Set(['PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' ', 'Spacebar'])
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (navKeys.has(e.key)) markUserIntent()
+    }
+    const onPointerDown = (e: PointerEvent) => {
+      // Pointer down in the scrollbar gutter (to the right of the content box) = about to drag-scroll.
+      if (e.clientX >= el.getBoundingClientRect().left + el.clientWidth) markUserIntent()
     }
 
-    el.addEventListener('wheel', disableFollowForUserIntent, { passive: true })
-    el.addEventListener('touchmove', disableFollowForUserIntent, { passive: true })
-    el.addEventListener('scroll', onScroll, { passive: true })
+    el.addEventListener('wheel', markUserIntent, { passive: true })
+    el.addEventListener('touchmove', markUserIntent, { passive: true })
+    el.addEventListener('keydown', onKeyDown)
+    el.addEventListener('pointerdown', onPointerDown, { passive: true })
     return () => {
-      el.removeEventListener('wheel', disableFollowForUserIntent)
-      el.removeEventListener('touchmove', disableFollowForUserIntent)
-      el.removeEventListener('scroll', onScroll)
+      el.removeEventListener('wheel', markUserIntent)
+      el.removeEventListener('touchmove', markUserIntent)
+      el.removeEventListener('keydown', onKeyDown)
+      el.removeEventListener('pointerdown', onPointerDown)
     }
   }, [])
 
@@ -4073,7 +4054,6 @@ function Chat() {
     scrollRafRef.current = window.requestAnimationFrame(() => {
       scrollRafRef.current = null
       if (userScrolledDuringStreamRef.current) return
-      markStreamingProgrammaticScroll()
       scrollLiveTailToBottomOnce('auto')
     })
 
@@ -4083,27 +4063,28 @@ function Chat() {
         scrollRafRef.current = null
       }
     }
-  }, [markStreamingProgrammaticScroll, scrollLiveTailToBottomOnce, showLiveStreamingTail, streamState.buffer])
+  }, [scrollLiveTailToBottomOnce, showLiveStreamingTail, streamState.buffer])
 
-  // Reset streaming scroll state when the stream finishes. Do not perform an anchor-based
-  // handoff restore here: after the live tail is replaced by the persisted virtual row, that
-  // restore was moving the viewport upward by a couple of messages.
+  // Reset streaming scroll state when the stream ends. Keyed on the stream LIFECYCLE going
+  // active -> inactive, not on streamState.finished: `finished` is unreachable in this component
+  // (the view-stream selector drops a stream the same tick `active` flips false, and abort/error
+  // paths never set `finished`), so the old effect never ran and userScrolledDuringStreamRef stayed
+  // poisoned across streams, permanently disabling auto-follow for the rest of the session.
+  // Do not perform an anchor-based handoff restore here: after the live tail is replaced by the
+  // persisted virtual row, that restore was moving the viewport upward by a couple of messages.
+  const prevStreamLifecycleActiveRef = useRef(false)
   useEffect(() => {
-    if (streamState.finished) {
-      userScrolledDuringStreamRef.current = false
-      finalTextStreamingStartedRef.current = false
-      lastTrustedScrollTopRef.current = null
-      isProgrammaticStreamingScrollRef.current = false
-      if (streamingProgrammaticScrollResetTimeoutRef.current != null) {
-        window.clearTimeout(streamingProgrammaticScrollResetTimeoutRef.current)
-        streamingProgrammaticScrollResetTimeoutRef.current = null
-      }
-      if (scrollRafRef.current != null) {
-        cancelAnimationFrame(scrollRafRef.current)
-        scrollRafRef.current = null
-      }
+    const wasActive = prevStreamLifecycleActiveRef.current
+    prevStreamLifecycleActiveRef.current = streamLifecycleActive
+    if (!wasActive || streamLifecycleActive) return
+
+    userScrolledDuringStreamRef.current = false
+    finalTextStreamingStartedRef.current = false
+    if (scrollRafRef.current != null) {
+      cancelAnimationFrame(scrollRafRef.current)
+      scrollRafRef.current = null
     }
-  }, [streamState.finished])
+  }, [streamLifecycleActive])
 
   useEffect(() => {
     const el = messagesContainerRef.current
@@ -6636,8 +6617,14 @@ function Chat() {
               </div>
             )}
 
-            {/* Bottom sentinel and padding for scrolling past last message */}
-            <div ref={bottomRef} data-bottom-sentinel='true' style={{ height: bottomSentinelHeight }} />
+            {/* Bottom sentinel: the sole trailing spacer (paddingEnd is 0). flexShrink:0 so the flex
+                column cannot collapse it, otherwise there is no room to scroll the last message above
+                the composer overlay and near-bottom math over-subtracts. */}
+            <div
+              ref={bottomRef}
+              data-bottom-sentinel='true'
+              style={{ height: bottomSentinelHeight, flexShrink: 0 }}
+            />
           </div>
         </div>
         {/* Input area: controls row + textarea (absolutely positioned overlay) */}
@@ -6657,7 +6644,6 @@ function Chat() {
               title='Scroll to bottom'
               onClick={() => {
                 userScrolledDuringStreamRef.current = false
-                markStreamingProgrammaticScroll()
                 if (showLiveStreamingTail) {
                   scrollLiveTailToBottomOnce('auto')
                 } else {
