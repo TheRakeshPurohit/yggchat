@@ -325,7 +325,6 @@ const COMPOSER_SLASH_COMMANDS = [
 const CROSS_MESSAGE_PROCESS_GROUP_MIN_MESSAGES = 3
 const DERIVED_RENDER_CACHE_LIMIT = 40
 const ACTION_POPOVER_SELECT_DROPDOWN_Z_INDEX = 100001
-const VIRTUAL_ROWS_FEATURE_FLAG = 'chat:virtualRowsV2'
 const BENCH_MAX_SAMPLES = 3000
 const BENCH_MAX_EVENTS = 1200
 const BENCH_SCROLL_ACTIVE_WINDOW_MS = 140
@@ -2108,14 +2107,6 @@ function Chat() {
     }
   })
 
-  const [virtualRowsV2Enabled] = useState<boolean>(() => {
-    try {
-      const stored = localStorage.getItem(VIRTUAL_ROWS_FEATURE_FLAG)
-      return stored == null ? true : stored !== 'false'
-    } catch {
-      return true
-    }
-  })
 
   const virtualizationMetricsRef = useRef<{
     lastRowDeriveMs: number
@@ -2558,13 +2549,12 @@ function Chat() {
   const bottomSentinelHeight = bottomSentinelBaseHeight
 
   const virtualRows = useMemo<VirtualRenderRow[]>(() => {
-    const rows: VirtualRenderRow[] = messageRenderRows.map((row, index) => ({
+    const rows: VirtualRenderRow[] = messageRenderRows.map(row => ({
       kind: 'message_row',
-      key: virtualRowsV2Enabled
-        ? row.kind === 'message'
-          ? `message-${row.message.id}`
-          : `group-${row.id}`
-        : `legacy-row-${index}`,
+      // Stable id-based keys are required: index keys reshuffle the virtualizer's itemSizeCache and
+      // elementsCache whenever a row is inserted/removed mid-list (delete, branch switch, streaming
+      // row appearing/disappearing), corrupting measured heights and remounting rows.
+      key: row.kind === 'message' ? `message-${row.message.id}` : `group-${row.id}`,
       row,
     }))
 
@@ -2607,7 +2597,6 @@ function Chat() {
     optimisticBranchMessage,
     showStreamingMessageInVirtualList,
     showGenerationLoaderInVirtualList,
-    virtualRowsV2Enabled,
   ])
 
   const getUndoSummariesForMessage = useCallback(
@@ -2762,9 +2751,23 @@ function Chat() {
   // Memoized so its identity only changes when virtualRows change. An inline arrow here invalidated
   // the virtualizer's measurement memo every render, forcing a full O(count) measurements rebuild
   // per streamed token.
-  const getVirtualItemKey = useCallback(
-    (index: number) => (virtualRowsV2Enabled ? (virtualRows[index]?.key ?? index) : index),
-    [virtualRows, virtualRowsV2Enabled]
+  const getVirtualItemKey = useCallback((index: number) => virtualRows[index]?.key ?? index, [virtualRows])
+
+  // Per-kind size estimate instead of a flat 100px. Assistant replies are routinely many times
+  // taller than user turns, so a flat estimate made conversation-load scroll jump repeatedly as
+  // rows measured up from 100 to their real height, and widened the estimate->real handoff jump
+  // when a streamed reply is persisted.
+  const estimateVirtualRowSize = useCallback(
+    (index: number) => {
+      const row = virtualRows[index]
+      if (!row) return 200
+      if (row.kind === 'message_row') {
+        if (row.row.kind === 'process_group') return 160
+        return row.row.message.role === 'user' ? 120 : 400
+      }
+      return 120
+    },
+    [virtualRows]
   )
 
   // Virtualizer for efficient message list rendering
@@ -2772,7 +2775,7 @@ function Chat() {
     count: virtualRows.length,
     getItemKey: getVirtualItemKey,
     getScrollElement: () => messagesContainerRef.current,
-    estimateSize: () => 100, // Estimated average message height
+    estimateSize: estimateVirtualRowSize,
     overscan: 6, // Buffer rows above/below viewport
     // No paddingEnd: trailing scroll room comes from the in-flow bottom sentinel instead, so the
     // out-of-flow live tail sits flush under the last persisted message.
@@ -2784,12 +2787,11 @@ function Chat() {
     if (window.localStorage.getItem('chat:debugVirtualizerMetrics') !== 'true') return
 
     console.debug('[Chat] Virtual rows derived', {
-      v2: virtualRowsV2Enabled,
       rows: virtualRows.length,
       deriveMs: virtualizationMetricsRef.current.lastRowDeriveMs,
       baseRows: virtualizationMetricsRef.current.lastRenderRowsCount,
     })
-  }, [virtualRows.length, renderableMessagesSignature, virtualRowsV2Enabled])
+  }, [virtualRows.length, renderableMessagesSignature])
 
   const scrollToMessageRowIndex = useCallback(
     (targetIndex: number, align: 'start' | 'center' | 'end' | 'auto' = 'start'): boolean => {
@@ -4453,6 +4455,21 @@ function Chat() {
       }
     }
   }, [conversationMessages, selectedPath, dispatch, hashMessageId])
+
+  // One-shot scroll to the latest message when a conversation's rows first load. Without this,
+  // conversations open scrolled to the very top. Guarded per-conversation, and skipped when a URL
+  // hash targets a specific message (that path drives its own scroll).
+  const initialScrollConversationRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!conversationIdFromUrl || !isConversationDataFetched) return
+    if (virtualRows.length === 0) return
+    const key = String(conversationIdFromUrl)
+    if (initialScrollConversationRef.current === key) return
+    initialScrollConversationRef.current = key
+    if (hashMessageId != null) return
+    const rafId = requestAnimationFrame(() => scrollToBottomNow('auto'))
+    return () => cancelAnimationFrame(rafId)
+  }, [conversationIdFromUrl, isConversationDataFetched, virtualRows.length, hashMessageId, scrollToBottomNow])
 
   // Models are now loaded automatically via React Query hooks
   // No manual loading needed - React Query handles caching and refetching
@@ -6263,7 +6280,12 @@ function Chat() {
           >
             <React.Profiler id='chat-virtual-list' onRender={handleVirtualListProfilerRender}>
               {virtualRows.length === 0 ? (
-                <EmptyChatState onSelectProjectFolder={handleSelectProjectFolder} projectFolderPath={ccCwd} />
+                // Only show the empty state once the conversation's messages have actually resolved
+                // (or there is no conversation yet). Otherwise, on every conversation switch the list
+                // flashes "Start building" during the refetch while messagesLoaded([]) has cleared it.
+                !conversationIdFromUrl || isConversationDataFetched ? (
+                  <EmptyChatState onSelectProjectFolder={handleSelectProjectFolder} projectFolderPath={ccCwd} />
+                ) : null
               ) : (
                 (() => {
                   const totalSize = virtualizer.getTotalSize()
