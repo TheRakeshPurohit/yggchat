@@ -5,6 +5,7 @@ import 'boxicons' // Types
 import 'boxicons/css/boxicons.min.css'
 import 'katex/dist/katex.min.css'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createSelector } from '@reduxjs/toolkit'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import { useNavigate } from 'react-router-dom'
@@ -480,6 +481,149 @@ interface MessageRenderItem {
   node: React.ReactNode
 }
 
+// Memoized id-indexed lookups shared across all ChatMessage instances. Replaces the previous
+// per-instance `.find()` selectors, which re-ran an O(N) scan of the whole message/conversation
+// list on EVERY redux dispatch (i.e. every stream token) for every mounted message.
+const selectMessageByIdMap = createSelector(
+  (state: RootState) => state.chat.conversation.messages,
+  messages => {
+    const map = new Map<string, (typeof messages)[number]>()
+    for (const message of messages) map.set(String(message.id), message)
+    return map
+  }
+)
+const selectConversationByIdMap = createSelector(
+  (state: RootState) => state.conversations.items,
+  items => {
+    const map = new Map<string, (typeof items)[number]>()
+    for (const conversation of items) map.set(String(conversation.id), conversation)
+    return map
+  }
+)
+
+// Copy helper closes over nothing component-specific (browser APIs only), so it lives at module
+// scope. This lets the markdown block/code renderers below also live at module scope with a stable
+// identity — otherwise ReactMarkdown remounts every <pre>/<code> subtree on each render.
+const copyRichText = async (plainText: string, html?: string): Promise<boolean> => {
+  // Try copying both HTML and plain text for rich paste support (Word, etc.)
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.write === 'function' && html) {
+      const htmlBlob = new Blob([html], { type: 'text/html' })
+      const textBlob = new Blob([plainText], { type: 'text/plain' })
+      const clipboardItem = new ClipboardItem({
+        'text/html': htmlBlob,
+        'text/plain': textBlob,
+      })
+      await navigator.clipboard.write([clipboardItem])
+      return true
+    }
+  } catch (_) {
+    // Fall through to plain text copy
+  }
+
+  // Fallback to plain text copy
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(plainText)
+      return true
+    }
+  } catch (_) {
+    // fall through to execCommand fallback
+  }
+
+  // Fallback for non-secure contexts or older browsers
+  try {
+    const textarea = document.createElement('textarea')
+    textarea.value = plainText
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    textarea.style.left = '-9999px'
+    document.body.appendChild(textarea)
+    textarea.focus()
+    textarea.select()
+    // @ts-ignore - Deprecated API used intentionally as a safe fallback when Clipboard API is unavailable
+    const ok = document.execCommand('copy')
+    document.body.removeChild(textarea)
+    return ok
+  } catch (err) {
+    console.error('Copy fallback failed:', err)
+    return false
+  }
+}
+
+// Custom renderer for block code (<pre>) with a stable copy action and no overlay on top of
+// selectable text. Module-scoped so its component identity is stable across renders.
+const PreRenderer: React.FC<any> = ({ children, className, ...props }) => {
+  const [copied, setCopied] = useState(false)
+  const preRef = useRef<HTMLPreElement | null>(null)
+
+  const handleCopyCode = async () => {
+    try {
+      const plain = preRef.current?.innerText ?? ''
+      if (!plain) return
+
+      const ok = await copyRichText(plain)
+      if (!ok) {
+        throw new Error('Clipboard write failed')
+      }
+
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch (err) {
+      console.error('Failed to copy code block:', err)
+    }
+  }
+
+  return (
+    <div className='chat-markdown-code-block my-3 not-prose overflow-hidden rounded-xl border'>
+      <div className='chat-markdown-code-header flex items-center justify-end px-2'>
+        <Button
+          type='button'
+          onMouseDown={event => {
+            event.preventDefault()
+            event.stopPropagation()
+          }}
+          onClick={event => {
+            event.stopPropagation()
+            void handleCopyCode()
+          }}
+          className='chat-markdown-code-copy-button shrink-0 py-1 px-2 mt-1'
+          size='smaller'
+          variant='outline2'
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </Button>
+      </div>
+      <pre
+        ref={preRef}
+        className={`not-prose thin-scrollbar m-0 overflow-auto bg-transparent px-3 py-2.5 text-[0.85em] leading-[1.5] ring-0 outline-none select-text ${className ?? ''}`}
+        {...props}
+      >
+        {children}
+      </pre>
+    </div>
+  )
+}
+
+const CodeRenderer: React.FC<any> = ({ inline, className, children, ...props }) => {
+  if (inline) {
+    return (
+      <code className='chat-markdown-inline-code inline rounded px-1 py-0.5 whitespace-pre-wrap' {...props}>
+        {children}
+      </code>
+    )
+  }
+
+  return (
+    <code className={className} {...props}>
+      {children}
+    </code>
+  )
+}
+
+// Stable components map so ReactMarkdown does not treat its renderers as changed each render.
+const MARKDOWN_COMPONENTS = { pre: PreRenderer, code: CodeRenderer, a: MarkdownLink }
+
 const ChatMessage: React.FC<ChatMessageProps> = React.memo(
   ({
     id,
@@ -579,17 +723,15 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
     const handleExpandTransitionEnd = useCallback(() => {
       onLayoutChange?.()
     }, [onLayoutChange])
-    // Get message data from Redux store
-    const messageData = useSelector((state: RootState) =>
-      state.chat.conversation.messages.find(m => String(m.id) === String(id))
-    )
+    // Get message data from Redux store via a shared memoized id->message map (O(1) lookup),
+    // instead of an O(N) .find() that re-ran for every mounted message on every stream token.
+    const messageData = useSelector((state: RootState) => selectMessageByIdMap(state).get(String(id)))
     const isCompactionSummary = messageData?.note === AUTO_COMPACTION_NOTE
     const toolDefinitions = useSelector((state: RootState) => state.chat.tools)
     const conversationId = messageData?.conversation_id ?? null
-    const projectId = useSelector((state: RootState) => {
-      if (!conversationId) return null
-      return state.conversations.items.find(conv => conv.id === conversationId)?.project_id ?? null
-    })
+    const projectId = useSelector((state: RootState) =>
+      conversationId ? (selectConversationByIdMap(state).get(String(conversationId))?.project_id ?? null) : null
+    )
 
     const handleLoadMcpApp = useCallback(
       async (serverName: string, reloadKey: string) => {
@@ -1102,53 +1244,6 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       }
     }, [showMoreMenu, computeMoreMenuPlacement])
 
-    const copyRichText = async (plainText: string, html?: string) => {
-      // Try copying both HTML and plain text for rich paste support (Word, etc.)
-      try {
-        if (navigator.clipboard && typeof navigator.clipboard.write === 'function' && html) {
-          const htmlBlob = new Blob([html], { type: 'text/html' })
-          const textBlob = new Blob([plainText], { type: 'text/plain' })
-          const clipboardItem = new ClipboardItem({
-            'text/html': htmlBlob,
-            'text/plain': textBlob,
-          })
-          await navigator.clipboard.write([clipboardItem])
-          return true
-        }
-      } catch (_) {
-        // Fall through to plain text copy
-      }
-
-      // Fallback to plain text copy
-      try {
-        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-          await navigator.clipboard.writeText(plainText)
-          return true
-        }
-      } catch (_) {
-        // fall through to execCommand fallback
-      }
-
-      // Fallback for non-secure contexts or older browsers
-      try {
-        const textarea = document.createElement('textarea')
-        textarea.value = plainText
-        textarea.style.position = 'fixed'
-        textarea.style.opacity = '0'
-        textarea.style.left = '-9999px'
-        document.body.appendChild(textarea)
-        textarea.focus()
-        textarea.select()
-        // @ts-ignore - Deprecated API used intentionally as a safe fallback when Clipboard API is unavailable
-        const ok = document.execCommand('copy')
-        document.body.removeChild(textarea)
-        return ok
-      } catch (err) {
-        console.error('Copy fallback failed:', err)
-        return false
-      }
-    }
-
     const getRoleStyles = () => {
       const transparentContainer = 'border-l-4 border-l-transparent bg-transparent dark:bg-transparent'
       const useColored = !!colored
@@ -1242,75 +1337,6 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
 
     const markdownThemeVars = getMarkdownThemeVars(customThemeEnabled ? customTheme : createDefaultCustomChatTheme(), isDarkMode)
 
-    // Custom renderer for block code (<pre>) with a stable copy action and no overlay on top of selectable text
-    const PreRenderer: React.FC<any> = ({ children, className, ...props }) => {
-      const [copied, setCopied] = useState(false)
-      const preRef = useRef<HTMLPreElement | null>(null)
-
-      const handleCopyCode = async () => {
-        try {
-          const plain = preRef.current?.innerText ?? ''
-          if (!plain) return
-
-          const ok = await copyRichText(plain)
-          if (!ok) {
-            throw new Error('Clipboard write failed')
-          }
-
-          setCopied(true)
-          window.setTimeout(() => setCopied(false), 1500)
-        } catch (err) {
-          console.error('Failed to copy code block:', err)
-        }
-      }
-
-      return (
-        <div className='chat-markdown-code-block my-3 not-prose overflow-hidden rounded-xl border'>
-          <div className='chat-markdown-code-header flex items-center justify-end px-2'>
-            <Button
-              type='button'
-              onMouseDown={event => {
-                event.preventDefault()
-                event.stopPropagation()
-              }}
-              onClick={event => {
-                event.stopPropagation()
-                void handleCopyCode()
-              }}
-              className='chat-markdown-code-copy-button shrink-0 py-1 px-2 mt-1'
-              size='smaller'
-              variant='outline2'
-            >
-              {copied ? 'Copied' : 'Copy'}
-            </Button>
-          </div>
-          <pre
-            ref={preRef}
-            className={`not-prose thin-scrollbar m-0 overflow-auto bg-transparent px-3 py-2.5 text-[0.85em] leading-[1.5] ring-0 outline-none select-text ${className ?? ''}`}
-            {...props}
-          >
-            {children}
-          </pre>
-        </div>
-      )
-    }
-
-    const CodeRenderer: React.FC<any> = ({ inline, className, children, ...props }) => {
-      if (inline) {
-        return (
-          <code className='chat-markdown-inline-code inline rounded px-1 py-0.5 whitespace-pre-wrap' {...props}>
-            {children}
-          </code>
-        )
-      }
-
-      return (
-        <code className={className} {...props}>
-          {children}
-        </code>
-      )
-    }
-
     const renderMarkdownNode = ({
       key,
       markdown,
@@ -1328,7 +1354,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }], rehypeKatex]}
-          components={{ pre: PreRenderer, code: CodeRenderer, a: MarkdownLink }}
+          components={MARKDOWN_COMPONENTS}
         >
           {markdown}
         </ReactMarkdown>

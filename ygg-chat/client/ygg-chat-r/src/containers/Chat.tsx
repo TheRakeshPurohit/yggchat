@@ -2676,6 +2676,24 @@ function Chat() {
     [currentConversationId, dispatch, getUndoSummariesForMessage]
   )
 
+  // Precompute per-user-message undo state AND a stable per-id handler in a single pass. Passing a
+  // fresh `() => handleUndoStreamEdits(id)` arrow and a fresh undoState object per render defeated
+  // ChatMessage's React.memo, forcing every visible user row (and its markdown) to re-render on every
+  // stream token. These maps only change when the messages or undo root change, not per token.
+  const { undoStateByMessageId, undoHandlerByMessageId } = useMemo(() => {
+    const stateMap = new Map<string, ReturnType<typeof getUndoStateForMessage>>()
+    const handlerMap = new Map<string, () => void>()
+    for (const message of renderableMessages) {
+      if (message.role !== 'user') continue
+      const key = String(message.id)
+      const undo = getUndoStateForMessage(key)
+      if (!undo) continue
+      stateMap.set(key, undo)
+      handlerMap.set(key, () => handleUndoStreamEdits(key))
+    }
+    return { undoStateByMessageId: stateMap, undoHandlerByMessageId: handlerMap }
+  }, [renderableMessages, getUndoStateForMessage, handleUndoStreamEdits])
+
   const userTurnElapsedLabelByMessageId = useMemo(() => {
     const labels = new Map<string, string>()
     let activeUserMessage: Message | null = null
@@ -2741,10 +2759,18 @@ function Chat() {
     return remaining <= threshold
   }
 
+  // Memoized so its identity only changes when virtualRows change. An inline arrow here invalidated
+  // the virtualizer's measurement memo every render, forcing a full O(count) measurements rebuild
+  // per streamed token.
+  const getVirtualItemKey = useCallback(
+    (index: number) => (virtualRowsV2Enabled ? (virtualRows[index]?.key ?? index) : index),
+    [virtualRows, virtualRowsV2Enabled]
+  )
+
   // Virtualizer for efficient message list rendering
   const virtualizer = useVirtualizer({
     count: virtualRows.length,
-    getItemKey: index => (virtualRowsV2Enabled ? (virtualRows[index]?.key ?? index) : index),
+    getItemKey: getVirtualItemKey,
     getScrollElement: () => messagesContainerRef.current,
     estimateSize: () => 100, // Estimated average message height
     overscan: 6, // Buffer rows above/below viewport
@@ -4265,7 +4291,6 @@ function Chat() {
       } = visibilityInputsRef.current
       const virtualItems = virtualizer.getVirtualItems()
 
-      const currentMessageIdSet = new Set(currentMessages.map(message => String(message.id)))
       const findFirstHighlightCandidate = (): MessageId | null => {
         for (const msg of currentMessages) {
           if (msg && isHighlightCandidate(msg)) {
@@ -4274,9 +4299,11 @@ function Chat() {
         }
         return null
       }
+      // Only reached in the fallback branches (no visible highlight row), so validate the sticky id
+      // with a short-circuiting scan here instead of allocating an id Set on every scroll event.
       const getStickyOrInitialHighlightMessage = (): MessageId | null => {
         const stickyId = lastVisibleTextMessageIdRef.current
-        if (stickyId != null && currentMessageIdSet.has(String(stickyId))) {
+        if (stickyId != null && currentMessages.some(message => String(message.id) === String(stickyId))) {
           return stickyId
         }
 
@@ -6561,9 +6588,9 @@ function Chat() {
                               isDarkMode={isDarkMode}
                               className={assistantContainerClassName}
                               userTurnElapsedLabel={userTurnElapsedLabelByMessageId.get(String(msg.id))}
-                              undoState={msg.role === 'user' ? getUndoStateForMessage(String(msg.id)) : undefined}
+                              undoState={msg.role === 'user' ? undoStateByMessageId.get(String(msg.id)) : undefined}
                               onUndoStreamEdits={
-                                msg.role === 'user' ? () => handleUndoStreamEdits(String(msg.id)) : undefined
+                                msg.role === 'user' ? undoHandlerByMessageId.get(String(msg.id)) : undefined
                               }
                               onEdit={handleMessageEdit}
                               onBranch={handleMessageBranch}
