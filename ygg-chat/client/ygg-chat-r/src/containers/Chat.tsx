@@ -2535,9 +2535,11 @@ function Chat() {
       isCompletedStreamMessageAlreadyRendered)
   const showStreamingMessage = !isStreamingMessageAlreadyRendered && hasStreamingMessageContent
   const showLiveStreamingTail = showStreamingMessage && hasFinalTextStreaming
-  // Keep the streaming row in TanStack Virtual, but freeze its measurement while final
-  // text grows so token-by-token rendering does not constantly rewrite virtualizer geometry.
-  const showStreamingMessageInVirtualList = showStreamingMessage
+  // Once the final answer is streaming, the live tail is rendered OUTSIDE TanStack Virtual as an
+  // in-flow sibling (see the message list render) so its token-by-token growth never enters
+  // virtualizer geometry or the ResizeObserver, and can never drag scrollTop. Only the
+  // process-only phase (thinking/tools, no text yet) is kept as a measured virtual row.
+  const showStreamingMessageInVirtualList = showStreamingMessage && !showLiveStreamingTail
   const showStreamingThinkingMessageRow = streamingThinkingIndicatorPlacement === 'message'
   const showStreamingThinkingInputTab = streamingThinkingIndicatorPlacement === 'input-tab'
   const showGenerationLoaderRow = showGenerationLoadingAnimation && showStreamingThinkingMessageRow
@@ -6338,40 +6340,34 @@ function Chat() {
                         if (renderRow.kind === 'streaming_message') {
                           if (!hasStreamingMessageContent) return null
 
+                          // Process-only phase (thinking/tools, no final text yet). Once final text
+                          // begins, this row leaves virtualRows and the live tail renders out of flow
+                          // below (see `showLiveStreamingTail` block after the virtual list).
                           return (
                             <VirtualizedRowContainer
                               key={renderRow.key}
                               id='message-streaming'
                               index={virtualRow.index}
                               start={virtualRow.start}
-                              measureElement={showLiveStreamingTail ? null : virtualizer.measureElement}
+                              measureElement={virtualizer.measureElement}
                             >
-                              <div ref={showLiveStreamingTail ? liveStreamingContentRef : undefined}>
-                                <ChatMessage
-                                  id='streaming'
-                                  role='assistant'
-                                  content={streamState.buffer}
-                                  thinking={streamState.thinkingBuffer}
-                                  toolCalls={streamState.toolCalls}
-                                  streamEvents={streamState.events}
-                                  width='w-full'
-                                  fontSizeOffset={fontSizeOffset}
-                                  groupToolReasoningRuns={groupToolReasoningRuns}
-                                  customTheme={customTheme}
-                                  customThemeEnabled={customThemeEnabled}
-                                  isDarkMode={isDarkMode}
-                                  modelName={selectedModel?.name || undefined}
-                                  className=''
-                                  onOpenToolHtmlModal={openToolHtmlModal}
-                                />
-                              </div>
-                              {showLiveStreamingTail && (
-                                <div
-                                  aria-hidden='true'
-                                  data-live-streaming-clearance='true'
-                                  style={{ height: liveStreamingBottomClearance }}
-                                />
-                              )}
+                              <ChatMessage
+                                id='streaming'
+                                role='assistant'
+                                content={streamState.buffer}
+                                thinking={streamState.thinkingBuffer}
+                                toolCalls={streamState.toolCalls}
+                                streamEvents={streamState.events}
+                                width='w-full'
+                                fontSizeOffset={fontSizeOffset}
+                                groupToolReasoningRuns={groupToolReasoningRuns}
+                                customTheme={customTheme}
+                                customThemeEnabled={customThemeEnabled}
+                                isDarkMode={isDarkMode}
+                                modelName={selectedModel?.name || undefined}
+                                className=''
+                                onOpenToolHtmlModal={openToolHtmlModal}
+                              />
                             </VirtualizedRowContainer>
                           )
                         }
@@ -6605,6 +6601,40 @@ function Chat() {
                 })()
               )}
             </React.Profiler>
+
+            {/* Live streaming tail rendered OUTSIDE the virtualizer as an in-flow sibling. Once final
+                text starts, the token-by-token growth happens here and never enters virtualizer
+                geometry or the ResizeObserver, so it can never drag scrollTop. `flexShrink: 0` keeps
+                the flex column from collapsing it (mirrors the totalSize div). Auto-follow targets
+                liveStreamingContentRef via getBoundingClientRect, which is layout-agnostic. */}
+            {showLiveStreamingTail && (
+              <div style={{ flexShrink: 0 }} data-live-streaming-tail='true'>
+                <div ref={liveStreamingContentRef}>
+                  <ChatMessage
+                    id='streaming'
+                    role='assistant'
+                    content={streamState.buffer}
+                    thinking={streamState.thinkingBuffer}
+                    toolCalls={streamState.toolCalls}
+                    streamEvents={streamState.events}
+                    width='w-full'
+                    fontSizeOffset={fontSizeOffset}
+                    groupToolReasoningRuns={groupToolReasoningRuns}
+                    customTheme={customTheme}
+                    customThemeEnabled={customThemeEnabled}
+                    isDarkMode={isDarkMode}
+                    modelName={selectedModel?.name || undefined}
+                    className=''
+                    onOpenToolHtmlModal={openToolHtmlModal}
+                  />
+                </div>
+                <div
+                  aria-hidden='true'
+                  data-live-streaming-clearance='true'
+                  style={{ height: liveStreamingBottomClearance, flexShrink: 0 }}
+                />
+              </div>
+            )}
 
             {/* Bottom sentinel and padding for scrolling past last message */}
             <div ref={bottomRef} data-bottom-sentinel='true' style={{ height: bottomSentinelHeight }} />
