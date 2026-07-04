@@ -2984,6 +2984,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
               placeholder='Edit your message...'
               minRows={2}
               maxRows={40}
+              maxHeightViewportRatio={editMode === 'branch' ? 0.45 : undefined}
               maxLength={20000}
               autoFocus
               label='Create New Branch'
