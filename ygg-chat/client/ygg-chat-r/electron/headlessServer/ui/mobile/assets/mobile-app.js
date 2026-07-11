@@ -49426,6 +49426,27 @@ var mobileApi = {
       method: "DELETE"
     });
   },
+  async compactConversationBranch(params) {
+    const payload = await jsonFetch(
+      `/api/conversations/${encodeURIComponent(params.conversationId)}/compact`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          parentMessageId: params.parentMessageId,
+          messages: params.messages,
+          provider: params.provider,
+          modelName: params.modelName,
+          userId: params.userId,
+          accessToken: params.accessToken ?? null,
+          accountId: params.accountId ?? null
+        })
+      }
+    );
+    if (!payload?.success || !payload.message) {
+      throw new Error(payload?.error || "Compaction failed");
+    }
+    return payload.message;
+  },
   async streamMessage(params) {
     const operation = params.operation || "send";
     const endpoint = operation === "send" ? `/api/conversations/${encodeURIComponent(params.conversationId)}/messages` : `/api/conversations/${encodeURIComponent(params.conversationId)}/messages/${encodeURIComponent(
@@ -49583,9 +49604,12 @@ var Composer = ({
   sending = false,
   isBranching = false,
   branchLabel,
-  onCancelBranch
+  onCancelBranch,
+  slashCommands = [],
+  onSlashCommandSelect
 }) => {
   const textareaRef = (0, import_react7.useRef)(null);
+  const [selectedSlashIndex, setSelectedSlashIndex] = (0, import_react7.useState)(0);
   const autoResize = (0, import_react7.useCallback)(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
@@ -49603,7 +49627,44 @@ var Composer = ({
   (0, import_react7.useEffect)(() => {
     autoResize();
   }, [value, autoResize]);
-  return /* @__PURE__ */ import_react7.default.createElement("div", { className: "mobile-composer" }, isBranching ? /* @__PURE__ */ import_react7.default.createElement("div", { className: "mobile-branch-banner" }, /* @__PURE__ */ import_react7.default.createElement("span", null, branchLabel || "Branching from selected message"), onCancelBranch ? /* @__PURE__ */ import_react7.default.createElement(Button, { onClick: onCancelBranch, disabled: disabled || sending, variant: "ghost", size: "sm" }, "Cancel branch") : null) : null, /* @__PURE__ */ import_react7.default.createElement(
+  const activeSlashQuery = (0, import_react7.useMemo)(() => {
+    const trimmedStart = value.trimStart();
+    if (!trimmedStart.startsWith("/") || trimmedStart.includes("\n")) return null;
+    const commandText = trimmedStart.slice(1);
+    if (commandText.includes(" ")) return null;
+    return commandText.toLowerCase();
+  }, [value]);
+  const filteredSlashCommands = (0, import_react7.useMemo)(() => {
+    if (activeSlashQuery == null || disabled || slashCommands.length === 0) return [];
+    return slashCommands.filter((command) => command.toLowerCase().startsWith(activeSlashQuery));
+  }, [activeSlashQuery, disabled, slashCommands]);
+  (0, import_react7.useEffect)(() => {
+    setSelectedSlashIndex(0);
+  }, [activeSlashQuery]);
+  const selectSlashCommand = (0, import_react7.useCallback)(
+    (command) => {
+      const result = onSlashCommandSelect?.(command);
+      if (result?.handled && result.clearInput) {
+        onChange("");
+      }
+    },
+    [onChange, onSlashCommandSelect]
+  );
+  return /* @__PURE__ */ import_react7.default.createElement("div", { className: "mobile-composer" }, isBranching ? /* @__PURE__ */ import_react7.default.createElement("div", { className: "mobile-branch-banner" }, /* @__PURE__ */ import_react7.default.createElement("span", null, branchLabel || "Branching from selected message"), onCancelBranch ? /* @__PURE__ */ import_react7.default.createElement(Button, { onClick: onCancelBranch, disabled: disabled || sending, variant: "ghost", size: "sm" }, "Cancel branch") : null) : null, filteredSlashCommands.length > 0 ? /* @__PURE__ */ import_react7.default.createElement("div", { className: "mobile-slash-menu", role: "listbox", "aria-label": "Slash commands" }, /* @__PURE__ */ import_react7.default.createElement("div", { className: "mobile-slash-menu-heading" }, "Commands"), filteredSlashCommands.map((command, index3) => {
+    const selected = index3 === selectedSlashIndex;
+    return /* @__PURE__ */ import_react7.default.createElement(
+      "button",
+      {
+        key: command,
+        type: "button",
+        className: selected ? "selected" : void 0,
+        onMouseEnter: () => setSelectedSlashIndex(index3),
+        onClick: () => selectSlashCommand(command)
+      },
+      /* @__PURE__ */ import_react7.default.createElement("span", { className: "mobile-slash-menu-icon" }, "/"),
+      /* @__PURE__ */ import_react7.default.createElement("span", { className: "mobile-slash-menu-copy" }, /* @__PURE__ */ import_react7.default.createElement("span", { className: "mobile-slash-menu-label" }, "/", command), /* @__PURE__ */ import_react7.default.createElement("span", { className: "mobile-slash-menu-description" }, "Summarize this branch context"))
+    );
+  })) : null, /* @__PURE__ */ import_react7.default.createElement(
     Textarea,
     {
       ref: textareaRef,
@@ -49614,13 +49675,35 @@ var Composer = ({
       disabled,
       onInput: autoResize,
       onKeyDown: (event) => {
+        if (filteredSlashCommands.length > 0) {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setSelectedSlashIndex((index3) => index3 < filteredSlashCommands.length - 1 ? index3 + 1 : 0);
+            return;
+          }
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            setSelectedSlashIndex((index3) => index3 > 0 ? index3 - 1 : filteredSlashCommands.length - 1);
+            return;
+          }
+          if (event.key === "Tab") {
+            event.preventDefault();
+            selectSlashCommand(filteredSlashCommands[selectedSlashIndex] || filteredSlashCommands[0]);
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onChange("");
+            return;
+          }
+        }
         if (event.key === "Enter" && !event.shiftKey) {
           event.preventDefault();
           onSubmit();
         }
       }
     }
-  ), /* @__PURE__ */ import_react7.default.createElement(Button, { onClick: onSubmit, disabled: disabled || sending || !value.trim() }, sending ? "Stop" : isBranching ? "Send Branch" : "Send"), disabled && onDisabledInteract ? /* @__PURE__ */ import_react7.default.createElement(
+  ), /* @__PURE__ */ import_react7.default.createElement(Button, { onClick: onSubmit, disabled: disabled || sending || !value.trim() }, sending ? "Busy" : isBranching ? "Send Branch" : "Send"), disabled && onDisabledInteract ? /* @__PURE__ */ import_react7.default.createElement(
     "button",
     {
       type: "button",
@@ -65683,6 +65766,8 @@ var MAX_AGENT_TEXT_FONT_SIZE_PX = 24;
 var DEFAULT_THINKING_ENABLED = true;
 var DEFAULT_REASONING_EFFORT = "high";
 var MOBILE_REASONING_EFFORT_OPTIONS = ["low", "medium", "high", "xhigh"];
+var MOBILE_SLASH_COMMANDS = ["compactify"];
+var AUTO_COMPACTION_NOTE = "__auto_compaction_summary__";
 var readStorageValue = (key) => {
   if (typeof window === "undefined") return null;
   try {
@@ -65890,7 +65975,7 @@ var App = () => {
     () => normalizeProviderName(readStorageValue(MOBILE_LAST_PROVIDER_STORAGE_KEY))
   );
   const [providerModels, setProviderModels] = (0, import_react36.useState)([]);
-  const [modelName, setModelName] = (0, import_react36.useState)("gpt-5.4");
+  const [modelName, setModelName] = (0, import_react36.useState)("gpt-5.6-sol");
   const [statusText, setStatusText] = (0, import_react36.useState)("Loading\u2026");
   const [agentTextFontSizePx, setAgentTextFontSizePx] = (0, import_react36.useState)(readAgentTextFontSize);
   const [operationMode, setOperationMode] = (0, import_react36.useState)(
@@ -65928,6 +66013,7 @@ var App = () => {
   const [savingConversationSettings, setSavingConversationSettings] = (0, import_react36.useState)(false);
   const [branchSourceMessage, setBranchSourceMessage] = (0, import_react36.useState)(null);
   const [sending, setSending] = (0, import_react36.useState)(false);
+  const [compacting, setCompacting] = (0, import_react36.useState)(false);
   const [streamingState, setStreamingState] = (0, import_react36.useState)(null);
   const [composerBlockModal, setComposerBlockModal] = (0, import_react36.useState)(null);
   const [openAiConnected, setOpenAiConnected] = (0, import_react36.useState)(false);
@@ -66386,7 +66472,7 @@ var App = () => {
     setStatusText("Ready");
   };
   const handleDeleteUserMessage = async (message) => {
-    if (sending) return;
+    if (sending || compacting) return;
     if (message.role !== "user") return;
     const confirmed = window.confirm("Delete this message? This may affect branch history.");
     if (!confirmed) return;
@@ -66694,8 +66780,69 @@ ${nextPath}`;
       setStatusText(event.error);
     }
   };
+  const runSlashCommand = async (rawCommand) => {
+    const normalized = rawCommand.trim().toLowerCase().replace(/^\/+/, "");
+    if (normalized !== "compactify") return { handled: false };
+    if (!selectedUserId) {
+      setStatusText("Select a user profile first");
+      return { handled: true, clearInput: true };
+    }
+    if (!activeConversationId) {
+      setStatusText("Select or create a conversation first");
+      return { handled: true, clearInput: true };
+    }
+    if (sending || compacting || streamingState) {
+      setStatusText("Wait for the current generation or compaction to finish");
+      return { handled: true, clearInput: true };
+    }
+    const latestCompactionIndex = (() => {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i];
+        if (message?.role === "system" && message?.note === AUTO_COMPACTION_NOTE) return i;
+      }
+      return -1;
+    })();
+    const compactionSourceMessages = latestCompactionIndex >= 0 ? messages.slice(latestCompactionIndex + 1) : messages;
+    const lastMessage = messages[messages.length - 1];
+    if (!lastMessage || lastMessage.note === AUTO_COMPACTION_NOTE || compactionSourceMessages.length < 2) {
+      setStatusText("Not enough new branch context to compact");
+      return { handled: true, clearInput: true };
+    }
+    setCompacting(true);
+    setStatusText("Compacting branch\u2026");
+    try {
+      const compactedMessage = await mobileApi.compactConversationBranch({
+        conversationId: activeConversationId,
+        parentMessageId: String(lastMessage.id),
+        messages: compactionSourceMessages,
+        provider: selectedProvider,
+        modelName,
+        userId: selectedUserId
+      });
+      const hasValidCompactionMarker = compactedMessage.role === "system" && compactedMessage.note === AUTO_COMPACTION_NOTE && String(compactedMessage.parent_id ?? "") === String(lastMessage.id);
+      if (!hasValidCompactionMarker) {
+        console.error("[MobileCompaction] invalid summary message returned", compactedMessage);
+        setStatusText("Compaction saved but returned an unexpected message shape");
+      } else {
+        setStatusText("Compaction summary added");
+      }
+      await loadConversationTree(activeConversationId, {
+        preferredMessageId: String(compactedMessage.id),
+        preserveCurrentPath: true
+      });
+    } catch (error) {
+      setStatusText(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCompacting(false);
+    }
+    return { handled: true, clearInput: true };
+  };
+  const handleSlashCommandSelect = (command) => {
+    void runSlashCommand(command);
+    return { handled: true, clearInput: true };
+  };
   const handleSend = async () => {
-    if (sending) return;
+    if (sending || compacting) return;
     if (!selectedUserId) {
       setStatusText("Select a user profile first");
       return;
@@ -66714,6 +66861,13 @@ ${nextPath}`;
     }
     const content3 = draft.trim();
     if (!content3) return;
+    if (content3.startsWith("/")) {
+      const result = await runSlashCommand(content3);
+      if (result.handled) {
+        if (result.clearInput) setDraft("");
+        return;
+      }
+    }
     const isBranchSend = Boolean(branchSourceMessage);
     const streamOperation = isBranchSend ? "edit-branch" : "send";
     const currentBranchTipId = currentPathMessageIds[currentPathMessageIds.length - 1] || resolveLatestLeafMessageId(allMessages);
@@ -66791,7 +66945,7 @@ ${nextPath}`;
       onProviderChange: setSelectedProvider,
       onModelChange: setModelName,
       onUserSelect: setSelectedUserId,
-      selectorsDisabled: sending,
+      selectorsDisabled: sending || compacting,
       openAiAuthenticated: openAiConnected,
       openRouterAuthenticated: openRouterConnected,
       zaiAuthenticated: zaiConnected,
@@ -66817,11 +66971,11 @@ ${nextPath}`;
       onSaveConversationSettings: handleSaveConversationSettings,
       savingConversationSettings,
       onOpenProjectConversationPicker: () => setIsProjectsModalOpen(true),
-      canOpenProjectConversationPicker: !sending && Boolean(selectedUserId),
+      canOpenProjectConversationPicker: !sending && !compacting && Boolean(selectedUserId),
       onOpenBranchTree: () => setIsTreeDrawerOpen(true),
-      canOpenBranchTree: Boolean(activeConversationId) && !sending && allMessages.length > 0,
+      canOpenBranchTree: Boolean(activeConversationId) && !sending && !compacting && allMessages.length > 0,
       onOpenPathPicker: () => setIsPathPickerOpen(true),
-      canOpenPathPicker: Boolean(activeProjectCwd) && !sending && Boolean(activeConversationId)
+      canOpenPathPicker: Boolean(activeProjectCwd) && !sending && !compacting && Boolean(activeConversationId)
     }
   ), /* @__PURE__ */ import_react36.default.createElement(
     ProjectConversationTree,
@@ -66840,7 +66994,7 @@ ${nextPath}`;
       onCreateProject: handleCreateProject,
       onCreateConversation: handleCreateConversation,
       onClose: () => setIsProjectsModalOpen(false),
-      disabled: sending || !selectedUserId
+      disabled: sending || compacting || !selectedUserId
     }
   ), /* @__PURE__ */ import_react36.default.createElement(
     MessageList,
@@ -66850,7 +67004,7 @@ ${nextPath}`;
       branchTargetMessageId: branchSourceMessage?.id || null,
       scrollToMessageId,
       onScrollToMessageHandled: () => setScrollToMessageId(null),
-      userActionsDisabled: sending || !activeConversationId || !selectedUserId,
+      userActionsDisabled: sending || compacting || !activeConversationId || !selectedUserId,
       currentUserId: selectedUserId,
       rootPath: activeProjectCwd,
       agentTextFontSizePx,
@@ -66863,12 +67017,14 @@ ${nextPath}`;
       value: draft,
       onChange: setDraft,
       onSubmit: handleSend,
-      sending,
+      sending: sending || compacting,
       isBranching: Boolean(branchSourceMessage),
       branchLabel: branchSourceMessage ? `Branching from message ${branchSourceMessage.id.slice(0, 8)}\u2026 (new parent = previous message)` : void 0,
       onCancelBranch: branchSourceMessage ? handleCancelBranch : void 0,
       disabled: Boolean(composerDisabledReason),
-      onDisabledInteract: handleComposerDisabledInteract
+      onDisabledInteract: handleComposerDisabledInteract,
+      slashCommands: MOBILE_SLASH_COMMANDS,
+      onSlashCommandSelect: handleSlashCommandSelect
     }
   ), /* @__PURE__ */ import_react36.default.createElement(
     FilePathPickerModal,

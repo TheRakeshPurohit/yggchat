@@ -41,7 +41,12 @@ export interface MobileMessage {
   parent_id?: string | null
   children_ids?: string[] | string | null
   created_at?: string
+  model_name?: string | null
+  note?: string | null
+  content_plain_text?: string | null
+  plain_text_content?: string | null
   tool_calls?: unknown
+  tool_call_id?: string | null
   content_blocks?: unknown
 }
 

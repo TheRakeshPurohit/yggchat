@@ -665,8 +665,32 @@ export function parseAuthorizationInput(input: string): { code?: string; state?:
   return { code: value }
 }
 
-// Available ChatGPT models (based on Plus/Pro subscription)
+// Available models for the OpenAI ChatGPT/Codex-backed provider
 export const CHATGPT_MODELS = [
+  {
+    id: 'gpt-5.6-sol',
+    name: 'GPT-5.6 Sol',
+    displayName: 'GPT-5.6 Sol',
+    description: 'Flagship GPT-5.6 model for the most complex work',
+    contextLength: 400000,
+    maxCompletionTokens: 128000,
+  },
+  {
+    id: 'gpt-5.6-terra',
+    name: 'GPT-5.6 Terra',
+    displayName: 'GPT-5.6 Terra',
+    description: 'Balanced GPT-5.6 model for everyday work',
+    contextLength: 400000,
+    maxCompletionTokens: 128000,
+  },
+  {
+    id: 'gpt-5.6-luna',
+    name: 'GPT-5.6 Luna',
+    displayName: 'GPT-5.6 Luna',
+    description: 'Fast and cost-efficient GPT-5.6 model',
+    contextLength: 400000,
+    maxCompletionTokens: 128000,
+  },
   {
     id: 'gpt-5.5',
     name: 'GPT-5.5',

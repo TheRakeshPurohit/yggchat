@@ -3,6 +3,8 @@ import type { CodexParseResult, CodexResponseParseOptions } from './types.js'
 import { codexResponseParseResult, createCodexResponseParseState, processCodexResponseEventText } from './codexResponseEvents.js'
 
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE = 'responses_websockets=2026-02-06'
+const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite'
+const RESPONSES_LITE_CLIENT_METADATA = 'ws_request_header_x_openai_internal_codex_responses_lite'
 
 export function codexWebSocketUrl(baseURL: string): string {
   const url = new URL(`${baseURL.replace(/\/$/, '')}/responses`)
@@ -20,11 +22,12 @@ export function buildCodexWebSocketHeaders(headers: Headers): Record<string, str
   return result
 }
 
-export function buildCodexWebSocketRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+export function buildCodexWebSocketRequestBody(body: Record<string, unknown>, headers?: Headers): Record<string, unknown> {
   const clientMetadata = {
     ...((body.client_metadata && typeof body.client_metadata === 'object' && !Array.isArray(body.client_metadata))
       ? (body.client_metadata as Record<string, unknown>)
       : {}),
+    ...(headers?.get(RESPONSES_LITE_HEADER) === 'true' ? { [RESPONSES_LITE_CLIENT_METADATA]: 'true' } : {}),
     'x-codex-ws-stream-request-start-ms': String(Date.now()),
   }
   return { type: 'response.create', ...body, client_metadata: clientMetadata }
@@ -41,7 +44,12 @@ export async function parseCodexWebSocketResponse(options: {
   const socket = await connect(options)
   const state = createCodexResponseParseState(options)
   try {
-    await sendWithTimeout(socket, JSON.stringify(buildCodexWebSocketRequestBody(options.body)), options.idleTimeoutMs ?? 120000, options.signal)
+    await sendWithTimeout(
+      socket,
+      JSON.stringify(buildCodexWebSocketRequestBody(options.body, options.headers)),
+      options.idleTimeoutMs ?? 120000,
+      options.signal
+    )
     for (;;) {
       const message = await nextMessage(socket, options.idleTimeoutMs ?? 120000, options.signal)
       if (message.kind === 'close') throw new Error(`OpenAI websocket closed before completion${message.reason ? `: ${message.reason}` : ''}`)

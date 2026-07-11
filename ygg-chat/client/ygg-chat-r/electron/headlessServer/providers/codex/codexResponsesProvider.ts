@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 import { toCodexRequestParts, buildCodexRequestDiagnostics } from './codexRequestItems.js'
 import { parseCodexSseResponse } from './codexSse.js'
 import { openStreamingWithPreFirstByteRetry } from '../streamResilience.js'
@@ -16,6 +16,28 @@ function previewForCodexLog(value: unknown, maxLength = 1200): string {
   return raw.length > maxLength ? `${raw.slice(0, maxLength)}...<truncated:${raw.length}>` : raw
 }
 
+const RESPONSES_LITE_VERSION = '0.144.0'
+const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite'
+const RESPONSES_LITE_WIRE_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const MAX_RESPONSES_LITE_SESSIONS = 500
+const liteWireSessionIds = new Map<string, string>()
+
+function usesResponsesLite(model: string): boolean {
+  return /^gpt-5\.6-(sol|terra|luna)$/i.test(model)
+}
+
+function createUuidV7(): string {
+  const bytes = randomBytes(16)
+  const timestamp = BigInt(Date.now())
+  for (let index = 5; index >= 0; index--) {
+    bytes[index] = Number((timestamp >> BigInt((5 - index) * 8)) & 0xffn)
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x70
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = bytes.toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 export class CodexResponsesProvider {
   private readonly options: CodexProviderOptions
   private readonly fetchImpl: typeof fetch
@@ -29,16 +51,30 @@ export class CodexResponsesProvider {
     input.signal?.throwIfAborted()
     const parts = toCodexRequestParts(input.messages, input.tools)
     const requestId = input.runId || input.sessionId || `ygg-codex-${Date.now()}`
-    const promptCacheKey = input.sessionId || requestId
+    const responsesLite = usesResponsesLite(input.model)
+    const wireSessionId = responsesLite ? this.resolveLiteWireSessionId(input.sessionId || requestId) : input.sessionId
+    const promptCacheKey = wireSessionId || requestId
     const instructions = parts.instructions?.trim() || 'You are ChatGPT.'
+    const liteInput = responsesLite
+      ? [
+          { type: 'additional_tools', role: 'developer', tools: parts.tools },
+          { type: 'message', role: 'developer', content: [{ type: 'input_text', text: instructions }] },
+          ...parts.input,
+        ]
+      : parts.input
     const body: Record<string, any> = {
       model: input.model,
-      instructions,
-      input: parts.input,
-      ...(parts.tools.length ? { tools: parts.tools, tool_choice: 'auto', parallel_tool_calls: true } : {}),
+      ...(responsesLite ? {} : { instructions }),
+      input: liteInput,
+      ...(responsesLite
+        ? { tool_choice: 'auto', parallel_tool_calls: false }
+        : parts.tools.length
+          ? { tools: parts.tools, tool_choice: 'auto', parallel_tool_calls: true }
+          : {}),
       reasoning: {
         effort: this.options.reasoningEffort || 'medium',
         ...(this.options.reasoningSummary === null ? {} : { summary: this.options.reasoningSummary || 'auto' }),
+        ...(responsesLite ? { context: 'all_turns' } : {}),
       },
       store: false,
       stream: true,
@@ -56,9 +92,14 @@ export class CodexResponsesProvider {
       'user-agent': this.options.userAgent || 'Qubit/0.1 Codex',
     })
     if (this.options.auth.accountId) headers.set('ChatGPT-Account-ID', this.options.auth.accountId)
-    if (input.sessionId) {
-      headers.set('session-id', input.sessionId)
-      headers.set('thread-id', input.sessionId)
+    if (responsesLite) {
+      headers.set(RESPONSES_LITE_HEADER, 'true')
+      headers.set('version', RESPONSES_LITE_VERSION)
+      headers.set('x-session-affinity', promptCacheKey)
+    }
+    if (wireSessionId) {
+      headers.set('session-id', wireSessionId)
+      headers.set('thread-id', wireSessionId)
     }
     headers.set('x-client-request-id', requestId)
 
@@ -76,6 +117,8 @@ export class CodexResponsesProvider {
         transport: this.resolveTransport(),
         instructionsLength: instructions.length,
         usedFallbackInstructions: !parts.instructions?.trim(),
+        responsesLite,
+        responsesLiteVersion: responsesLite ? RESPONSES_LITE_VERSION : null,
         hasInstructionsInBody: typeof body.instructions === 'string' && body.instructions.length > 0,
         inputItems: parts.input.length,
         tools: parts.tools.length,
@@ -160,6 +203,19 @@ export class CodexResponsesProvider {
       modelName: input.model,
       allowCommentaryFallbackText: input.allowCommentaryFallbackText,
     })
+  }
+
+  private resolveLiteWireSessionId(sourceSessionId: string): string {
+    if (RESPONSES_LITE_WIRE_SESSION_ID.test(sourceSessionId)) return sourceSessionId
+    const existing = liteWireSessionIds.get(sourceSessionId)
+    if (existing) return existing
+    if (liteWireSessionIds.size >= MAX_RESPONSES_LITE_SESSIONS) {
+      const oldestSessionId = liteWireSessionIds.keys().next().value
+      if (oldestSessionId) liteWireSessionIds.delete(oldestSessionId)
+    }
+    const wireSessionId = createUuidV7()
+    liteWireSessionIds.set(sourceSessionId, wireSessionId)
+    return wireSessionId
   }
 
   private resolveTransport(): CodexResponsesTransport {

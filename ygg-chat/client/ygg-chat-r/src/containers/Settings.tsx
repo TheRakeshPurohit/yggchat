@@ -124,6 +124,7 @@ import {
   SUBAGENT_TOOL_SETTINGS_CHANGE_EVENT,
   SubagentToolSettings,
 } from '../helpers/subagentToolSettings'
+import { normalizeSubagentModelName } from '../helpers/subagentModelNames'
 import {
   addCustomVideo,
   BackgroundColorSettings,
@@ -446,11 +447,15 @@ const Settings: React.FC = () => {
     : null
   const subagentProviderForModels = subagentSettings.defaultProvider || providers.currentProvider || 'OpenRouter'
   const { data: subagentModelsData } = useModels(subagentProviderForModels)
+  const selectedSubagentModel = subagentModelsData?.models?.find(
+    model =>
+      model.id === subagentSettings.defaultModel ||
+      model.name === subagentSettings.defaultModel ||
+      normalizeSubagentModelName(model.name, subagentProviderForModels) === subagentSettings.defaultModel
+  )
   const selectedSubagentModelValue =
-    subagentModelsData?.models?.find(
-      model => model.id === subagentSettings.defaultModel || model.name === subagentSettings.defaultModel
-    )?.id ||
-    subagentSettings.defaultModel ||
+    normalizeSubagentModelName(selectedSubagentModel?.id, subagentProviderForModels) ||
+    normalizeSubagentModelName(subagentSettings.defaultModel, subagentProviderForModels) ||
     ''
   const defaultChatModePrompt = getDefaultChatModePrompt()
   const selectedChatModePrompt =
@@ -1578,7 +1583,7 @@ const Settings: React.FC = () => {
   }
 
   const handleSubagentModelChange = (modelName: string) => {
-    const nextModel = modelName || null
+    const nextModel = normalizeSubagentModelName(modelName, subagentProviderForModels)
     persistSubagentSettings(
       {
         ...subagentSettings,
@@ -2324,7 +2329,7 @@ const Settings: React.FC = () => {
   return (
     <div className='h-full overflow-y-auto thin-scrollbar bg-transparent min-h-full'>
       <div className='mx-auto flex max-w-6xl flex-col gap-5 px-4 py-8'>
-        <header className='flex flex-wrap items-center justify-between gap-4 rounded-[2.25rem] bg-white/35 p-3 pl-5 backdrop-blur-2xl dark:bg-black/15'>
+        <header className='sticky top-0 z-10 flex flex-wrap items-center justify-between gap-4 rounded-[2.25rem] bg-white/35 p-3 pl-5 backdrop-blur-2xl dark:bg-black/15'>
           <div>
             {/* <p className='text-sm uppercase tracking-[0.3em] video-light:text-neutral-100 video-dark:text-neutral-900'>
               Config
@@ -3156,7 +3161,10 @@ const Settings: React.FC = () => {
                   options={[
                     { value: '', label: 'Use provider selected/default model' },
                     ...((subagentModelsData?.models || []).map(model => ({
-                      value: model.id || model.name,
+                      value:
+                        normalizeSubagentModelName(model.id || model.name, subagentProviderForModels) ||
+                        model.id ||
+                        model.name,
                       label: model.displayName || model.name,
                     })) as any[]),
                   ]}

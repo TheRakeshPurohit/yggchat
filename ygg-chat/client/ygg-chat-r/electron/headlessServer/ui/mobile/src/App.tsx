@@ -58,6 +58,8 @@ const MAX_AGENT_TEXT_FONT_SIZE_PX = 24
 const DEFAULT_THINKING_ENABLED = true
 const DEFAULT_REASONING_EFFORT: MobileReasoningEffort = 'high'
 const MOBILE_REASONING_EFFORT_OPTIONS: MobileReasoningEffort[] = ['low', 'medium', 'high', 'xhigh']
+const MOBILE_SLASH_COMMANDS = ['compactify']
+const AUTO_COMPACTION_NOTE = '__auto_compaction_summary__'
 
 const readStorageValue = (key: string): string | null => {
   if (typeof window === 'undefined') return null
@@ -337,7 +339,7 @@ export const App: React.FC = () => {
     normalizeProviderName(readStorageValue(MOBILE_LAST_PROVIDER_STORAGE_KEY))
   )
   const [providerModels, setProviderModels] = useState<MobileProviderModelInfo[]>([])
-  const [modelName, setModelName] = useState('gpt-5.4')
+  const [modelName, setModelName] = useState('gpt-5.6-sol')
   const [statusText, setStatusText] = useState('Loading…')
   const [agentTextFontSizePx, setAgentTextFontSizePx] = useState(readAgentTextFontSize)
   const [operationMode, setOperationMode] = useState<MobileOperationMode>(() =>
@@ -379,6 +381,7 @@ export const App: React.FC = () => {
   const [savingConversationSettings, setSavingConversationSettings] = useState(false)
   const [branchSourceMessage, setBranchSourceMessage] = useState<MobileMessage | null>(null)
   const [sending, setSending] = useState(false)
+  const [compacting, setCompacting] = useState(false)
   const [streamingState, setStreamingState] = useState<StreamingState | null>(null)
   const [composerBlockModal, setComposerBlockModal] = useState<{ title: string; message: string } | null>(null)
   const [openAiConnected, setOpenAiConnected] = useState(false)
@@ -942,7 +945,7 @@ export const App: React.FC = () => {
   }
 
   const handleDeleteUserMessage = async (message: MobileMessage) => {
-    if (sending) return
+    if (sending || compacting) return
     if (message.role !== 'user') return
 
     const confirmed = window.confirm('Delete this message? This may affect branch history.')
@@ -1317,8 +1320,83 @@ export const App: React.FC = () => {
     }
   }
 
+  const runSlashCommand = async (rawCommand: string): Promise<{ handled: boolean; clearInput?: boolean }> => {
+    const normalized = rawCommand.trim().toLowerCase().replace(/^\/+/, '')
+    if (normalized !== 'compactify') return { handled: false }
+
+    if (!selectedUserId) {
+      setStatusText('Select a user profile first')
+      return { handled: true, clearInput: true }
+    }
+    if (!activeConversationId) {
+      setStatusText('Select or create a conversation first')
+      return { handled: true, clearInput: true }
+    }
+    if (sending || compacting || streamingState) {
+      setStatusText('Wait for the current generation or compaction to finish')
+      return { handled: true, clearInput: true }
+    }
+
+    const latestCompactionIndex = (() => {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i]
+        if (message?.role === 'system' && message?.note === AUTO_COMPACTION_NOTE) return i
+      }
+      return -1
+    })()
+
+    const compactionSourceMessages = latestCompactionIndex >= 0 ? messages.slice(latestCompactionIndex + 1) : messages
+    const lastMessage = messages[messages.length - 1]
+
+    if (!lastMessage || lastMessage.note === AUTO_COMPACTION_NOTE || compactionSourceMessages.length < 2) {
+      setStatusText('Not enough new branch context to compact')
+      return { handled: true, clearInput: true }
+    }
+
+    setCompacting(true)
+    setStatusText('Compacting branch…')
+    try {
+      const compactedMessage = await mobileApi.compactConversationBranch({
+        conversationId: activeConversationId,
+        parentMessageId: String(lastMessage.id),
+        messages: compactionSourceMessages,
+        provider: selectedProvider,
+        modelName,
+        userId: selectedUserId,
+      })
+
+      const hasValidCompactionMarker =
+        compactedMessage.role === 'system' &&
+        compactedMessage.note === AUTO_COMPACTION_NOTE &&
+        String(compactedMessage.parent_id ?? '') === String(lastMessage.id)
+
+      if (!hasValidCompactionMarker) {
+        console.error('[MobileCompaction] invalid summary message returned', compactedMessage)
+        setStatusText('Compaction saved but returned an unexpected message shape')
+      } else {
+        setStatusText('Compaction summary added')
+      }
+
+      await loadConversationTree(activeConversationId, {
+        preferredMessageId: String(compactedMessage.id),
+        preserveCurrentPath: true,
+      })
+    } catch (error) {
+      setStatusText(error instanceof Error ? error.message : String(error))
+    } finally {
+      setCompacting(false)
+    }
+
+    return { handled: true, clearInput: true }
+  }
+
+  const handleSlashCommandSelect = (command: string): { handled: boolean; clearInput?: boolean } => {
+    void runSlashCommand(command)
+    return { handled: true, clearInput: true }
+  }
+
   const handleSend = async () => {
-    if (sending) return
+    if (sending || compacting) return
     if (!selectedUserId) {
       setStatusText('Select a user profile first')
       return
@@ -1338,6 +1416,14 @@ export const App: React.FC = () => {
 
     const content = draft.trim()
     if (!content) return
+
+    if (content.startsWith('/')) {
+      const result = await runSlashCommand(content)
+      if (result.handled) {
+        if (result.clearInput) setDraft('')
+        return
+      }
+    }
 
     const isBranchSend = Boolean(branchSourceMessage)
     const streamOperation = isBranchSend ? 'edit-branch' : 'send'
@@ -1425,7 +1511,7 @@ export const App: React.FC = () => {
         onProviderChange={setSelectedProvider}
         onModelChange={setModelName}
         onUserSelect={setSelectedUserId}
-        selectorsDisabled={sending}
+        selectorsDisabled={sending || compacting}
         openAiAuthenticated={openAiConnected}
         openRouterAuthenticated={openRouterConnected}
         zaiAuthenticated={zaiConnected}
@@ -1451,11 +1537,11 @@ export const App: React.FC = () => {
         onSaveConversationSettings={handleSaveConversationSettings}
         savingConversationSettings={savingConversationSettings}
         onOpenProjectConversationPicker={() => setIsProjectsModalOpen(true)}
-        canOpenProjectConversationPicker={!sending && Boolean(selectedUserId)}
+        canOpenProjectConversationPicker={!sending && !compacting && Boolean(selectedUserId)}
         onOpenBranchTree={() => setIsTreeDrawerOpen(true)}
-        canOpenBranchTree={Boolean(activeConversationId) && !sending && allMessages.length > 0}
+        canOpenBranchTree={Boolean(activeConversationId) && !sending && !compacting && allMessages.length > 0}
         onOpenPathPicker={() => setIsPathPickerOpen(true)}
-        canOpenPathPicker={Boolean(activeProjectCwd) && !sending && Boolean(activeConversationId)}
+        canOpenPathPicker={Boolean(activeProjectCwd) && !sending && !compacting && Boolean(activeConversationId)}
       />
 
       <ProjectConversationTree
@@ -1473,7 +1559,7 @@ export const App: React.FC = () => {
         onCreateProject={handleCreateProject}
         onCreateConversation={handleCreateConversation}
         onClose={() => setIsProjectsModalOpen(false)}
-        disabled={sending || !selectedUserId}
+        disabled={sending || compacting || !selectedUserId}
       />
 
       <MessageList
@@ -1482,7 +1568,7 @@ export const App: React.FC = () => {
         branchTargetMessageId={branchSourceMessage?.id || null}
         scrollToMessageId={scrollToMessageId}
         onScrollToMessageHandled={() => setScrollToMessageId(null)}
-        userActionsDisabled={sending || !activeConversationId || !selectedUserId}
+        userActionsDisabled={sending || compacting || !activeConversationId || !selectedUserId}
         currentUserId={selectedUserId}
         rootPath={activeProjectCwd}
         agentTextFontSizePx={agentTextFontSizePx}
@@ -1494,7 +1580,7 @@ export const App: React.FC = () => {
         value={draft}
         onChange={setDraft}
         onSubmit={handleSend}
-        sending={sending}
+        sending={sending || compacting}
         isBranching={Boolean(branchSourceMessage)}
         branchLabel={
           branchSourceMessage
@@ -1504,6 +1590,8 @@ export const App: React.FC = () => {
         onCancelBranch={branchSourceMessage ? handleCancelBranch : undefined}
         disabled={Boolean(composerDisabledReason)}
         onDisabledInteract={handleComposerDisabledInteract}
+        slashCommands={MOBILE_SLASH_COMMANDS}
+        onSlashCommandSelect={handleSlashCommandSelect}
       />
 
       <FilePathPickerModal

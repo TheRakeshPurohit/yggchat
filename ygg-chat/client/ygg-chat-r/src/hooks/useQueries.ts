@@ -1029,7 +1029,7 @@ export function useModels(provider: string | null) {
       // OpenAI ChatGPT - local models (uses user's ChatGPT Plus/Pro subscription)
       if (normalizedSlug === 'openai(chatgpt)' || normalizedSlug === 'openaichatgpt') {
         const models = getOpenAIChatGPTModels() as Model[]
-        const defaultModel = models[0] || stringToModel('gpt-5.5')
+        const defaultModel = models[0] || stringToModel('gpt-5.6-sol')
 
         const storedSelection = getStoredSelectedModel()
         const selectedModel = storedSelection
