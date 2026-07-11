@@ -43,7 +43,7 @@ const localServerAllowRemoteEnvRaw = (process.env.YGG_LOCAL_SERVER_ALLOW_REMOTE 
 const LOCAL_SERVER_ALLOW_REMOTE =
   localServerAllowRemoteEnvRaw.length > 0
     ? ['1', 'true', 'yes', 'on'].includes(localServerAllowRemoteEnvRaw)
-    : process.platform === 'win32'
+    : true
 const LOCAL_SERVER_HOST =
   process.env.YGG_LOCAL_SERVER_HOST?.trim() || (LOCAL_SERVER_ALLOW_REMOTE ? '0.0.0.0' : '127.0.0.1')
 const LOCAL_SERVER_ADVERTISE_HOST =
