@@ -17,6 +17,7 @@ import { registerEphemeralGenerateRoutes } from './routes/ephemeralGenerateRoute
 import { registerSubagentRoutes } from './routes/subagentRoutes.js'
 import { registerTestHarnessRoutes } from './routes/testHarnessRoutes.js'
 import { ChatOrchestrator } from './services/chatOrchestrator.js'
+import { CompactionService } from './services/compactionService.js'
 import { SubagentOrchestrator } from './services/subagentOrchestrator.js'
 import type { ToolExecutor } from './services/toolLoopService.js'
 
@@ -204,6 +205,10 @@ export function registerHeadlessServerRoutes(app: Express, deps: HeadlessServerR
       tokenStore,
       toolExecutor: executeToolViaOrchestrator,
       defaultToolsProvider: resolveDefaultInferenceTools,
+    }),
+    compactionService: new CompactionService({
+      ...deps,
+      tokenStore,
     }),
   })
 }

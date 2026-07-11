@@ -187,6 +187,8 @@ describe('registerProviderAuthRoutes', () => {
     expect(providerNames).toContain('lmstudio')
     expect(providerNames).toContain('zai')
     expect(providerNames).toContain('bedrock')
+    const openAiProvider = payload.providers.find((provider: any) => provider.name === 'openaichatgpt')
+    expect(openAiProvider?.models).toEqual(expect.arrayContaining(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']))
     const bedrockProvider = payload.providers.find((provider: any) => provider.name === 'bedrock')
     expect(bedrockProvider?.models).toContain('anthropic.claude-3-5-sonnet-20241022-v2:0')
   })

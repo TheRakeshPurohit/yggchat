@@ -16,11 +16,79 @@ function createSseStream(events: any[]) {
 
 describe('OpenAiChatgptProvider', () => {
   it('normalizes ChatGPT display labels to backend model IDs', () => {
+    expect(normalizeOpenAIChatGPTModel('GPT-5.6 Sol')).toBe('gpt-5.6-sol')
+    expect(normalizeOpenAIChatGPTModel('GPT-5.6 Terra')).toBe('gpt-5.6-terra')
+    expect(normalizeOpenAIChatGPTModel('GPT-5.6 Luna')).toBe('gpt-5.6-luna')
     expect(normalizeOpenAIChatGPTModel('GPT-5.4 Mini')).toBe('gpt-5.4-mini')
     expect(normalizeOpenAIChatGPTModel('openaichatgpt/GPT-5.4 Mini')).toBe('gpt-5.4-mini')
     expect(normalizeOpenAIChatGPTModel('GPT-5.4 Pro')).toBe('gpt-5.4-pro')
     expect(normalizeOpenAIChatGPTModel('GPT-5.3 Codex')).toBe('gpt-5.3-codex')
   })
+
+  it.each(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'])(
+    'enables Responses Lite transport for %s',
+    async modelName => {
+      process.env.OPENAI_CHATGPT_ACCESS_TOKEN =
+        'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC01NiJ9fQ.sig'
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        const body = JSON.parse(String(init?.body || '{}'))
+        const headers = new Headers(init?.headers as any)
+        expect(body.model).toBe(modelName)
+        expect(body.instructions).toBeUndefined()
+        expect(body.tools).toBeUndefined()
+        expect(body.tool_choice).toBe('auto')
+        expect(body.parallel_tool_calls).toBe(false)
+        expect(body.reasoning.context).toBe('all_turns')
+        expect(body.prompt_cache_key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+        expect(headers.get('session-id')).toBe(body.prompt_cache_key)
+        expect(headers.get('thread-id')).toBe(body.prompt_cache_key)
+        expect(headers.get('x-session-affinity')).toBe(body.prompt_cache_key)
+        expect(headers.get('version')).toBe('0.144.0')
+        expect(body.input[0]).toEqual(expect.objectContaining({ type: 'additional_tools', role: 'developer' }))
+        expect(body.input[1]).toEqual({
+          type: 'message',
+          role: 'developer',
+          content: [{ type: 'input_text', text: 'You are ChatGPT.' }],
+        })
+        expect(headers.get('x-openai-internal-codex-responses-lite')).toBe('true')
+
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'text/event-stream' }),
+          body: createSseStream([
+            {
+              type: 'response.completed',
+              response: {
+                id: `resp-${modelName}`,
+                output: [
+                  {
+                    id: 'msg-final',
+                    type: 'message',
+                    role: 'assistant',
+                    phase: 'final_answer',
+                    content: [{ type: 'output_text', text: 'ok' }],
+                  },
+                ],
+              },
+            },
+          ]),
+          text: async () => '',
+        } as any
+      })
+
+      const provider = new OpenAiChatgptProvider()
+      const conversationId = `non-uuid-${modelName}`
+      const result = await provider.generate({
+        modelName,
+        history: [],
+        userContent: 'hello',
+        railwayTurn: { conversationId } as any,
+      })
+      expect(result.content).toBe('ok')
+    }
+  )
 
   it('does not use commentary-only text as provider content by default', async () => {
     process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1jb21tZW50YXJ5In19.sig'
@@ -580,7 +648,6 @@ describe('OpenAiChatgptProvider', () => {
       })
     )
   })
-
   it('retries ChatGPT HTTP stream setup three times before succeeding', async () => {
     vi.useFakeTimers()
     process.env.OPENAI_CHATGPT_ACCESS_TOKEN = 'header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC00In19.sig'

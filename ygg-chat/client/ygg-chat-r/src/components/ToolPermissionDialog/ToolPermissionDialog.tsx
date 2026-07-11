@@ -161,7 +161,7 @@ export const ToolPermissionDialog: React.FC<ToolPermissionDialogProps> = ({
         <button
           type='button'
           onClick={onDeny}
-          className='rounded-md px-2 py-1 text-[11px] font-medium leading-none opacity-80 transition-all hover:opacity-100 hover:bg-current/5'
+          className='rounded-full border px-3 py-1.5 text-[11px] font-medium leading-none opacity-80 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-[1.02] hover:bg-current/5 hover:opacity-100 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-50 dark:focus-visible:ring-rose-400/70 dark:focus-visible:ring-offset-yBlack-900'
           style={{
             backgroundColor: 'transparent',
             borderColor: denyButtonBorderColor,
@@ -173,7 +173,7 @@ export const ToolPermissionDialog: React.FC<ToolPermissionDialogProps> = ({
         <button
           type='button'
           onClick={onGrant}
-          className='rounded-md px-2 py-1 text-[11px] font-medium leading-none transition-all hover:bg-current/5'
+          className='rounded-full border px-3 py-1.5 text-[11px] font-medium leading-none backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-[1.02] hover:bg-current/5 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-50 dark:focus-visible:ring-orange-400/70 dark:focus-visible:ring-offset-yBlack-900'
           style={{
             backgroundColor: 'transparent',
             borderColor: allowButtonBorderColor,
@@ -185,7 +185,7 @@ export const ToolPermissionDialog: React.FC<ToolPermissionDialogProps> = ({
         <button
           type='button'
           onClick={onAllowAll}
-          className='rounded-md px-2 py-1 text-[11px] font-semibold leading-none transition-all hover:bg-current/5'
+          className='rounded-full border px-3 py-1.5 text-[11px] font-semibold leading-none backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-[1.02] hover:bg-current/5 active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-50 dark:focus-visible:ring-orange-400/70 dark:focus-visible:ring-offset-yBlack-900'
           style={{
             backgroundColor: 'transparent',
             borderColor: allowAllButtonBorderColor,

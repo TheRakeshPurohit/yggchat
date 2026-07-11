@@ -50,7 +50,7 @@
     "icon": "public/img/graviton-dark1.ico"
   },
   "mac": {
-    "target": ["dmg"],
+    "target": ["dmg", "zip"],
     "category": "public.app-category.productivity",
     "icon": "public/img/graviton-dark.icns"
   },

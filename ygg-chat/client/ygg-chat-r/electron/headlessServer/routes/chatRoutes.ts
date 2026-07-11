@@ -1,10 +1,12 @@
 import type { Express, Request, Response } from 'express'
 import type { HeadlessChatOperation, HeadlessMessageRequest } from '../contracts/headlessApi.js'
 import type { HeadlessChatOrchestrator } from '../services/chatOrchestrator.js'
+import type { CompactionService } from '../services/compactionService.js'
 import { initializeSse, startSseHeartbeat, writeSseEvent } from '../stream/sseWriter.js'
 
 interface RegisterChatRoutesDeps {
   orchestrator: HeadlessChatOrchestrator
+  compactionService?: CompactionService
 }
 
 function buildHeadlessMessageRequest(req: Request, operation: HeadlessChatOperation): HeadlessMessageRequest {
@@ -30,7 +32,7 @@ function buildHeadlessMessageRequest(req: Request, operation: HeadlessChatOperat
     messageId: messageIdParam ?? body.messageId ?? body.message_id ?? null,
     content: body.content ?? '',
     provider: body.provider ?? 'openaichatgpt',
-    modelName: body.modelName ?? body.model_name ?? 'gpt-5.4',
+    modelName: body.modelName ?? body.model_name ?? 'gpt-5.6-sol',
     userId: body.userId ?? body.user_id ?? userIdFromHeader ?? null,
     accessToken: body.accessToken ?? body.access_token ?? (authorizationHeader?.replace(/^Bearer\s+/i, '') ?? null),
     accountId: body.accountId ?? body.account_id ?? accountIdFromHeader ?? null,
@@ -100,7 +102,52 @@ async function runSseOrchestrator(
 }
 
 export function registerChatRoutes(app: Express, deps: RegisterChatRoutesDeps): void {
-  const { orchestrator } = deps
+  const { orchestrator, compactionService } = deps
+
+  app.post('/api/conversations/:id/compact', async (req, res) => {
+    if (!compactionService) {
+      res.status(501).json({ error: 'Compaction service is not configured' })
+      return
+    }
+
+    try {
+      const body = req.body ?? {}
+      const conversationIdParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
+      const parentMessageId = body.parentMessageId ?? body.parent_message_id ?? null
+      const messages = Array.isArray(body.messages) ? body.messages : []
+
+      if (!conversationIdParam) {
+        res.status(400).json({ error: 'conversation id is required' })
+        return
+      }
+      if (!parentMessageId) {
+        res.status(400).json({ error: 'parentMessageId is required' })
+        return
+      }
+      if (messages.length < 2) {
+        res.status(400).json({ error: 'At least two source messages are required' })
+        return
+      }
+
+      const result = await compactionService.compactBranch({
+        conversationId: conversationIdParam,
+        parentMessageId: String(parentMessageId),
+        messages,
+        provider: body.provider ?? 'openaichatgpt',
+        modelName: body.modelName ?? body.model_name ?? 'gpt-5.6-sol',
+        userId: body.userId ?? body.user_id ?? null,
+        accessToken: body.accessToken ?? body.access_token ?? null,
+        accountId: body.accountId ?? body.account_id ?? null,
+        systemPrompt: body.systemPrompt ?? body.system_prompt ?? null,
+      })
+
+      res.status(201).json({ success: true, message: result.message })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const status = message.includes('not found') ? 404 : 500
+      res.status(status).json({ error: message })
+    }
+  })
 
   app.post('/api/conversations/:id/messages', async (req, res) => {
     await runSseOrchestrator(orchestrator, req, res, 'send')

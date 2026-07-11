@@ -29,6 +29,11 @@ interface TextAreaProps {
   className?: string
   minRows?: number
   maxRows?: number
+  /**
+   * Optional viewport-relative cap for auto-resize mode.
+   * Useful for in-message editors where maxRows alone can exceed small screens.
+   */
+  maxHeightViewportRatio?: number
   autoFocus?: boolean
   showCharCount?: boolean
   fillAvailableHeight?: boolean
@@ -102,6 +107,7 @@ export const TextArea: React.FC<TextAreaProps> = ({
   className = '',
   minRows = 1,
   maxRows = 25,
+  maxHeightViewportRatio,
   autoFocus = false,
   showCharCount = false,
   fillAvailableHeight = false,
@@ -404,6 +410,15 @@ export const TextArea: React.FC<TextAreaProps> = ({
     }
   }
 
+  const getViewportMaxHeight = () => {
+    if (!maxHeightViewportRatio || typeof window === 'undefined') return undefined
+
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight
+    if (!viewportHeight) return undefined
+
+    return Math.max(0, viewportHeight * Math.min(Math.max(maxHeightViewportRatio, 0), 1))
+  }
+
   // Auto-resize functionality
   const adjustHeight = () => {
     const textarea = textareaRef.current
@@ -425,13 +440,17 @@ export const TextArea: React.FC<TextAreaProps> = ({
       // Calculate the number of lines
       const lineHeight = 24 // Approximate line height in pixels
       const minHeight = minRows * lineHeight + 16 // 16px for padding
-      const maxHeight = maxRows ? maxRows * lineHeight + 16 : undefined
+      const rowMaxHeight = maxRows ? maxRows * lineHeight + 16 : undefined
+      const viewportMaxHeight = getViewportMaxHeight()
+      const maxHeight = [rowMaxHeight, viewportMaxHeight]
+        .filter((height): height is number => typeof height === 'number' && height > 0)
+        .reduce<number | undefined>((smallest, height) => (smallest == null ? height : Math.min(smallest, height)), undefined)
 
       const scrollHeight = textarea.scrollHeight
       let newHeight = Math.max(scrollHeight, minHeight)
 
       if (maxHeight && newHeight > maxHeight) {
-        newHeight = maxHeight
+        newHeight = Math.max(minHeight, maxHeight)
         textarea.style.overflowY = 'auto'
       } else {
         textarea.style.overflowY = 'hidden'
@@ -444,12 +463,16 @@ export const TextArea: React.FC<TextAreaProps> = ({
   // Adjust height when value changes
   useEffect(() => {
     adjustHeight()
-  }, [value])
+  }, [value, maxHeightViewportRatio])
 
-  // Adjust height on mount
+  // Adjust height on mount and when the viewport changes
   useEffect(() => {
     adjustHeight()
-  }, [])
+    if (!maxHeightViewportRatio || typeof window === 'undefined') return
+
+    window.addEventListener('resize', adjustHeight)
+    return () => window.removeEventListener('resize', adjustHeight)
+  }, [maxHeightViewportRatio])
 
   // Programmatic focus when autoFocus toggles to true (e.g., after streaming finishes)
   useEffect(() => {

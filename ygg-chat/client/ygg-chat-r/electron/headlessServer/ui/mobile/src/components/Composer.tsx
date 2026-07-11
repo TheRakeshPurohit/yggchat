@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Textarea } from './ui'
 
 interface ComposerProps {
@@ -11,6 +11,8 @@ interface ComposerProps {
   isBranching?: boolean
   branchLabel?: string
   onCancelBranch?: () => void
+  slashCommands?: string[]
+  onSlashCommandSelect?: (command: string) => { handled: boolean; clearInput?: boolean } | void
 }
 
 const DEFAULT_ROWS = 1
@@ -26,8 +28,11 @@ export const Composer: React.FC<ComposerProps> = ({
   isBranching = false,
   branchLabel,
   onCancelBranch,
+  slashCommands = [],
+  onSlashCommandSelect,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const [selectedSlashIndex, setSelectedSlashIndex] = useState(0)
 
   const autoResize = useCallback(() => {
     const textarea = textareaRef.current
@@ -51,6 +56,33 @@ export const Composer: React.FC<ComposerProps> = ({
     autoResize()
   }, [value, autoResize])
 
+  const activeSlashQuery = useMemo(() => {
+    const trimmedStart = value.trimStart()
+    if (!trimmedStart.startsWith('/') || trimmedStart.includes('\n')) return null
+    const commandText = trimmedStart.slice(1)
+    if (commandText.includes(' ')) return null
+    return commandText.toLowerCase()
+  }, [value])
+
+  const filteredSlashCommands = useMemo(() => {
+    if (activeSlashQuery == null || disabled || slashCommands.length === 0) return []
+    return slashCommands.filter(command => command.toLowerCase().startsWith(activeSlashQuery))
+  }, [activeSlashQuery, disabled, slashCommands])
+
+  useEffect(() => {
+    setSelectedSlashIndex(0)
+  }, [activeSlashQuery])
+
+  const selectSlashCommand = useCallback(
+    (command: string) => {
+      const result = onSlashCommandSelect?.(command)
+      if (result?.handled && result.clearInput) {
+        onChange('')
+      }
+    },
+    [onChange, onSlashCommandSelect]
+  )
+
   return (
     <div className='mobile-composer'>
       {isBranching ? (
@@ -64,6 +96,30 @@ export const Composer: React.FC<ComposerProps> = ({
         </div>
       ) : null}
 
+      {filteredSlashCommands.length > 0 ? (
+        <div className='mobile-slash-menu' role='listbox' aria-label='Slash commands'>
+          <div className='mobile-slash-menu-heading'>Commands</div>
+          {filteredSlashCommands.map((command, index) => {
+            const selected = index === selectedSlashIndex
+            return (
+              <button
+                key={command}
+                type='button'
+                className={selected ? 'selected' : undefined}
+                onMouseEnter={() => setSelectedSlashIndex(index)}
+                onClick={() => selectSlashCommand(command)}
+              >
+                <span className='mobile-slash-menu-icon'>/</span>
+                <span className='mobile-slash-menu-copy'>
+                  <span className='mobile-slash-menu-label'>/{command}</span>
+                  <span className='mobile-slash-menu-description'>Summarize this branch context</span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      ) : null}
+
       <Textarea
         ref={textareaRef}
         rows={DEFAULT_ROWS}
@@ -73,6 +129,28 @@ export const Composer: React.FC<ComposerProps> = ({
         disabled={disabled}
         onInput={autoResize}
         onKeyDown={event => {
+          if (filteredSlashCommands.length > 0) {
+            if (event.key === 'ArrowDown') {
+              event.preventDefault()
+              setSelectedSlashIndex(index => (index < filteredSlashCommands.length - 1 ? index + 1 : 0))
+              return
+            }
+            if (event.key === 'ArrowUp') {
+              event.preventDefault()
+              setSelectedSlashIndex(index => (index > 0 ? index - 1 : filteredSlashCommands.length - 1))
+              return
+            }
+            if (event.key === 'Tab') {
+              event.preventDefault()
+              selectSlashCommand(filteredSlashCommands[selectedSlashIndex] || filteredSlashCommands[0])
+              return
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              onChange('')
+              return
+            }
+          }
           if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault()
             onSubmit()
@@ -80,7 +158,7 @@ export const Composer: React.FC<ComposerProps> = ({
         }}
       />
       <Button onClick={onSubmit} disabled={disabled || sending || !value.trim()}>
-        {sending ? 'Stop' : isBranching ? 'Send Branch' : 'Send'}
+        {sending ? 'Busy' : isBranching ? 'Send Branch' : 'Send'}
       </Button>
 
       {disabled && onDisabledInteract ? (

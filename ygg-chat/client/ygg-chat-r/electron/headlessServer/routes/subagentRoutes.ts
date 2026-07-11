@@ -33,7 +33,7 @@ function buildHeadlessSubagentRequest(body: any): HeadlessSubagentRequest {
     parentMessageId: String(body?.parentMessageId ?? body?.parent_message_id ?? body?.messageId ?? body?.message_id ?? '').trim(),
     prompt: typeof body?.prompt === 'string' ? body.prompt : '',
     provider: typeof body?.provider === 'string' ? body.provider : 'openaichatgpt',
-    modelName: typeof body?.modelName === 'string' ? body.modelName : typeof body?.model === 'string' ? body.model : 'gpt-5.4',
+    modelName: typeof body?.modelName === 'string' ? body.modelName : typeof body?.model === 'string' ? body.model : 'gpt-5.6-sol',
     systemPrompt: typeof body?.systemPrompt === 'string' ? body.systemPrompt : null,
     maxTurns: typeof body?.maxTurns === 'number' ? body.maxTurns : undefined,
     maxToolCalls: typeof body?.maxToolCalls === 'number' ? body.maxToolCalls : undefined,

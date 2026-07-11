@@ -475,9 +475,12 @@ export const chatSlice = createSlice({
       // Get or create the target stream
       const stream = getOrCreateStream(state, streamId)
 
-      if (chunk.type !== 'reset' && !stream.active) {
+      if (chunk.type !== 'reset' && chunk.type !== 'error' && !stream.active) {
         // Late chunks can arrive after abort/completion. Do not let them mutate
         // visible branch state after the stream has left the in-flight set.
+        // 'error' is exempt: the send/edit/branch thunks dispatch sendingCompleted (which sets
+        // active=false) BEFORE the error chunk on a client-side failure, so without this exemption
+        // the error was silently swallowed and a dropped stream looked like a clean completion.
         stream.suppressedEventCount = (stream.suppressedEventCount ?? 0) + 1
         return
       }
@@ -517,12 +520,17 @@ export const chatSlice = createSlice({
       } else if (chunk.type === 'chunk') {
         if (chunk.part === 'reasoning') {
           const delta = chunk.delta ?? chunk.content ?? ''
-          stream.thinkingBuffer += delta
-          // Log reasoning delta immediately so it appears during streaming
-          stream.events.push({
-            type: 'reasoning',
-            delta,
-          })
+          if (delta) {
+            stream.thinkingBuffer += delta
+            // Coalesce consecutive reasoning deltas into the last reasoning event instead of
+            // pushing one object per token (Immer copies the events array on every push).
+            const lastEvent = stream.events[stream.events.length - 1]
+            if (lastEvent && lastEvent.type === 'reasoning') {
+              lastEvent.delta = (lastEvent.delta ?? '') + delta
+            } else {
+              stream.events.push({ type: 'reasoning', delta })
+            }
+          }
         } else if (chunk.part === 'tool_call') {
           // Handle structured tool call data (supports both legacy and new formats)
           if (chunk.toolCall) {
@@ -583,12 +591,20 @@ export const chatSlice = createSlice({
           }
         } else {
           const delta = chunk.delta ?? chunk.content ?? ''
-          stream.buffer += delta
-          // Log text deltas as they come (text is typically streamed token by token)
-          stream.events.push({
-            type: 'text',
-            delta,
-          })
+          if (delta) {
+            stream.buffer += delta
+            // Coalesce consecutive text deltas into the last text event instead of pushing one
+            // object per token. Immer copies the events array on every push, so per-token pushes
+            // are O(n^2) over a long response; a run of text is now O(1) amortized and keeps the
+            // events array (and the streamEvents prop) small. Empty deltas are dropped so the
+            // process/text streaming booleans in Chat.tsx cannot diverge on whitespace.
+            const lastEvent = stream.events[stream.events.length - 1]
+            if (lastEvent && lastEvent.type === 'text') {
+              lastEvent.delta = (lastEvent.delta ?? '') + delta
+            } else {
+              stream.events.push({ type: 'text', delta })
+            }
+          }
         }
       } else if (chunk.type === 'tool_call') {
         // Handle legacy tool_call format (chunk.type === 'tool_call' directly)

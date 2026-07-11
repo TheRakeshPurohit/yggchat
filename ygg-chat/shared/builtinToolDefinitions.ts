@@ -1093,7 +1093,7 @@ export const BUILTIN_TOOL_DEFINITIONS: SharedToolDefinition[] = [
         model: {
           type: 'string',
           description:
-            'Model to use for the subagent (e.g., "anthropic/claude-sonnet-4", "openai/gpt-4o", "google/gemini-2.0-flash"). If omitted, defaults to the Global Agent model from Settings (or openai/gpt-5.1-codex-mini when unset).',
+            'Model to use for the subagent (e.g., "anthropic/claude-sonnet-4", "gpt-5.6-sol", "google/gemini-2.0-flash"). If omitted, uses the Subagent model from Settings, then the selected provider model, with GPT-5.6 Sol as the final fallback.',
         },
         systemPrompt: {
           type: 'string',

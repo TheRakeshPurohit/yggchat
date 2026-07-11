@@ -5,6 +5,7 @@ import type { Model, OperationMode, ToolDefinition } from './chatTypes'
 import { createStreamingRequest, environment, localApi } from '../../utils/api'
 import { isCommunityMode } from '../../config/runtimeMode'
 import { getDefaultSubagentModePrompt } from '../../helpers/operationModePromptStorage'
+import { normalizeSubagentModelName } from '../../helpers/subagentModelNames'
 import {
   getSubagentEnabledTools,
   getSubagentMaxTurns,
@@ -14,46 +15,12 @@ import {
 import { getAllTools } from './toolDefinitions'
 import { createStreamingRun, finishStreamingRun } from './streamRunTracking'
 
-const DEFAULT_SUBAGENT_MODEL = 'openai/gpt-5.4-mini'
+const DEFAULT_SUBAGENT_MODEL = 'gpt-5.6-sol'
 const MAX_PARALLEL_SUBAGENTS = 3
 const MAX_SUBAGENT_DEPTH = 2
 const isElectronEnvironment = environment === 'electron' || (typeof __IS_ELECTRON__ !== 'undefined' && __IS_ELECTRON__)
 const normalizeProviderSlug = (providerName: string | null | undefined): string =>
   (providerName || '').toLowerCase().replace(/\s+/g, '')
-
-const normalizeOpenAIChatGPTModelId = (modelName: string | null | undefined): string | null => {
-  const raw = typeof modelName === 'string' ? modelName.trim() : ''
-  if (!raw) return null
-
-  const stripped = raw.replace(/^(openai|openaichatgpt)\//i, '')
-  const slug = stripped.toLowerCase().replace(/\s+/g, '-')
-
-  if (slug.includes('gpt-5.5-pro')) return 'gpt-5.5-pro'
-  if (slug.includes('gpt-5.5')) return 'gpt-5.5'
-  if (slug.includes('gpt-5.4-mini')) return 'gpt-5.4-mini'
-  if (slug.includes('gpt-5.4-pro')) return 'gpt-5.4-pro'
-  if (slug.includes('gpt-5.4')) return 'gpt-5.4'
-  if (slug.includes('gpt-5.3-codex')) return 'gpt-5.3-codex'
-
-  // Retired/stale ChatGPT selections should not leak display names to the backend.
-  if (slug.includes('gpt-5.2') || slug.includes('gpt-5.1') || slug.includes('gpt-5-codex') || slug.includes('codex-mini-latest')) {
-    return 'gpt-5.3-codex'
-  }
-
-  if (slug.includes('gpt-5')) return 'gpt-5.5'
-  if (slug.includes('gpt-4o')) return 'gpt-5.4-mini'
-
-  return stripped || null
-}
-
-const normalizeSubagentModelForProvider = (
-  modelName: string | null | undefined,
-  providerName: string | null | undefined
-): string | null => {
-  const raw = typeof modelName === 'string' ? modelName.trim() : ''
-  if (!raw) return null
-  return resolveInheritedSubagentProvider(providerName) === 'openaichatgpt' ? normalizeOpenAIChatGPTModelId(raw) : raw
-}
 
 export interface SubagentRuntimeContext {
   dispatch: any
@@ -154,7 +121,7 @@ const resolveSubagentDefaults = (
     DEFAULT_SUBAGENT_MODEL
 
   return {
-    model: normalizeSubagentModelForProvider(rawModel, providerNameForResolution) || rawModel,
+    model: normalizeSubagentModelName(rawModel, providerNameForResolution) || rawModel,
     provider: resolvedProvider,
   }
 }
@@ -1216,4 +1183,3 @@ export const executeSubagentCall = async (
   return finalToolResult || 'No response generated'
   // legacy summary removed\n\n${finalResponse || 'No response generated'}\n\n---\nTurns: ${turnsUsed}/${maxTurns} | Tool calls: ${totalToolCallsUsed}/${maxToolCalls} | Tools: ${toolSummary}`
 }
-

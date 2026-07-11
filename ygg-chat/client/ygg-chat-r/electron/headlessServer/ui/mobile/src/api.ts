@@ -545,6 +545,39 @@ export const mobileApi = {
     })
   },
 
+  async compactConversationBranch(params: {
+    conversationId: string
+    parentMessageId: string
+    messages: MobileMessage[]
+    provider: MobileProviderName
+    modelName: string
+    userId: string
+    accessToken?: string | null
+    accountId?: string | null
+  }): Promise<MobileMessage> {
+    const payload = await jsonFetch<{ success?: boolean; message?: MobileMessage; error?: string }>(
+      `/api/conversations/${encodeURIComponent(params.conversationId)}/compact`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          parentMessageId: params.parentMessageId,
+          messages: params.messages,
+          provider: params.provider,
+          modelName: params.modelName,
+          userId: params.userId,
+          accessToken: params.accessToken ?? null,
+          accountId: params.accountId ?? null,
+        }),
+      }
+    )
+
+    if (!payload?.success || !payload.message) {
+      throw new Error(payload?.error || 'Compaction failed')
+    }
+
+    return payload.message
+  },
+
   async streamMessage(params: {
     conversationId: string
     userId: string

@@ -207,7 +207,7 @@ export class SubagentOrchestrator {
     const provider =
       typeof request.provider === 'string' && request.provider.trim() ? request.provider : 'openaichatgpt'
     const providerRoute = normalizeProviderRoute(provider)
-    const modelName = typeof request.modelName === 'string' && request.modelName.trim() ? request.modelName : 'gpt-5.4'
+    const modelName = typeof request.modelName === 'string' && request.modelName.trim() ? request.modelName : 'gpt-5.6-sol'
     const maxTurns = Math.min(Math.max(request.maxTurns || 10, 1), 50)
     const maxToolCalls = Math.min(Math.max(request.maxToolCalls || 20, 1), 50)
     const tools = sanitizeTools(request.tools)

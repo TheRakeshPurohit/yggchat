@@ -220,7 +220,9 @@ export async function createLmStudioStreamingRequest(
   // Accumulators for final message
   let assistantText = ''
   let assistantReasoning = ''
-  let assistantMessageId: string | null = null
+  // Pre-generate the id so we can announce it via generation_started before streaming (parity with
+  // the server/OpenAI providers). buildFinalMessage reuses this same id for the persisted message.
+  let assistantMessageId: string | null = uuidv4()
   let completionEmitted = false
 
   // Tool call accumulator for incremental streaming
@@ -311,6 +313,12 @@ export async function createLmStudioStreamingRequest(
     onChunk({ type: 'complete', message })
     return true
   }
+
+  // Announce the turn so the redux stream clears the previous turn's buffer/events and sets
+  // liveMessageId for duplicate suppression. LM Studio's raw API never sends this, so in multi-turn
+  // tool loops later turns previously streamed onto the prior turn's stale buffer (duplicated text)
+  // and the streaming row stayed suppressed until completion.
+  onChunk({ type: 'generation_started', messageId: assistantMessageId })
 
   try {
     while (true) {

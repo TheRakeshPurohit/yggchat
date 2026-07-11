@@ -9,10 +9,12 @@ describe('registerChatRoutes', () => {
   let baseUrl = ''
   const seenOperations: string[] = []
   const seenRequests: any[] = []
+  const seenCompactionRequests: any[] = []
 
   beforeEach(() => {
     seenOperations.length = 0
     seenRequests.length = 0
+    seenCompactionRequests.length = 0
 
     const app = express()
     app.use(express.json())
@@ -34,6 +36,20 @@ describe('registerChatRoutes', () => {
           emit({ type: 'complete', message: { id: 'assistant-1' } })
         },
       },
+      compactionService: {
+        async compactBranch(request) {
+          seenCompactionRequests.push(request)
+          return {
+            message: {
+              id: 'compact-1',
+              role: 'system',
+              note: '__auto_compaction_summary__',
+              parent_id: request.parentMessageId,
+              content: 'summary',
+            },
+          }
+        },
+      } as any,
     })
 
     appServer = app.listen(0)
@@ -69,7 +85,7 @@ describe('registerChatRoutes', () => {
       type: 'started',
       conversationId: 'c1',
       provider: 'openaichatgpt',
-      modelName: 'gpt-5.4',
+      modelName: 'gpt-5.6-sol',
     })
     expect(dataLines[1]).toMatchObject({ type: 'chunk', part: 'text', delta: 'hello' })
     expect(dataLines[2]).toMatchObject({ type: 'complete', message: { id: 'assistant-1' } })
@@ -112,6 +128,42 @@ describe('registerChatRoutes', () => {
     expect(seenRequests[0]).toMatchObject({
       operationMode: 'plan',
       includeOperationModePrompt: false,
+    })
+  })
+
+  it('maps compact route to compaction service', async () => {
+    const res = await fetch(`${baseUrl}/api/conversations/c1/compact`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        parentMessageId: 'm2',
+        messages: [
+          { id: 'm1', role: 'user', content: 'hello' },
+          { id: 'm2', role: 'assistant', content: 'world' },
+        ],
+        provider: 'openaichatgpt',
+        modelName: 'gpt-test',
+        userId: 'u1',
+      }),
+    })
+
+    expect(res.status).toBe(201)
+    const payload = await res.json()
+    expect(payload).toMatchObject({
+      success: true,
+      message: {
+        id: 'compact-1',
+        role: 'system',
+        note: '__auto_compaction_summary__',
+        parent_id: 'm2',
+      },
+    })
+    expect(seenCompactionRequests[0]).toMatchObject({
+      conversationId: 'c1',
+      parentMessageId: 'm2',
+      provider: 'openaichatgpt',
+      modelName: 'gpt-test',
+      userId: 'u1',
     })
   })
 })
