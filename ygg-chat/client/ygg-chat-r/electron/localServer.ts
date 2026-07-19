@@ -5184,6 +5184,21 @@ function setupServer() {
     return files
   }
 
+  builtInTools.set('memory_manage', async () => {
+    const files = await listMemoryFileSummaries()
+    return {
+      success: true,
+      files: files
+        .filter(file => file.exists)
+        .map(({ kind, label, projectName, path: filePath }) => ({
+          kind,
+          label,
+          ...(projectName ? { projectName } : {}),
+          path: filePath,
+        })),
+    }
+  })
+
   const resolveMemoryFileId = (id: string): { path: string; kind: MemoryFileKind; projectName?: string | null } | null => {
     if (id === 'global:memory') return { path: getLongTermMemoryFilePath(), kind: 'global' }
     if (id === 'global:recent') return { path: getRecentMemoryFilePath(), kind: 'recent' }
@@ -10505,6 +10520,8 @@ export async function startLocalServer(
 
   try {
     initializeLocalDatabase(actualDbPath)
+    // Register memory routes and their list-only tool handler before tool registries consume builtInTools.
+    setupServer()
 
     // Initialize tool registries
     initializeBuiltInToolRegistry()
@@ -10599,8 +10616,6 @@ export async function startLocalServer(
     } catch (error) {
       console.error(`[LocalServer] Error registering MCP tools:`, error)
     }
-
-    setupServer()
 
     const retryableCodes = new Set(['EADDRINUSE', 'EACCES', 'EPERM'])
     const portCandidates = buildPortCandidates(preferredPort, fallbackPorts, allowEphemeralPort)
