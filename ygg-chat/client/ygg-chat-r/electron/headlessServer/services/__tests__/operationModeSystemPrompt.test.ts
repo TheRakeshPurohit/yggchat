@@ -59,12 +59,33 @@ describe('plan mode tool filtering', () => {
     expect(filtered).toContain('bash')
     expect(filtered).toContain('powershell')
     expect(filtered).toContain('read_file')
-    expect(filtered).not.toContain('edit_file')
+    // edit_file stays model-VISIBLE in plan mode by design (see the upgrade-request
+    // test below). Plan mode gates it at EXECUTION time, not by hiding the schema.
+    expect(filtered).toContain('edit_file')
   })
 
-  it('does not block bash or powershell tool calls in plan mode', () => {
-    expect(() => assertToolAllowedForOperationMode({ name: 'bash' }, 'plan')).not.toThrow()
-    expect(() => assertToolAllowedForOperationMode({ name: 'powershell' }, 'plan')).not.toThrow()
+  it('allows tool-manager calls in plan mode', () => {
+    for (const name of ['bash', 'powershell', 'custom_tool_manager', 'mcp_manager', 'skill_manager']) {
+      expect(() => assertToolAllowedForOperationMode({ name }, 'plan')).not.toThrow()
+    }
+  })
+
+  it('blocks file-mutating and mcp tools at execution time in plan mode', () => {
+    // The counterpart to schema visibility: ToolLoopService calls this before every
+    // tool call, so an Agent-only tool the model can SEE still cannot RUN in plan
+    // mode unless requestOperationModeUpgrade resolves truthy.
+    for (const name of ['create_file', 'edit_file', 'multi_edit', 'delete_file', 'mcp__server__do']) {
+      expect(() => assertToolAllowedForOperationMode({ name }, 'plan')).toThrow()
+    }
+    // Agent mode gates nothing.
+    for (const name of ['edit_file', 'mcp__server__do']) {
+      expect(() => assertToolAllowedForOperationMode({ name }, 'execute')).not.toThrow()
+    }
+  })
+
+  it('keeps Agent-only tools model-visible so they can request an Agent-mode upgrade', () => {
+    const tools = [{ name: 'edit_file', enabled: true }, { name: 'custom_tool_manager', enabled: true }] as ToolDefinition[]
+    expect(filterToolsForOperationMode(tools, 'plan').map(tool => tool.name)).toEqual(['edit_file', 'custom_tool_manager'])
   })
 })
 

@@ -4,6 +4,7 @@ type StreamRunStatus = 'running' | 'completed' | 'aborted' | 'error'
 
 type UpsertStreamingRunInput = {
   streamId?: string | null
+  lineageId?: string | null
   conversationId?: string | null
   parentMessageId?: string | null
   userMessageId?: string | null
@@ -92,7 +93,29 @@ export class StreamingRunRepo {
       now
     )
 
+    if (input.lineageId) {
+      if (!this.statements.attachStreamingRunToLineage) {
+        throw new Error('Streaming-run lineage attachment statement is not configured')
+      }
+      this.statements.attachStreamingRunToLineage.run(input.lineageId, streamId)
+    }
+
     return streamId
+  }
+
+  getLineageId(streamId: string | null | undefined): string | null {
+    if (!streamId) return null
+    return (this.statements.getStreamingRunById.get(streamId) as any)?.lineage_id ?? null
+  }
+
+  /**
+   * The streamId of the most recent subagent stream for a tool call — what the
+   * transcript viewer subscribes to for live progress. A resume mints a newer row,
+   * so this always resolves the current attempt. Null when none / statement absent.
+   */
+  latestSubagentStreamIdByToolCall(toolCallId: string | null | undefined): string | null {
+    if (!toolCallId || !this.statements.getLatestSubagentStreamIdByToolCall) return null
+    return (this.statements.getLatestSubagentStreamIdByToolCall.get(toolCallId) as any)?.stream_id ?? null
   }
 
   finish(streamId: string | null | undefined, input: FinishStreamingRunInput): void {

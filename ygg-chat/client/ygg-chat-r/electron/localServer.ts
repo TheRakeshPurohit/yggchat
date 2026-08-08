@@ -43,7 +43,6 @@ import { runBashCommand } from './tools/bash.js'
 import { runPowerShellCommand } from './tools/powershell.js'
 import { braveSearch } from './tools/braveSearch.js'
 import { browseWeb } from './tools/browseWeb.js'
-import { CCResponse, executeClaudeCode, getAvailableSlashCommands, getSession, setSession } from './tools/claudeCode.js'
 import { createTextFile } from './tools/createFile.js'
 import { customToolRegistry, type CustomToolsChangedEvent, ToolResult } from './tools/customToolLoader.js'
 import { execute as executeCustomToolManager } from './tools/customToolManager.js'
@@ -92,8 +91,12 @@ function validateAndResolvePath(
 
   // Detect if we should use POSIX logic (WSL paths on Windows)
   // If on Windows, but paths start with '/', treat as WSL/Linux path
-  const usePosix =
+  // Boolean(): the && / || chain yields `string | boolean | undefined` when inputPath or
+  // rootPath is an empty string. Only ever used as a boolean (below, and by
+  // isManagedToolPath), so coercing here changes nothing at runtime.
+  const usePosix = Boolean(
     process.platform === 'win32' && ((inputPath && inputPath.startsWith('/')) || (rootPath && rootPath.startsWith('/')))
+  )
 
   const pathModule = usePosix ? path.posix : path
 
@@ -384,6 +387,11 @@ type BuiltInToolHandler = (
     conversationId?: string | null
     messageId?: string | null
     streamId?: string | null
+    // Both are supplied by callers (see the /api/tools/execute handler below, which
+    // destructures them off req.body) and read by the edit/create/delete handlers for
+    // pre-edit backups. They were missing here, so those reads did not type-check.
+    parentMessageId?: string | null
+    toolCallId?: string | null
   }
 ) => Promise<ToolResult>
 
@@ -1162,6 +1170,69 @@ function tryEnableSqliteVec(database: Database.Database): { available: boolean; 
   }
 }
 
+/**
+ * A single, run-ONCE schema migration. `up` must be IDEMPOTENT (guard ALTERs with a
+ * PRAGMA table_info check, use CREATE ... IF NOT EXISTS) so a crash between applying
+ * the DDL and stamping user_version is harmless — the next launch re-runs it as a
+ * no-op and then stamps. Never edit or reorder a shipped migration; only APPEND a
+ * new one with the next integer version.
+ */
+interface SchemaMigration {
+  version: number
+  name: string
+  up: (database: Database.Database) => void
+}
+
+const SCHEMA_MIGRATIONS: SchemaMigration[] = [
+  {
+    version: 1,
+    name: 'subagent_manager_columns',
+    up: database => {
+      // subagent_runs gained handle / attempt / last_turn_at (+ the handle & tool_call
+      // indexes) for the subagent-manager work. Databases created before it lack the
+      // columns; add them, then the indexes. Guarded so it is also a safe no-op on a
+      // fresh DB whose CREATE TABLE already declared the columns.
+      const columns = database.prepare('PRAGMA table_info(subagent_runs)').all() as { name: string }[]
+      const hasColumn = (name: string) => columns.some(column => column.name === name)
+      if (!hasColumn('handle')) database.exec('ALTER TABLE subagent_runs ADD COLUMN handle TEXT')
+      if (!hasColumn('attempt')) database.exec('ALTER TABLE subagent_runs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0')
+      if (!hasColumn('last_turn_at')) database.exec('ALTER TABLE subagent_runs ADD COLUMN last_turn_at DATETIME')
+      database.exec(`
+        CREATE INDEX IF NOT EXISTS idx_subagent_runs_tool_call ON subagent_runs(tool_call_id, created_at) WHERE tool_call_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_subagent_runs_handle ON subagent_runs(handle) WHERE handle IS NOT NULL;
+      `)
+    },
+  },
+]
+
+/**
+ * Apply pending schema migrations exactly once each, tracked by SQLite's per-database
+ * PRAGMA user_version. Migrations are applied in ascending version order; user_version
+ * is stamped only AFTER a migration's `up` succeeds (each `up` is idempotent, so a
+ * partial/crashed apply is retried harmlessly next launch). A fresh database — whose
+ * CREATE TABLE blocks already match the latest schema — still passes through these as
+ * no-ops and gets stamped to the latest version, so fresh and migrated installs
+ * converge. Throws if a migration fails (surfacing a real schema problem loudly).
+ */
+function runSchemaMigrations(database: Database.Database): void {
+  const currentVersion = Number(database.pragma('user_version', { simple: true })) || 0
+  const targetVersion = SCHEMA_MIGRATIONS.reduce((max, migration) => Math.max(max, migration.version), 0)
+  if (currentVersion >= targetVersion) return
+
+  for (const migration of SCHEMA_MIGRATIONS) {
+    if (migration.version <= currentVersion) continue
+    try {
+      migration.up(database)
+      // Stamp only after the (idempotent) DDL succeeds — never before.
+      database.pragma(`user_version = ${migration.version}`)
+      console.log(`[LocalServer] Applied schema migration v${migration.version} (${migration.name})`)
+    } catch (error) {
+      console.error(`[LocalServer] Schema migration v${migration.version} (${migration.name}) failed:`, error)
+      throw error
+    }
+  }
+}
+
 // Initialize database at specified path
 function initializeLocalDatabase(dbPath: string) {
   currentDbPath = dbPath
@@ -1263,10 +1334,51 @@ function initializeLocalDatabase(dbPath: string) {
   `)
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS lineages (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL,
+      parent_lineage_id TEXT,
+      forked_from_message_id TEXT,
+      root_message_id TEXT,
+      head_message_id TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','active','archived')),
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+      FOREIGN KEY (parent_lineage_id) REFERENCES lineages(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS fork_operations (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL,
+      source_lineage_id TEXT,
+      target_lineage_id TEXT NOT NULL,
+      source_message_id TEXT,
+      materialized_message_id TEXT,
+      operation TEXT NOT NULL DEFAULT 'fork',
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','materialized','error')),
+      metadata_json TEXT,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+      FOREIGN KEY (source_lineage_id) REFERENCES lineages(id) ON DELETE SET NULL,
+      FOREIGN KEY (target_lineage_id) REFERENCES lineages(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lineages_conversation_updated ON lineages(conversation_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_lineages_parent ON lineages(parent_lineage_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_lineages_head_message ON lineages(head_message_id) WHERE head_message_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_fork_operations_conversation_created ON fork_operations(conversation_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_fork_operations_target_status ON fork_operations(target_lineage_id, status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_fork_operations_source_message ON fork_operations(source_message_id) WHERE source_message_id IS NOT NULL;
+  `)
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
       conversation_id TEXT NOT NULL,
       parent_id TEXT,
+      lineage_id TEXT,
       children_ids TEXT DEFAULT '[]',
       role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'ex_agent', 'tool')),
       content TEXT NOT NULL,
@@ -1301,6 +1413,7 @@ function initializeLocalDatabase(dbPath: string) {
     CREATE TABLE IF NOT EXISTS streaming_runs (
       stream_id TEXT PRIMARY KEY,
       conversation_id TEXT,
+      lineage_id TEXT,
       parent_message_id TEXT,
       user_message_id TEXT,
       assistant_message_id TEXT,
@@ -1333,9 +1446,38 @@ function initializeLocalDatabase(dbPath: string) {
   `)
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS tool_invocations (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL,
+      lineage_id TEXT NOT NULL,
+      run_id TEXT,
+      parent_tool_invocation_id TEXT,
+      tool_call_id TEXT NOT NULL,
+      assistant_message_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed','aborted')),
+      started_at DATETIME NOT NULL,
+      ended_at DATETIME,
+      duration_ms INTEGER,
+      error TEXT,
+      created_at DATETIME NOT NULL,
+      updated_at DATETIME NOT NULL,
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+      FOREIGN KEY (lineage_id) REFERENCES lineages(id) ON DELETE CASCADE,
+      FOREIGN KEY (parent_tool_invocation_id) REFERENCES tool_invocations(id) ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tool_invocations_lineage_started ON tool_invocations(lineage_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_tool_invocations_run_started ON tool_invocations(run_id, started_at) WHERE run_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_tool_invocations_parent ON tool_invocations(parent_tool_invocation_id, started_at) WHERE parent_tool_invocation_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_tool_invocations_status ON tool_invocations(status, started_at);
+  `)
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS subagent_runs (
       id TEXT PRIMARY KEY,
       conversation_id TEXT NOT NULL,
+      lineage_id TEXT,
       parent_message_id TEXT NOT NULL,
       tool_call_id TEXT,
       prompt TEXT NOT NULL,
@@ -1347,6 +1489,9 @@ function initializeLocalDatabase(dbPath: string) {
       error TEXT,
       turns_used INTEGER DEFAULT 0,
       tool_calls_used INTEGER DEFAULT 0,
+      handle TEXT,
+      attempt INTEGER NOT NULL DEFAULT 0,
+      last_turn_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
@@ -1371,6 +1516,36 @@ function initializeLocalDatabase(dbPath: string) {
     CREATE INDEX IF NOT EXISTS idx_subagent_runs_conversation ON subagent_runs(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_subagent_messages_run_seq ON subagent_messages(run_id, sequence);
   `)
+  // NOTE: the tool_call and handle indexes are created in the idempotent migration
+  // block below (after the handle column is guaranteed to exist). They MUST NOT be
+  // created here: on a pre-existing subagent_runs table the CREATE TABLE above is a
+  // no-op, so this unconditional block would reference the not-yet-added `handle`
+  // column and crash initializeLocalDatabase with "no such column: handle".
+
+  // Idempotent migration for databases created by the previous inline schema.
+  try {
+    for (const tableName of ['messages', 'streaming_runs', 'subagent_runs']) {
+      const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[]
+      if (!columns.some(column => column.name === 'lineage_id')) {
+        db.exec(`ALTER TABLE ${tableName} ADD COLUMN lineage_id TEXT`)
+      }
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_messages_lineage_created ON messages(lineage_id, created_at) WHERE lineage_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_streaming_runs_lineage_started ON streaming_runs(lineage_id, started_at) WHERE lineage_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_streaming_runs_lineage_status ON streaming_runs(lineage_id, status);
+      CREATE INDEX IF NOT EXISTS idx_subagent_runs_lineage_created ON subagent_runs(lineage_id, created_at) WHERE lineage_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_subagent_runs_lineage_status ON subagent_runs(lineage_id, status);
+    `)
+  } catch (error) {
+    console.warn('[LocalServer] Failed to migrate content lineage columns:', error)
+  }
+
+  // Versioned, run-ONCE schema migrations (tracked by PRAGMA user_version). Runs
+  // AFTER the CREATE TABLE ... blocks above so every table exists, and BEFORE the
+  // prepared statements below (which reference the migrated columns). See
+  // runSchemaMigrations / SCHEMA_MIGRATIONS for the ordered list.
+  runSchemaMigrations(db)
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS message_attachments (
@@ -1426,109 +1601,6 @@ function initializeLocalDatabase(dbPath: string) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
-    )
-  `)
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agent_settings (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      heartbeat_time TEXT,
-      agent_name TEXT,
-      model TEXT,
-      model_context_length INTEGER,
-      loop_interval_ms INTEGER,
-      auto_resume INTEGER,
-      tool_allowlist TEXT,
-      work_directory TEXT,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `)
-
-  // Keep bootstrap insert schema-agnostic for legacy DBs.
-  // Column backfills are handled below via ALTER TABLE migrations.
-  db.exec(`INSERT OR IGNORE INTO agent_settings (id) VALUES (1)`)
-
-  // Ensure new columns exist if older DB is present
-  try {
-    const columns = db.prepare(`PRAGMA table_info(agent_settings)`).all() as { name: string }[]
-    const columnNames = new Set(columns.map(col => col.name))
-    if (!columnNames.has('agent_name')) {
-      db.exec(`ALTER TABLE agent_settings ADD COLUMN agent_name TEXT`)
-    }
-    if (!columnNames.has('model')) {
-      db.exec(`ALTER TABLE agent_settings ADD COLUMN model TEXT`)
-    }
-    if (!columnNames.has('model_context_length')) {
-      db.exec(`ALTER TABLE agent_settings ADD COLUMN model_context_length INTEGER`)
-    }
-    if (!columnNames.has('loop_interval_ms')) {
-      db.exec(`ALTER TABLE agent_settings ADD COLUMN loop_interval_ms INTEGER`)
-    }
-    if (!columnNames.has('auto_resume')) {
-      db.exec(`ALTER TABLE agent_settings ADD COLUMN auto_resume INTEGER`)
-    }
-    if (!columnNames.has('tool_allowlist')) {
-      db.exec(`ALTER TABLE agent_settings ADD COLUMN tool_allowlist TEXT`)
-    }
-    if (!columnNames.has('work_directory')) {
-      db.exec(`ALTER TABLE agent_settings ADD COLUMN work_directory TEXT`)
-    }
-  } catch (error) {
-    console.warn('[LocalServer] Failed to migrate agent_settings table:', error)
-  }
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agent_state (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      status TEXT NOT NULL DEFAULT 'stopped',
-      session_id INTEGER,
-      conversation_id TEXT,
-      stream_id TEXT,
-      last_run_at TEXT,
-      next_run_at TEXT,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
-    )
-  `)
-
-  db.exec(`INSERT OR IGNORE INTO agent_state (id, status) VALUES (1, 'stopped')`)
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agent_sessions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      conversation_id TEXT,
-      started_at TEXT NOT NULL,
-      ended_at TEXT,
-      summary_message_id TEXT,
-      rollover_reason TEXT,
-      FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
-    )
-  `)
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agent_tasks (
-      id TEXT PRIMARY KEY,
-      session_id INTEGER,
-      status TEXT NOT NULL,
-      priority TEXT NOT NULL DEFAULT 'normal',
-      source TEXT NOT NULL DEFAULT 'user',
-      description TEXT NOT NULL,
-      payload TEXT,
-      created_at TEXT NOT NULL,
-      started_at TEXT,
-      completed_at TEXT,
-      error TEXT,
-      FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL
-    )
-  `)
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agent_summaries (
-      id TEXT PRIMARY KEY,
-      session_id INTEGER NOT NULL,
-      summary_text TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
     )
   `)
 
@@ -2002,6 +2074,78 @@ function initializeLocalDatabase(dbPath: string) {
 
   // Update statements
   statements = {
+    // Content lineages (separate from execution/stream runs)
+    insertLineage: db.prepare(`
+      INSERT INTO lineages (
+        id, conversation_id, parent_lineage_id, forked_from_message_id,
+        root_message_id, head_message_id, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `),
+    getLineageById: db.prepare('SELECT * FROM lineages WHERE id = ?'),
+    listLineagesByConversation: db.prepare(
+      'SELECT * FROM lineages WHERE conversation_id = ? ORDER BY created_at ASC, id ASC'
+    ),
+    resolveLineageByMessage: db.prepare(`
+      SELECT l.* FROM messages m INNER JOIN lineages l ON l.id = m.lineage_id WHERE m.id = ?
+    `),
+    resolveAncestorLineageByMessage: db.prepare(`
+      WITH RECURSIVE ancestors(id, parent_id, lineage_id, depth) AS (
+        SELECT id, parent_id, lineage_id, 0 FROM messages WHERE id = ?
+        UNION ALL
+        SELECT m.id, m.parent_id, m.lineage_id, ancestors.depth + 1
+        FROM messages m INNER JOIN ancestors ON m.id = ancestors.parent_id
+        WHERE ancestors.depth < 10000
+      )
+      SELECT l.* FROM ancestors INNER JOIN lineages l ON l.id = ancestors.lineage_id
+      WHERE ancestors.lineage_id IS NOT NULL ORDER BY ancestors.depth ASC LIMIT 1
+    `),
+    attachMessageToLineage: db.prepare(`
+      UPDATE messages SET lineage_id = ?
+      WHERE id = ?
+        AND conversation_id = (SELECT conversation_id FROM lineages WHERE id = ?)
+        AND (lineage_id IS NULL OR lineage_id = ?)
+    `),
+    advanceLineage: db.prepare(`
+      UPDATE lineages SET root_message_id = COALESCE(root_message_id, ?), head_message_id = ?,
+        status = ?, updated_at = ? WHERE id = ?
+    `),
+    insertForkOperation: db.prepare(`
+      INSERT INTO fork_operations (
+        id, conversation_id, source_lineage_id, target_lineage_id, source_message_id,
+        materialized_message_id, operation, status, metadata_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `),
+    getForkOperationById: db.prepare('SELECT * FROM fork_operations WHERE id = ?'),
+    materializeForkOperation: db.prepare(`
+      UPDATE fork_operations SET materialized_message_id = ?, status = 'materialized', updated_at = ?
+      WHERE id = ? AND status = 'pending'
+    `),
+    attachStreamingRunToLineage: db.prepare('UPDATE streaming_runs SET lineage_id = ? WHERE stream_id = ?'),
+    attachSubagentRunToLineage: db.prepare('UPDATE subagent_runs SET lineage_id = ? WHERE id = ?'),
+    // Latest subagent stream for a tool call — the streamId the transcript viewer
+    // subscribes to for live progress (a resume mints a newer row, so DESC LIMIT 1
+    // always resolves the current attempt).
+    getLatestSubagentStreamIdByToolCall: db.prepare(
+      "SELECT stream_id FROM streaming_runs WHERE tool_call_id = ? AND stream_type = 'subagent' ORDER BY started_at DESC LIMIT 1"
+    ),
+
+    // Metadata-only execution ownership under stable content lineage.
+    insertToolInvocation: db.prepare(`
+      INSERT INTO tool_invocations (
+        id, conversation_id, lineage_id, run_id, parent_tool_invocation_id,
+        tool_call_id, assistant_message_id, tool_name, status, started_at,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
+    `),
+    finishToolInvocation: db.prepare(`
+      UPDATE tool_invocations SET status = ?, ended_at = ?, duration_ms = ?, error = ?, updated_at = ?
+      WHERE id = ? AND status = 'running'
+    `),
+    getToolInvocationById: db.prepare('SELECT * FROM tool_invocations WHERE id = ?'),
+    listToolInvocationsByLineage: db.prepare(
+      'SELECT * FROM tool_invocations WHERE lineage_id = ? ORDER BY started_at ASC, id ASC'
+    ),
+
     // Users
     upsertUser: db.prepare(`
         INSERT INTO users (id, username, created_at)
@@ -2216,6 +2360,23 @@ function initializeLocalDatabase(dbPath: string) {
       'SELECT * FROM subagent_runs WHERE parent_message_id = ? ORDER BY created_at ASC'
     ),
     getSubagentRunById: db.prepare('SELECT * FROM subagent_runs WHERE id = ?'),
+    getSubagentRunByHandle: db.prepare('SELECT * FROM subagent_runs WHERE handle = ?'),
+    getSubagentRunsByToolCallId: db.prepare(
+      'SELECT * FROM subagent_runs WHERE tool_call_id = ? ORDER BY created_at ASC'
+    ),
+    getSubagentRunsByLineageId: db.prepare(
+      'SELECT * FROM subagent_runs WHERE lineage_id = ? ORDER BY created_at ASC'
+    ),
+    getSubagentRunsByLineageAndStatus: db.prepare(
+      'SELECT * FROM subagent_runs WHERE lineage_id = ? AND status = ? ORDER BY created_at ASC'
+    ),
+    attachSubagentRunHandle: db.prepare('UPDATE subagent_runs SET handle = ? WHERE id = ?'),
+    reopenSubagentRun: db.prepare(`
+        UPDATE subagent_runs
+        SET status = 'running', error = NULL, attempt = attempt + 1, updated_at = ?
+        WHERE id = ? AND status IN ('error', 'aborted')
+      `),
+    getRunningSubagentRuns: db.prepare("SELECT * FROM subagent_runs WHERE status = 'running' ORDER BY created_at ASC"),
     getSubagentMessagesByRunId: db.prepare(
       'SELECT * FROM subagent_messages WHERE run_id = ? ORDER BY sequence ASC, created_at ASC'
     ),
@@ -2257,73 +2418,6 @@ function initializeLocalDatabase(dbPath: string) {
           reasoning_tokens = excluded.reasoning_tokens,
           approx_cost = excluded.approx_cost,
           api_credit_cost = excluded.api_credit_cost
-      `),
-
-    // Agent Settings
-    getAgentSettings: db.prepare(
-      'SELECT heartbeat_time, agent_name, model, model_context_length, loop_interval_ms, auto_resume, tool_allowlist, work_directory, updated_at FROM agent_settings WHERE id = 1'
-    ),
-    upsertAgentSettings: db.prepare(`
-        INSERT INTO agent_settings (id, heartbeat_time, agent_name, model, model_context_length, loop_interval_ms, auto_resume, tool_allowlist, work_directory, updated_at)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(id) DO UPDATE SET
-          heartbeat_time = excluded.heartbeat_time,
-          agent_name = excluded.agent_name,
-          model = excluded.model,
-          model_context_length = excluded.model_context_length,
-          loop_interval_ms = excluded.loop_interval_ms,
-          auto_resume = excluded.auto_resume,
-          tool_allowlist = excluded.tool_allowlist,
-          work_directory = excluded.work_directory,
-          updated_at = CURRENT_TIMESTAMP
-      `),
-
-    // Agent State
-    getAgentState: db.prepare(
-      'SELECT status, session_id, conversation_id, stream_id, last_run_at, next_run_at, updated_at FROM agent_state WHERE id = 1'
-    ),
-    upsertAgentState: db.prepare(`
-        INSERT INTO agent_state (id, status, session_id, conversation_id, stream_id, last_run_at, next_run_at, updated_at)
-        VALUES (1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(id) DO UPDATE SET
-          status = excluded.status,
-          session_id = excluded.session_id,
-          conversation_id = excluded.conversation_id,
-          stream_id = excluded.stream_id,
-          last_run_at = excluded.last_run_at,
-          next_run_at = excluded.next_run_at,
-          updated_at = CURRENT_TIMESTAMP
-      `),
-
-    // Agent Sessions
-    createAgentSession: db.prepare(`
-        INSERT INTO agent_sessions (conversation_id, started_at, rollover_reason)
-        VALUES (?, ?, ?)
-      `),
-    endAgentSession: db.prepare(
-      'UPDATE agent_sessions SET ended_at = ?, summary_message_id = ?, rollover_reason = ? WHERE id = ?'
-    ),
-    getLatestAgentSession: db.prepare('SELECT * FROM agent_sessions ORDER BY started_at DESC LIMIT 1'),
-    getAgentSessionById: db.prepare('SELECT * FROM agent_sessions WHERE id = ?'),
-
-    // Agent Tasks
-    createAgentTask: db.prepare(`
-        INSERT INTO agent_tasks (id, session_id, status, priority, source, description, payload, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `),
-    getAgentTasks: db.prepare('SELECT * FROM agent_tasks ORDER BY created_at ASC'),
-    getAgentTasksByStatus: db.prepare('SELECT * FROM agent_tasks WHERE status = ? ORDER BY created_at ASC'),
-    getAgentTaskById: db.prepare('SELECT * FROM agent_tasks WHERE id = ?'),
-    updateAgentTaskStatus: db.prepare(`
-        UPDATE agent_tasks
-        SET status = ?, started_at = ?, completed_at = ?, error = ?
-        WHERE id = ?
-      `),
-
-    // Agent Summaries
-    createAgentSummary: db.prepare(`
-        INSERT INTO agent_summaries (id, session_id, summary_text, created_at)
-        VALUES (?, ?, ?, ?)
       `),
 
     // Message updates (for local editing)
@@ -2933,360 +3027,6 @@ function setupServer() {
   registerSkillRoutes(app)
   registerMcpRoutes(app)
   registerLspRoutes(app)
-
-  // ============================================================================
-  // Global Agent Settings
-  // ============================================================================
-
-  // GET /api/agent-settings - Get global agent settings (local only)
-  app.get('/api/agent-settings', (_req, res) => {
-    try {
-      if (!db) {
-        res.status(500).json({ error: 'Database not initialized' })
-        return
-      }
-
-      const row = statements.getAgentSettings.get() as
-        | {
-            heartbeat_time?: string | null
-            agent_name?: string | null
-            model?: string | null
-            model_context_length?: number | null
-            loop_interval_ms?: number | null
-            auto_resume?: number | null
-            tool_allowlist?: string | null
-            work_directory?: string | null
-            updated_at?: string
-          }
-        | undefined
-      let toolAllowlist: string[] | null = null
-      if (row?.tool_allowlist) {
-        try {
-          toolAllowlist = JSON.parse(row.tool_allowlist)
-        } catch {
-          toolAllowlist = null
-        }
-      }
-
-      res.json({
-        heartbeatTime: row?.heartbeat_time ?? null,
-        agentName: row?.agent_name ?? null,
-        model: row?.model ?? null,
-        modelContextLength: row?.model_context_length ?? null,
-        loopIntervalMs: row?.loop_interval_ms ?? null,
-        autoResume: row?.auto_resume ?? null,
-        toolAllowlist,
-        workDirectory: row?.work_directory ?? null,
-        updatedAt: row?.updated_at ?? null,
-      })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error getting agent settings:', error)
-      res.status(500).json({ error: 'Failed to load agent settings' })
-    }
-  })
-
-  // PUT /api/agent-settings - Update global agent settings (local only)
-  app.put('/api/agent-settings', (req, res) => {
-    try {
-      if (!db) {
-        res.status(500).json({ error: 'Database not initialized' })
-        return
-      }
-
-      const {
-        heartbeatTime,
-        agentName,
-        model,
-        modelContextLength,
-        loopIntervalMs,
-        autoResume,
-        toolAllowlist,
-        workDirectory,
-      } = req.body as {
-        heartbeatTime?: string | null
-        agentName?: string | null
-        model?: string | null
-        modelContextLength?: number | null
-        loopIntervalMs?: number | null
-        autoResume?: boolean | number | null
-        toolAllowlist?: string[] | null
-        workDirectory?: string | null
-      }
-      const normalized =
-        typeof heartbeatTime === 'string' && heartbeatTime.trim().length > 0 ? heartbeatTime.trim() : null
-      const normalizedAgentName = typeof agentName === 'string' && agentName.trim().length > 0 ? agentName.trim() : null
-      const normalizedModel = typeof model === 'string' && model.trim().length > 0 ? model.trim() : null
-      const normalizedModelContext =
-        typeof modelContextLength === 'number' && Number.isFinite(modelContextLength) && modelContextLength > 0
-          ? Math.floor(modelContextLength)
-          : null
-      const normalizedLoopInterval =
-        typeof loopIntervalMs === 'number' && Number.isFinite(loopIntervalMs) && loopIntervalMs > 0
-          ? Math.floor(loopIntervalMs)
-          : null
-      const normalizedAutoResume = autoResume === null || autoResume === undefined ? null : autoResume ? 1 : 0
-      const normalizedAllowlist =
-        Array.isArray(toolAllowlist) && toolAllowlist.length > 0 ? JSON.stringify(toolAllowlist) : null
-      const normalizedWorkDirectory =
-        typeof workDirectory === 'string' && workDirectory.trim().length > 0 ? workDirectory.trim() : null
-
-      if (normalized && !/^\d{2}:\d{2}$/.test(normalized)) {
-        res.status(400).json({ error: 'heartbeatTime must be in HH:MM format or null' })
-        return
-      }
-
-      statements.upsertAgentSettings.run(
-        normalized,
-        normalizedAgentName,
-        normalizedModel,
-        normalizedModelContext,
-        normalizedLoopInterval,
-        normalizedAutoResume,
-        normalizedAllowlist,
-        normalizedWorkDirectory
-      )
-
-      const row = statements.getAgentSettings.get() as
-        | { heartbeat_time?: string | null; updated_at?: string }
-        | undefined
-      res.json({ success: true, settings: row })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error updating agent settings:', error)
-      res.status(500).json({ error: 'Failed to update agent settings' })
-    }
-  })
-
-  // GET /api/agent/state - Get global agent runtime state
-  app.get('/api/agent/state', (_req, res) => {
-    try {
-      if (!db) {
-        res.status(500).json({ error: 'Database not initialized' })
-        return
-      }
-      const row = statements.getAgentState.get() as
-        | {
-            status: string
-            session_id: number | null
-            conversation_id: string | null
-            stream_id: string | null
-            last_run_at: string | null
-            next_run_at: string | null
-            updated_at: string | null
-          }
-        | undefined
-      res.json({ success: true, state: row })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error getting agent state:', error)
-      res.status(500).json({ error: 'Failed to load agent state' })
-    }
-  })
-
-  // PUT /api/agent/state - Update global agent runtime state
-  app.put('/api/agent/state', (req, res) => {
-    try {
-      if (!db) {
-        res.status(500).json({ error: 'Database not initialized' })
-        return
-      }
-      const body = (req.body ?? {}) as {
-        status?: string
-        sessionId?: number | null
-        conversationId?: string | null
-        streamId?: string | null
-        lastRunAt?: string | null
-        nextRunAt?: string | null
-      }
-      const { status, sessionId, conversationId, streamId, lastRunAt, nextRunAt } = body
-
-      const current = statements.getAgentState.get() as any
-      const hasField = (field: keyof typeof body) => Object.prototype.hasOwnProperty.call(body, field)
-
-      const nextStatus = hasField('status') ? (status ?? current?.status ?? 'stopped') : (current?.status ?? 'stopped')
-      const nextSessionId = hasField('sessionId') ? (sessionId ?? null) : (current?.session_id ?? null)
-      const nextConversationId = hasField('conversationId')
-        ? (conversationId ?? null)
-        : (current?.conversation_id ?? null)
-      const nextStreamId = hasField('streamId') ? (streamId ?? null) : (current?.stream_id ?? null)
-      const nextLastRunAt = hasField('lastRunAt') ? (lastRunAt ?? null) : (current?.last_run_at ?? null)
-      const nextNextRunAt = hasField('nextRunAt') ? (nextRunAt ?? null) : (current?.next_run_at ?? null)
-
-      statements.upsertAgentState.run(
-        nextStatus,
-        nextSessionId,
-        nextConversationId,
-        nextStreamId,
-        nextLastRunAt,
-        nextNextRunAt
-      )
-
-      const updated = statements.getAgentState.get()
-      res.json({ success: true, state: updated })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error updating agent state:', error)
-      res.status(500).json({ error: 'Failed to update agent state' })
-    }
-  })
-
-  // POST /api/agent/tasks - Enqueue a global agent task
-  app.post('/api/agent/tasks', (req, res) => {
-    try {
-      if (!db) {
-        res.status(500).json({ error: 'Database not initialized' })
-        return
-      }
-      const {
-        description,
-        status = 'pending',
-        priority = 'normal',
-        source = 'user',
-        payload,
-        sessionId,
-      } = req.body as {
-        description?: string
-        status?: string
-        priority?: string
-        source?: string
-        payload?: any
-        sessionId?: number | null
-      }
-
-      if (!description || !description.trim()) {
-        res.status(400).json({ error: 'description is required' })
-        return
-      }
-
-      const taskId = uuidv4()
-      const now = new Date().toISOString()
-      const activeSessionId = sessionId ?? (statements.getAgentState.get() as any)?.session_id ?? null
-      const normalizedStatus =
-        typeof status === 'string' && ['pending', 'scheduled', 'running', 'completed', 'failed'].includes(status)
-          ? status
-          : 'pending'
-
-      statements.createAgentTask.run(
-        taskId,
-        activeSessionId,
-        normalizedStatus,
-        priority,
-        source,
-        description.trim(),
-        payload ? JSON.stringify(payload) : null,
-        now
-      )
-
-      const task = statements.getAgentTaskById.get(taskId)
-      res.status(201).json({ success: true, task })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error creating agent task:', error)
-      res.status(500).json({ error: 'Failed to create agent task' })
-    }
-  })
-
-  // GET /api/agent/tasks - List global agent tasks
-  app.get('/api/agent/tasks', (req, res) => {
-    try {
-      if (!db) {
-        res.status(500).json({ error: 'Database not initialized' })
-        return
-      }
-      const status = req.query.status as string | undefined
-      const tasks = status ? statements.getAgentTasksByStatus.all(status) : statements.getAgentTasks.all()
-      res.json({ success: true, tasks })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error fetching agent tasks:', error)
-      res.status(500).json({ error: 'Failed to fetch agent tasks' })
-    }
-  })
-
-  // PATCH /api/agent/tasks/:id - Update task status
-  app.patch('/api/agent/tasks/:id', (req, res) => {
-    try {
-      if (!db) {
-        res.status(500).json({ error: 'Database not initialized' })
-        return
-      }
-      const { id } = req.params
-      const { status, error } = req.body as { status?: string; error?: string | null }
-      const task = statements.getAgentTaskById.get(id)
-      if (!task) {
-        res.status(404).json({ error: 'Task not found' })
-        return
-      }
-
-      const now = new Date().toISOString()
-      const startedAt = status === 'running' ? now : task.started_at
-      const completedAt = status === 'completed' || status === 'failed' ? now : task.completed_at
-      statements.updateAgentTaskStatus.run(status || task.status, startedAt, completedAt, error || null, id)
-
-      const updated = statements.getAgentTaskById.get(id)
-      res.json({ success: true, task: updated })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error updating agent task:', error)
-      res.status(500).json({ error: 'Failed to update agent task' })
-    }
-  })
-
-  // POST /api/agent/session/start - Start a new agent session
-  app.post('/api/agent/session/start', (req, res) => {
-    try {
-      if (!db) {
-        res.status(500).json({ error: 'Database not initialized' })
-        return
-      }
-      const { conversationId, rolloverReason } = req.body as {
-        conversationId?: string | null
-        rolloverReason?: string | null
-      }
-      const now = new Date().toISOString()
-      const info = statements.createAgentSession.run(conversationId || null, now, rolloverReason || null)
-      const sessionId = Number(info.lastInsertRowid)
-
-      const currentState = statements.getAgentState.get() as any
-      statements.upsertAgentState.run(
-        currentState?.status || 'idle',
-        sessionId,
-        conversationId || null,
-        currentState?.stream_id ?? null,
-        currentState?.last_run_at ?? null,
-        currentState?.next_run_at ?? null
-      )
-
-      const session = statements.getAgentSessionById.get(sessionId)
-      res.status(201).json({ success: true, session })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error creating agent session:', error)
-      res.status(500).json({ error: 'Failed to create agent session' })
-    }
-  })
-
-  // POST /api/agent/session/end - End the current agent session
-  app.post('/api/agent/session/end', (req, res) => {
-    try {
-      if (!db) {
-        res.status(500).json({ error: 'Database not initialized' })
-        return
-      }
-      const { sessionId, summaryMessageId, rolloverReason } = req.body as {
-        sessionId?: number
-        summaryMessageId?: string | null
-        rolloverReason?: string | null
-      }
-      const state = statements.getAgentState.get() as any
-      const targetSessionId = sessionId ?? state?.session_id
-      if (!targetSessionId) {
-        res.status(400).json({ error: 'sessionId is required' })
-        return
-      }
-
-      const now = new Date().toISOString()
-      statements.endAgentSession.run(now, summaryMessageId || null, rolloverReason || null, targetSessionId)
-      const updated = statements.getAgentSessionById.get(targetSessionId)
-      res.json({ success: true, session: updated })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error ending agent session:', error)
-      res.status(500).json({ error: 'Failed to end agent session' })
-    }
-  })
 
   // =====================================================
   // OpenAI ChatGPT OAuth Authentication Endpoints
@@ -9699,680 +9439,6 @@ function setupServer() {
     })
   }
 
-  // GET /api/agents/cc-session/:conversationId - Get CC session info
-  app.get('/api/agents/cc-session/:conversationId', (req, res) => {
-    try {
-      const { conversationId } = req.params
-      // console.log('[LocalServer] 🤖 GET /api/agents/cc-session/:conversationId -', conversationId)
-
-      // Get conversation to retrieve cwd
-      const conversation = statements.getConversationById.get(conversationId) as any
-      if (!conversation) {
-        res.json({ hasSession: false })
-        return
-      }
-
-      const cwd = conversation.cwd || process.cwd()
-      const sessionId = getSession(conversationId, cwd)
-
-      if (!sessionId) {
-        // Also check database for ex_agent messages with session ID
-        const lastCCMessage = db!
-          .prepare(
-            `
-          SELECT ex_agent_session_id, created_at 
-          FROM messages 
-          WHERE conversation_id = ? AND role = 'ex_agent' AND ex_agent_session_id IS NOT NULL
-          ORDER BY created_at DESC LIMIT 1
-        `
-          )
-          .get(conversationId) as { ex_agent_session_id: string; created_at: string } | undefined
-
-        if (!lastCCMessage?.ex_agent_session_id) {
-          res.json({ hasSession: false })
-          return
-        }
-
-        // Count messages in this session
-        const countResult = db!
-          .prepare(
-            `
-          SELECT COUNT(*) as count FROM messages 
-          WHERE conversation_id = ? AND ex_agent_session_id = ?
-        `
-          )
-          .get(conversationId, lastCCMessage.ex_agent_session_id) as { count: number }
-
-        res.json({
-          hasSession: true,
-          sessionId: lastCCMessage.ex_agent_session_id,
-          lastMessageAt: lastCCMessage.created_at,
-          messageCount: countResult.count,
-          cwd: cwd,
-        })
-        return
-      }
-
-      res.json({
-        hasSession: true,
-        sessionId,
-        cwd,
-      })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error getting CC session:', error)
-      res.status(500).json({ error: 'Failed to get CC session' })
-    }
-  })
-
-  // GET /api/agents/cc-commands/:conversationId - Get available slash commands
-  app.get('/api/agents/cc-commands/:conversationId', (req, res) => {
-    try {
-      const { conversationId } = req.params
-      const { cwd: queryCwd } = req.query
-      // console.log('[LocalServer] 🤖 GET /api/agents/cc-commands/:conversationId -', conversationId)
-
-      // Get conversation to retrieve cwd if not provided in query
-      const conversation = statements.getConversationById.get(conversationId) as any
-      const cwd = (queryCwd as string) || conversation?.cwd || process.cwd()
-
-      const commands = getAvailableSlashCommands(conversationId, cwd)
-      // console.log(`[LocalServer] Found ${commands.length} slash commands for conversation ${conversationId}`)
-
-      res.json({ commands })
-    } catch (error) {
-      console.error('[LocalServer] ❌ Error getting CC slash commands:', error)
-      res.status(500).json({ error: 'Failed to get slash commands' })
-    }
-  })
-
-  // POST /api/agents/cc-messages/:conversationId - Send message to Claude Code
-  app.post('/api/agents/cc-messages/:conversationId', async (req, res) => {
-    // console.log('\n🤖🤖🤖 [LocalServer] POST /api/agents/cc-messages - Claude Code message received')
-    // console.log('🤖 Timestamp:', new Date().toISOString())
-    // console.log('🤖 Conversation ID:', req.params.conversationId)
-
-    const { conversationId } = req.params
-    const {
-      message,
-      cwd: requestedCwd,
-      permissionMode = 'bypassPermissions',
-      resume,
-      sessionId: providedSessionId,
-      forkSession,
-    } = req.body as {
-      message: string
-      cwd?: string
-      permissionMode?: 'default' | 'plan' | 'bypassPermissions' | 'acceptEdits'
-      resume?: boolean
-      sessionId?: string
-      forkSession?: boolean
-    }
-
-    if (!message) {
-      res.status(400).json({ error: 'Message content required' })
-      return
-    }
-
-    // Get conversation to retrieve cwd if not provided
-    const conversation = statements.getConversationById.get(conversationId) as any
-    const cwd = requestedCwd || conversation?.cwd || process.cwd()
-
-    // console.log('🤖 CC Request:', {
-    //   message: message.substring(0, 100),
-    //   cwd,
-    //   permissionMode,
-    //   resume,
-    // })
-
-    // Set up SSE for streaming
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-    })
-
-    try {
-      // Get last message for parent ID
-      const lastMessage = statements.getLastMessageByConversationId.get(conversationId) as any
-      const parentId = lastMessage?.id || null
-
-      // Save user message to local SQLite
-      const userMsgId = uuidv4()
-      const now = new Date().toISOString()
-      statements.upsertMessage.run(
-        userMsgId,
-        conversationId,
-        parentId,
-        '[]',
-        'user',
-        message,
-        null,
-        null,
-        null,
-        null,
-        'user-input',
-        null,
-        null,
-        null,
-        null,
-        null,
-        now
-      )
-      // console.log('[LocalServer] 🤖 User message saved:', userMsgId)
-
-      // Send user message event
-      res.write(
-        `data: ${JSON.stringify({ type: 'user_message', message: { id: userMsgId, role: 'user', content: message } })}\n\n`
-      )
-
-      // Determine session ID
-      let sessionId = providedSessionId || getSession(conversationId, cwd)
-      const shouldResume = resume !== undefined ? resume : !!sessionId
-
-      // Accumulate content blocks for saving
-      let contentBlocks: any[] = []
-      let textParts: string[] = []
-      let currentSessionId: string | null = sessionId || null
-
-      // Stream callback
-      const onStream = (data: any) => {
-        try {
-          res.write(`data: ${JSON.stringify(data)}\n\n`)
-        } catch (error) {
-          console.error('[LocalServer] Error writing stream data:', error)
-        }
-      }
-
-      // Streaming chunk callback for real-time deltas
-      const onStreamingChunk = async (chunk: any) => {
-        try {
-          res.write(
-            `data: ${JSON.stringify({
-              type: 'chunk',
-              part: chunk.contentType === 'thinking' ? 'reasoning' : 'text',
-              delta: chunk.delta || '',
-              chunkType: chunk.type,
-            })}\n\n`
-          )
-        } catch (error) {
-          console.error('[LocalServer] Error writing streaming chunk:', error)
-        }
-      }
-
-      // Response callback to accumulate content
-      const onResponse = async (response: CCResponse) => {
-        onStream(response)
-
-        if (response.sessionId) {
-          currentSessionId = response.sessionId
-          setSession(conversationId, cwd, response.sessionId)
-        }
-
-        // ========================================================================
-        // Universal Content Extractor - Capture content from ANY message type
-        // ========================================================================
-
-        // Extract text content from any response field
-        let extractedContent: string | null = null
-
-        // Priority 1: Check for result.result (slash commands)
-        if (response.messageType === 'result' && response.result?.result) {
-          extractedContent = response.result.result
-          // console.log('[LocalServer] 🔍 Extracted content from result.result:', extractedContent.substring(0, 100))
-        }
-
-        // Priority 2: Check for system messages with content
-        if (!extractedContent && response.messageType === 'system' && response.system) {
-          // Some system messages may contain displayable content
-          // Example: init messages with configuration info
-          const systemContent = (response.system as any).content || (response.system as any).message
-          if (systemContent && typeof systemContent === 'string') {
-            extractedContent = systemContent
-            // console.log('[LocalServer] 🔍 Extracted content from system message')
-          }
-        }
-
-        // Priority 3: Check for any 'content' field in the response (catch-all)
-        if (!extractedContent && (response as any).content) {
-          const genericContent = (response as any).content
-          if (typeof genericContent === 'string') {
-            extractedContent = genericContent
-            // console.log('[LocalServer] 🔍 Extracted content from generic content field')
-          } else if (Array.isArray(genericContent)) {
-            // If it's an array of blocks, try to extract text
-            const textBlocks = genericContent.filter((b: any) => b.type === 'text')
-            if (textBlocks.length > 0) {
-              extractedContent = textBlocks.map((b: any) => b.text || b.content || '').join('\n')
-              // console.log('[LocalServer] 🔍 Extracted content from content blocks array')
-            }
-          }
-        }
-
-        // If we extracted content from a non-message type, add it to contentBlocks
-        if (extractedContent && response.messageType !== 'message') {
-          const syntheticBlock = {
-            type: 'text',
-            text: extractedContent,
-          }
-
-          contentBlocks.push(syntheticBlock)
-          textParts.push(extractedContent)
-
-          // Stream extracted content to frontend immediately
-          try {
-            res.write(
-              `data: ${JSON.stringify({
-                type: 'chunk',
-                part: 'text',
-                delta: extractedContent,
-                chunkType: `${response.messageType}_output`,
-                sourceMessageType: response.messageType,
-              })}\n\n`
-            )
-          } catch (error) {
-            console.error('[LocalServer] Error streaming extracted content:', error)
-          }
-        }
-
-        // ========================================================================
-        // End Universal Content Extractor
-        // ========================================================================
-
-        if (response.messageType === 'message' && response.message) {
-          for (const block of response.message.content) {
-            contentBlocks.push(block)
-            if (block.type === 'text') {
-              textParts.push((block as any).text || '')
-            }
-          }
-        }
-
-        if (response.messageType === 'result') {
-          // Save accumulated CC message to database
-          if (contentBlocks.length > 0 && currentSessionId) {
-            const ccMsgId = uuidv4()
-            const textContent = textParts.join('\n\n').trim()
-
-            statements.upsertMessage.run(
-              ccMsgId,
-              conversationId,
-              userMsgId, // Parent is the user message
-              '[]',
-              'ex_agent',
-              textContent,
-              null,
-              null, // thinking_block - stored in content_blocks
-              null, // tool_calls - stored in content_blocks
-              null,
-              'claude-sonnet-4-5',
-              response.result?.is_error ? 'Generation completed with error' : null,
-              null,
-              currentSessionId,
-              'claude_code',
-              JSON.stringify(normalizeContentBlocksForStorage(contentBlocks)),
-              new Date().toISOString()
-            )
-            // console.log('[LocalServer] 🤖 CC message saved:', ccMsgId, '- blocks:', contentBlocks.length)
-
-            // Send complete event
-            res.write(
-              `data: ${JSON.stringify({
-                type: 'complete',
-                sessionId: currentSessionId,
-                messageId: ccMsgId,
-                messageCount: contentBlocks.length,
-              })}\n\n`
-            )
-          }
-          // else if (!contentBlocks.length && currentSessionId) {
-          //   console.log('[LocalServer] ⚠️ CC result received but no content to save')
-          // }
-
-          // Reset accumulators
-          contentBlocks = []
-          textParts = []
-        }
-
-        if (response.messageType === 'error') {
-          // Save partial message on error
-          if (contentBlocks.length > 0 && currentSessionId) {
-            const ccMsgId = uuidv4()
-            const textContent = textParts.join('\n\n').trim()
-
-            statements.upsertMessage.run(
-              ccMsgId,
-              conversationId,
-              userMsgId,
-              '[]',
-              'ex_agent',
-              textContent || '[Error during generation]',
-              null,
-              null,
-              null,
-              null,
-              'claude-sonnet-4-5',
-              response.error?.message || 'Error during generation',
-              null,
-              currentSessionId,
-              'claude_code',
-              JSON.stringify(normalizeContentBlocksForStorage(contentBlocks)),
-              new Date().toISOString()
-            )
-          }
-        }
-      }
-
-      // Execute Claude Code
-      await executeClaudeCode(
-        conversationId,
-        message,
-        cwd,
-        onResponse,
-        permissionMode,
-        onStreamingChunk,
-        shouldResume ? sessionId : undefined,
-        forkSession
-      )
-
-      // Update conversation cwd if changed
-      if (cwd && conversation && conversation.cwd !== cwd) {
-        statements.updateConversationCwd.run(cwd, conversationId)
-      }
-
-      // console.log('🤖 CC conversation completed successfully')
-    } catch (error) {
-      console.error('[LocalServer] CC Error:', error)
-      res.write(
-        `data: ${JSON.stringify({
-          type: 'error',
-          error: error instanceof Error ? error.message : 'Unknown error',
-        })}\n\n`
-      )
-    }
-
-    res.end()
-  })
-
-  // POST /api/agents/cc-messages-branch/:conversationId - Branch message to Claude Code
-  app.post('/api/agents/cc-messages-branch/:conversationId', async (req, res) => {
-    // console.log('\n🤖🤖🤖 [LocalServer] POST /api/agents/cc-messages-branch - Claude Code branch message received')
-    // console.log('🤖 Timestamp:', new Date().toISOString())
-    // console.log('🤖 Conversation ID:', req.params.conversationId)
-
-    const { conversationId } = req.params
-    const {
-      message,
-      parentId,
-      cwd: requestedCwd,
-      permissionMode = 'bypassPermissions',
-      sessionId: providedSessionId,
-      forkSession,
-    } = req.body as {
-      message: string
-      parentId: string
-      cwd?: string
-      permissionMode?: 'default' | 'plan' | 'bypassPermissions' | 'acceptEdits'
-      sessionId?: string
-      forkSession?: boolean
-    }
-
-    if (!message) {
-      res.status(400).json({ error: 'Message content required' })
-      return
-    }
-
-    if (parentId === undefined) {
-      res.status(400).json({ error: 'parentId is required for branching' })
-      return
-    }
-
-    const conversation = statements.getConversationById.get(conversationId) as any
-    const cwd = requestedCwd || conversation?.cwd || process.cwd()
-
-    // console.log('🤖 CC Branch Request:', {
-    //   message: message.substring(0, 100),
-    //   parentId,
-    //   cwd,
-    //   permissionMode,
-    // })
-
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-    })
-
-    try {
-      // Find session ID by walking up the parent chain
-      let sessionId = providedSessionId
-      if (!sessionId && parentId) {
-        let current = statements.getMessageById.get(parentId) as any
-        while (current && !sessionId) {
-          if (current.role === 'ex_agent' && current.ex_agent_session_id) {
-            sessionId = current.ex_agent_session_id
-            break
-          }
-          if (!current.parent_id) break
-          current = statements.getMessageById.get(current.parent_id)
-        }
-      }
-
-      // Save user message
-      const userMsgId = uuidv4()
-      const now = new Date().toISOString()
-      statements.upsertMessage.run(
-        userMsgId,
-        conversationId,
-        parentId,
-        '[]',
-        'user',
-        message,
-        null,
-        null,
-        null,
-        null,
-        'user-input',
-        null,
-        null,
-        null,
-        null,
-        null,
-        now
-      )
-
-      res.write(
-        `data: ${JSON.stringify({ type: 'user_message', message: { id: userMsgId, role: 'user', content: message } })}\n\n`
-      )
-
-      let contentBlocks: any[] = []
-      let textParts: string[] = []
-      let currentSessionId: string | null = sessionId || null
-
-      const onStream = (data: any) => {
-        try {
-          res.write(`data: ${JSON.stringify(data)}\n\n`)
-        } catch (error) {
-          console.error('[LocalServer] Error writing stream data:', error)
-        }
-      }
-
-      // Streaming chunk callback for real-time deltas
-      const onStreamingChunk = async (chunk: any) => {
-        try {
-          res.write(
-            `data: ${JSON.stringify({
-              type: 'chunk',
-              part: chunk.contentType === 'thinking' ? 'reasoning' : 'text',
-              delta: chunk.delta || '',
-              chunkType: chunk.type,
-            })}\n\n`
-          )
-        } catch (error) {
-          console.error('[LocalServer] Error writing streaming chunk:', error)
-        }
-      }
-
-      const onResponse = async (response: CCResponse) => {
-        onStream(response)
-
-        if (response.sessionId) {
-          currentSessionId = response.sessionId
-          setSession(conversationId, cwd, response.sessionId)
-        }
-
-        // ========================================================================
-        // Universal Content Extractor - Capture content from ANY message type
-        // ========================================================================
-
-        // Extract text content from any response field
-        let extractedContent: string | null = null
-
-        // Priority 1: Check for result.result (slash commands)
-        if (response.messageType === 'result' && response.result?.result) {
-          extractedContent = response.result.result
-          // console.log('[LocalServer] 🔍 Extracted content from result.result:', extractedContent.substring(0, 100))
-        }
-
-        // Priority 2: Check for system messages with content
-        if (!extractedContent && response.messageType === 'system' && response.system) {
-          // Some system messages may contain displayable content
-          // Example: init messages with configuration info
-          const systemContent = (response.system as any).content || (response.system as any).message
-          if (systemContent && typeof systemContent === 'string') {
-            extractedContent = systemContent
-            // console.log('[LocalServer] 🔍 Extracted content from system message')
-          }
-        }
-
-        // Priority 3: Check for any 'content' field in the response (catch-all)
-        if (!extractedContent && (response as any).content) {
-          const genericContent = (response as any).content
-          if (typeof genericContent === 'string') {
-            extractedContent = genericContent
-            // console.log('[LocalServer] 🔍 Extracted content from generic content field')
-          } else if (Array.isArray(genericContent)) {
-            // If it's an array of blocks, try to extract text
-            const textBlocks = genericContent.filter((b: any) => b.type === 'text')
-            if (textBlocks.length > 0) {
-              extractedContent = textBlocks.map((b: any) => b.text || b.content || '').join('\n')
-              // console.log('[LocalServer] 🔍 Extracted content from content blocks array')
-            }
-          }
-        }
-
-        // If we extracted content from a non-message type, add it to contentBlocks
-        if (extractedContent && response.messageType !== 'message') {
-          const syntheticBlock = {
-            type: 'text',
-            text: extractedContent,
-          }
-
-          contentBlocks.push(syntheticBlock)
-          textParts.push(extractedContent)
-
-          // Stream extracted content to frontend immediately
-          try {
-            res.write(
-              `data: ${JSON.stringify({
-                type: 'chunk',
-                part: 'text',
-                delta: extractedContent,
-                chunkType: `${response.messageType}_output`,
-                sourceMessageType: response.messageType,
-              })}\n\n`
-            )
-          } catch (error) {
-            console.error('[LocalServer] Error streaming extracted content:', error)
-          }
-        }
-
-        // ========================================================================
-        // End Universal Content Extractor
-        // ========================================================================
-
-        if (response.messageType === 'message' && response.message) {
-          for (const block of response.message.content) {
-            contentBlocks.push(block)
-            if (block.type === 'text') {
-              textParts.push((block as any).text || '')
-            }
-          }
-        }
-
-        if (response.messageType === 'result') {
-          if (contentBlocks.length > 0 && currentSessionId) {
-            const ccMsgId = uuidv4()
-            const textContent = textParts.join('\n\n').trim()
-
-            statements.upsertMessage.run(
-              ccMsgId,
-              conversationId,
-              userMsgId,
-              '[]',
-              'ex_agent',
-              textContent,
-              null,
-              null,
-              null,
-              null,
-              'claude-sonnet-4-5',
-              response.result?.is_error ? 'Generation completed with error' : null,
-              null,
-              currentSessionId,
-              'claude_code',
-              JSON.stringify(normalizeContentBlocksForStorage(contentBlocks)),
-              new Date().toISOString()
-            )
-            // console.log('[LocalServer] 🤖 CC message saved:', ccMsgId, '- blocks:', contentBlocks.length)
-
-            res.write(
-              `data: ${JSON.stringify({
-                type: 'complete',
-                sessionId: currentSessionId,
-                messageId: ccMsgId,
-                messageCount: contentBlocks.length,
-              })}\n\n`
-            )
-          }
-          // else if (!contentBlocks.length && currentSessionId) {
-          //   console.log('[LocalServer] ⚠️ CC result received but no content to save')
-          // }
-
-          contentBlocks = []
-          textParts = []
-        }
-      }
-
-      await executeClaudeCode(
-        conversationId,
-        message,
-        cwd,
-        onResponse,
-        permissionMode,
-        onStreamingChunk,
-        sessionId,
-        forkSession ?? true // Default to fork for branch
-      )
-
-      if (cwd && conversation && conversation.cwd !== cwd) {
-        statements.updateConversationCwd.run(cwd, conversationId)
-      }
-
-      // console.log('🤖 CC branch conversation completed successfully')
-    } catch (error) {
-      console.error('[LocalServer] CC Branch Error:', error)
-      res.write(
-        `data: ${JSON.stringify({
-          type: 'error',
-          error: error instanceof Error ? error.message : 'Unknown error',
-        })}\n\n`
-      )
-    }
-
-    res.end()
-  })
 
   // [Phase 0] Duplicate legacy /api/app/* block removed.
   // Canonical app automation routes are defined earlier in setupServer().

@@ -19,12 +19,14 @@ const settings = {
   maxTurns: 42,
   defaultProvider: null as string | null,
   defaultModel: null as string | null,
+  reasoningEffort: 'high' as const,
 }
 
 vi.mock('../../helpers/subagentToolSettings', () => ({
   loadSubagentToolSettings: vi.fn(() => settings),
   getSubagentEnabledTools: vi.fn(() => settings.enabledTools),
   getSubagentMaxTurns: vi.fn(() => settings.maxTurns),
+  getSubagentReasoningEffort: vi.fn(() => settings.reasoningEffort),
   isOrchestratorEnabled: vi.fn(() => settings.orchestratorEnabled),
 }))
 
@@ -34,6 +36,7 @@ vi.mock('./toolDefinitions', () => ({
     { name: 'ripgrep', enabled: true },
     { name: 'bash', enabled: true },
     { name: 'edit_file', enabled: false },
+    { name: 'multi_call', enabled: true },
     { name: 'subagent', enabled: true },
   ]),
 }))
@@ -131,12 +134,13 @@ describe('executeSubagentCall request building', () => {
       provider: 'openaichatgpt',
       modelName: 'gpt-5.6-sol',
       maxTurns: 42,
+      reasoningEffort: 'high',
       operationMode: 'execute',
       autoApprove: false,
       rootPath: '/repo',
     })
-    // Settings-enabled tools intersected with available; excludes 'subagent'.
-    expect(capturedBody.tools).toEqual(['read_file', 'ripgrep'])
+    // Settings-enabled tools intersected with available; excludes 'subagent' and always includes multi_call.
+    expect(capturedBody.tools).toEqual(['read_file', 'ripgrep', 'multi_call'])
     expect(capturedBody.temperature).toBe(0.5)
   })
 
@@ -155,8 +159,8 @@ describe('executeSubagentCall request building', () => {
       baseContext()
     )
 
-    // edit_file is disabled but requested -> bypass; subagent always excluded.
-    expect(capturedBody.tools).toEqual(['bash', 'edit_file'])
+    // edit_file is disabled but requested -> bypass; subagent is excluded and multi_call is required.
+    expect(capturedBody.tools).toEqual(['bash', 'edit_file', 'multi_call'])
   })
 
   it('returns [] tools when the orchestrator is disabled', async () => {

@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MessageRepo } from '../../persistence/messageRepo.js'
-import { ChatOrchestrator } from '../chatOrchestrator.js'
+import { ChatOrchestrator, shouldRejectSourceLineageMismatch } from '../chatOrchestrator.js'
 
 let BetterSqlite3Ctor: (new (filename: string) => Database.Database) | null = null
 
@@ -128,6 +128,18 @@ class FakeProviderRouter {
   }
 }
 
+describe('source lineage membership validation', () => {
+  it('allows an inferred creation owner whose moving head is on a sibling path', () => {
+    expect(shouldRejectSourceLineageMismatch(null, false)).toBe(false)
+    expect(shouldRejectSourceLineageMismatch(undefined, false)).toBe(false)
+  })
+
+  it('still rejects a mismatched lineage explicitly asserted by the client', () => {
+    expect(shouldRejectSourceLineageMismatch('lineage-c', false)).toBe(true)
+    expect(shouldRejectSourceLineageMismatch('lineage-c', true)).toBe(false)
+  })
+})
+
 describeIfSqlite('ChatOrchestrator continuation semantics', () => {
   let db: Database.Database
   let statements: any
@@ -181,6 +193,46 @@ describeIfSqlite('ChatOrchestrator continuation semantics', () => {
     expect(assistant.parent_id).toBe(user.id)
     expect(events.some(evt => evt.type === 'user_message_persisted')).toBe(true)
     expect(events[events.length - 1].type).toBe('complete')
+  })
+
+  it('replays only the latest compaction summary and subsequent branch messages', async () => {
+    const rootUser = messageRepo.createMessage({
+      conversationId: 'c1',
+      parentId: null,
+      role: 'user',
+      content: 'old context that must not be replayed',
+      modelName: 'gpt-5.1-codex-mini',
+    })
+    const oldAssistant = messageRepo.createMessage({
+      conversationId: 'c1',
+      parentId: rootUser.id,
+      role: 'assistant',
+      content: 'old assistant context that must not be replayed',
+      modelName: 'gpt-5.1-codex-mini',
+    })
+    const summary = messageRepo.createMessage({
+      conversationId: 'c1',
+      parentId: oldAssistant.id,
+      role: 'system',
+      content: 'Following is summary of the session, you have to resume the work.\n\nCompacted context.',
+      modelName: 'gpt-5.1-codex-mini',
+      note: '__auto_compaction_summary__',
+    })
+
+    await orchestrator.runMessage(
+      {
+        operation: 'send',
+        conversationId: 'c1',
+        parentId: summary.id,
+        content: 'continue from the summary',
+        provider: 'openaichatgpt',
+        modelName: 'gpt-5.1-codex-mini',
+      },
+      () => {}
+    )
+
+    expect(providerRouter.calls[0].history.map((message: any) => message.id)).toEqual([summary.id])
+    expect(providerRouter.calls[0].history[0].note).toBe('__auto_compaction_summary__')
   })
 
   it('turns post-retry OpenAI provider errors into a persisted assistant response', async () => {

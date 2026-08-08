@@ -22,9 +22,12 @@ import {
   DeleteConfirmModal,
   FreeGenerationsModal,
   Heimdall,
+  ParallelChatPane,
+  type ParallelChatPaneTarget,
   InputTextArea,
   ModelSelectControl,
   PlanClarificationPanel,
+  ReasoningLevelControl,
   Select,
   SettingsPane,
   StreamingThinkingIndicator,
@@ -35,6 +38,7 @@ import {
 import { useHtmlIframeRegistry } from '../components/HtmlIframeRegistry/HtmlIframeRegistry'
 import { contentSpringTransition, softTransition } from '../components/motion'
 import { ContextUsageSparkline } from '../components/ContextUsageSparkline/ContextUsageSparkline'
+import { SubagentTranscriptModal } from '../components/SubagentTranscript/SubagentTranscript'
 import {
   ChatInputBorderAnimationType,
   getStoredChatInputBorderAnimation,
@@ -76,9 +80,11 @@ import {
   Message,
   resolveAttachmentUrl,
   respondToPlanClarification,
+  respondToOperationModeUpgrade,
   respondToToolPermission,
   respondToToolPermissionAndEnableAll,
   restoreStreamFileEdits,
+  resumeInFlightStreams,
   selectCcCwd,
   selectConversationMessages,
   selectCurrentConversationId,
@@ -147,7 +153,6 @@ import { selectCurrentUser } from '../features/users'
 import {
   CHAT_REASONING_SETTINGS_CHANGE_EVENT,
   loadChatReasoningSettings,
-  REASONING_EFFORT_OPTIONS,
 } from '../helpers/chatReasoningSettingsStorage'
 import {
   CHAT_UI_ADDED_FILES_PILLS_VISIBILITY_CHANGE_EVENT,
@@ -168,6 +173,11 @@ import {
   ProviderSettings,
 } from '../helpers/providerSettingsStorage'
 import { isOrchestratorEnabled, toggleOrchestratorEnabled } from '../helpers/subagentToolSettings'
+import {
+  loadToolOutputTruncationEnabled,
+  TOOL_OUTPUT_TRUNCATION_CHANGE_EVENT,
+  TOOL_OUTPUT_TRUNCATION_ENABLED_KEY,
+} from '../helpers/toolOutputTruncation'
 import { useAppDispatch, useAppSelector } from '../hooks/redux'
 import { useAuth } from '../hooks/useAuth'
 import { useIdeContext } from '../hooks/useIdeContext'
@@ -175,7 +185,6 @@ import { useIsMobile } from '../hooks/useMediaQuery'
 import { useRunningJobs } from '../hooks/useToolJobs'
 import {
   ResearchNoteItem,
-  useConversationMessages,
   useConversationsByProject,
   useConversationStorageMode,
   useModels,
@@ -183,13 +192,15 @@ import {
   useSelectModel,
 } from '../hooks/useQueries'
 import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus'
+import { useConversationSnapshotCoordinator } from '../hooks/useConversationSnapshotCoordinator'
 import { CHAT_INSERT_FILE_PATH_EVENT, type ChatInsertFilePathDetail } from '../helpers/chatInputBridge'
 import { dispatchOpenWorkspaceMutationDiffs } from '../helpers/workspaceMutationDiffBridge'
-import { cloneConversation, localApi } from '../utils/api'
+import { cloneConversation, gwApi, localApi } from '../utils/api'
 import { getAssetPath } from '../utils/assetPath'
 import { parseId } from '../utils/helpers'
 import { extractTextFromPdf } from '../utils/pdfUtils'
 import { addFileMentionLookupKeys } from '../../shared/fileMatchRanking'
+import { extractLatestTodoList } from '../features/chats/todoListTracking'
 
 type ParsedMessageData = {
   toolCalls?: ToolCall[]
@@ -990,6 +1001,8 @@ function Chat() {
   const [hasLocalInput, setHasLocalInput] = useState(false)
   const [addedIdeContexts, setAddedIdeContexts] = useState<AddedIdeContext[]>([])
   const [pendingViewStreamId, setPendingViewStreamId] = useState<string | null>(null)
+  // Tool call whose persisted subagent transcript is open in the viewer modal (Phase 5).
+  const [subagentTranscriptToolCallId, setSubagentTranscriptToolCallId] = useState<string | null>(null)
 
   const getLocalInput = useCallback(() => inputControllerRef.current?.getValue() ?? '', [])
   const updateLocalInput = useCallback((next: ChatInputUpdater) => {
@@ -1065,7 +1078,11 @@ function Chat() {
 
 
   // Get conversation ID and project ID from URL params FIRST (before any hooks that depend on it)
-  const { id: conversationIdParam, projectId: projectIdParam } = useParams<{ id?: string; projectId?: string }>()
+  const { id: conversationIdParam, projectId: projectIdParam, lineageId: lineageIdParam } = useParams<{
+    id?: string
+    projectId?: string
+    lineageId?: string
+  }>()
   const conversationIdFromUrl = conversationIdParam ? parseId(conversationIdParam) : null
   const projectIdFromUrl = projectIdParam === 'null' ? null : projectIdParam || null
 
@@ -1092,6 +1109,7 @@ function Chat() {
   // const canSendFromRedux = useAppSelector(selectCanSend)
   const sendingState = useAppSelector(selectSendingState)
   const currentConversationId = useAppSelector(selectCurrentConversationId)
+  const snapshotConversationId = useAppSelector(state => state.chat.conversation.snapshotConversationId)
   const streamUndoRoot = useAppSelector(selectStreamUndoRoot)
   const compactingConversationId = useAppSelector(state => state.chat.composition.compactingConversationId)
   // Current view stream - automatically selects the relevant stream based on currentPath
@@ -1171,6 +1189,7 @@ function Chat() {
   const conversationMessages = useAppSelector(selectConversationMessages)
   const displayMessages = useAppSelector(selectDisplayMessages)
   const toolCallPermissionRequest = useAppSelector(state => state.chat.toolCallPermissionRequest)
+  const operationModeUpgradeRequest = useAppSelector(state => state.chat.operationModeUpgradeRequest)
   const planClarificationRequest = useAppSelector(state => state.chat.planClarificationRequest)
   const toolAutoApprove = useAppSelector(state => state.chat.toolAutoApprove)
   const showFreeTierModal = useAppSelector(state => state.chat.freeTier.showLimitModal)
@@ -2002,8 +2021,10 @@ function Chat() {
 
   const attachmentInputRef = useRef<HTMLInputElement>(null)
 
-  // Track if we already applied the URL hash-based path to avoid overriding user branch switches
+  // Track if we already applied URL-driven selection to avoid overriding later user branch switches.
   const hashAppliedRef = useRef<MessageId | null>(null)
+  const lineageRouteAttemptedRef = useRef<string | null>(null)
+  const manualLineageSelectionEpochRef = useRef(0)
 
 
   // Lock page scroll while chat is mounted
@@ -2115,7 +2136,7 @@ function Chat() {
       return false
     }
   })
-
+  const [truncateToolOutput, setTruncateToolOutput] = useState<boolean>(loadToolOutputTruncationEnabled)
 
   const virtualizationMetricsRef = useRef<{
     lastRowDeriveMs: number
@@ -3148,15 +3169,23 @@ function Chat() {
     return match?.storage_mode
   }, [conversationIdFromUrl, projectConversations, storageModeFromNav, storageModeFromHook, queryClient])
 
-  // React Query for message fetching (automatic deduplication and caching)
-  // Use URL-derived ID to ensure correct fetching even on page refresh
-  // Single request fetches both messages AND tree data to eliminate duplicate requests
-  // Pass storage_mode from projectConversations to correctly route to local/cloud API
-  const { data: conversationData, isFetched: isConversationDataFetched } = useConversationMessages(
-    conversationIdFromUrl,
-    conversationStorageMode
-  )
-  const treeData = conversationData?.tree
+  // Persisted snapshots only enter Redux through the generation-gated coordinator.
+  // Cached query data is never projected directly, so Settings -> Back cannot clobber
+  // the same-conversation live SSE projection before the route-entry fetch completes.
+  const {
+    data: conversationData,
+    isFetched: isConversationDataFetched,
+    acceptedConversationId,
+    refresh: refreshConversationSnapshot,
+  } = useConversationSnapshotCoordinator(conversationIdFromUrl, conversationStorageMode)
+
+  // Route entry is the recovery boundary. A surviving module-level reader is skipped
+  // per stream; only orphaned localStorage markers reattach to the main-process run.
+  useEffect(() => {
+    if (!conversationIdFromUrl) return
+    void dispatch(resumeInFlightStreams({ conversationId: String(conversationIdFromUrl) }))
+  }, [conversationIdFromUrl, dispatch])
+
   // Use useMemo to ensure stable reference for empty object fallback
   // Without this, {} !== {} on each render, causing the useEffect below to
   // dispatch on every render, triggering an infinite update loop
@@ -3306,8 +3335,8 @@ function Chat() {
     return () => clearTimeout(handle)
   }, [titleInput, currentConversationId, currentConversation?.title, dispatch, queryClient, selectedProject?.id])
 
-  // Reset visible messages immediately when switching conversations to prevent stale message bleed.
-  // Also evict inactive message caches from previously visited conversations to reduce memory pressure.
+  // Clear only on an actual A -> B switch. A Chat -> Settings -> Back remount retains
+  // the live same-conversation Redux/tree/path state while the coordinator refetches.
   useEffect(() => {
     queryClient.removeQueries({
       queryKey: ['conversations'],
@@ -3323,17 +3352,23 @@ function Chat() {
       },
     })
 
-    dispatch(chatSliceActions.messagesLoaded([]))
-  }, [conversationIdFromUrl, dispatch, queryClient])
+    if (snapshotConversationId != null && String(snapshotConversationId) !== String(conversationIdFromUrl ?? '')) {
+      dispatch(chatSliceActions.messagesLoaded([]))
+      dispatch(chatSliceActions.heimdallDataLoaded({ treeData: null, subagentMap: {} }))
+    }
+  }, [conversationIdFromUrl, dispatch, queryClient, snapshotConversationId])
 
-  // Sync React Query messages to Redux when query resolves, including empty conversations.
-  // This keeps Redux state updated for components that still depend on it.
+  // Run post-acceptance side effects. Messages/tree were already installed atomically by
+  // the coordinator; this effect only mirrors and hydrates attachments.
   useEffect(() => {
-    if (!conversationIdFromUrl || !isConversationDataFetched) return
+    if (
+      !conversationIdFromUrl ||
+      !isConversationDataFetched ||
+      !conversationData ||
+      acceptedConversationId !== String(conversationIdFromUrl)
+    ) return
 
-    const fetchedMessages = conversationData?.messages ?? []
-    dispatch(chatSliceActions.messagesLoaded(fetchedMessages))
-
+    const fetchedMessages = conversationData.messages
     if (fetchedMessages.length === 0) return
 
     // Sync to local database in Electron mode
@@ -3383,13 +3418,7 @@ function Chat() {
         })
       }
     })
-  }, [conversationData, conversationIdFromUrl, conversationStorageMode, dispatch, isConversationDataFetched])
-
-  // Sync tree data to Redux when it arrives
-  // Always dispatch even when treeData is null/undefined to keep Redux in sync with React Query
-  useEffect(() => {
-    dispatch(chatSliceActions.heimdallDataLoaded({ treeData, subagentMap: {} }))
-  }, [treeData, dispatch])
+  }, [acceptedConversationId, conversationData, conversationIdFromUrl, conversationStorageMode, dispatch, isConversationDataFetched])
 
   // Sync React Query conversations to Redux to ensure system_prompt and conversation_context are available
   // This fixes the issue where refreshing the page doesn't load context and system prompt from query cache
@@ -3423,6 +3452,9 @@ function Chat() {
     }
   })
   const [isResizing, setIsResizing] = useState(false)
+  // Session-only secondary transcript. It intentionally resets with this route container.
+  const [parallelPane, setParallelPane] = useState<ParallelChatPaneTarget | null>(null)
+  const [activeChatPane, setActiveChatPane] = useState<'primary' | 'parallel'>('primary')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [think, setThink] = useState<boolean>(chatReasoningSettings.defaultThinkingEnabled)
   const [heimdallVisible, setHeimdallVisible] = useState<boolean>(() => {
@@ -3596,6 +3628,13 @@ function Chat() {
       }
     }
 
+    const handleToolOutputTruncationEvent = (e: Event) => {
+      const detail = (e as CustomEvent<boolean>).detail
+      if (typeof detail === 'boolean') {
+        setTruncateToolOutput(detail)
+      }
+    }
+
     const handleStreamingIndicatorPlacementEvent = (e: Event) => {
       const detail = (e as CustomEvent<StreamingThinkingIndicatorPlacement>).detail
       if (detail === 'message' || detail === 'input-tab') {
@@ -3607,17 +3646,22 @@ function Chat() {
       if (e.key === 'chat:groupToolReasoningRuns' && e.newValue !== null) {
         setGroupToolReasoningRuns(e.newValue === 'true')
       }
+      if (e.key === TOOL_OUTPUT_TRUNCATION_ENABLED_KEY) {
+        setTruncateToolOutput(e.newValue === 'false' ? false : true)
+      }
       if (e.key === STREAMING_THINKING_INDICATOR_PLACEMENT_STORAGE_KEY && e.newValue !== null) {
         setStreamingThinkingIndicatorPlacement(e.newValue === 'input-tab' ? 'input-tab' : 'message')
       }
     }
 
     window.addEventListener('groupToolReasoningRunsChange', handleGroupRunsEvent)
+    window.addEventListener(TOOL_OUTPUT_TRUNCATION_CHANGE_EVENT, handleToolOutputTruncationEvent)
     window.addEventListener('streamingThinkingIndicatorPlacementChange', handleStreamingIndicatorPlacementEvent)
     window.addEventListener('storage', handleStorageEvent)
 
     return () => {
       window.removeEventListener('groupToolReasoningRunsChange', handleGroupRunsEvent)
+      window.removeEventListener(TOOL_OUTPUT_TRUNCATION_CHANGE_EVENT, handleToolOutputTruncationEvent)
       window.removeEventListener('streamingThinkingIndicatorPlacementChange', handleStreamingIndicatorPlacementEvent)
       window.removeEventListener('storage', handleStorageEvent)
     }
@@ -4399,6 +4443,78 @@ function Chat() {
     updateVisibleMessageRef.current?.()
   }, [renderableMessagesSignature, virtualRows])
 
+  // Apply a canonical lineage deep link only after the matching conversation snapshot is installed.
+  // The endpoint is authoritative for the branch path. Route and manual-selection guards prevent a
+  // late response from switching either the conversation or a branch the user chose while it loaded.
+  useEffect(() => {
+    if (!lineageIdParam || conversationIdFromUrl == null) return
+    if (!isConversationDataFetched || acceptedConversationId !== String(conversationIdFromUrl)) return
+    if (snapshotConversationId == null || String(snapshotConversationId) !== String(conversationIdFromUrl)) return
+
+    const routeKey = `${String(conversationIdFromUrl)}:${lineageIdParam}`
+    if (lineageRouteAttemptedRef.current === routeKey) return
+    lineageRouteAttemptedRef.current = routeKey
+
+    const manualSelectionEpoch = manualLineageSelectionEpochRef.current
+    let cancelled = false
+
+    void gwApi
+      .get<{
+        pathMessageIds?: Array<MessageId | string | number>
+        path?: Array<{ id?: MessageId | string | number } | MessageId | string | number>
+        head_message_id?: MessageId | string | number | null
+      }>(
+        `/conversations/${encodeURIComponent(String(conversationIdFromUrl))}/lineages/${encodeURIComponent(lineageIdParam)}`
+      )
+      .then(detail => {
+        if (cancelled || manualLineageSelectionEpochRef.current !== manualSelectionEpoch) return
+        if (acceptedConversationId !== String(conversationIdFromUrl)) return
+
+        const rawPath =
+          detail.pathMessageIds ??
+          detail.path?.map(item => (typeof item === 'object' && item !== null ? item.id : item)) ??
+          []
+        const path = rawPath
+          .map(id => parseId(String(id)))
+          .filter((id): id is MessageId =>
+            typeof id === 'string' || (typeof id === 'number' && !Number.isNaN(id))
+          )
+        if (path.length === 0) return
+
+        const requestedFocusValue = new URLSearchParams(location.search).get('focus')
+        const requestedFocus = requestedFocusValue == null ? null : parseId(requestedFocusValue)
+        const focusInPath =
+          requestedFocus != null && path.some(messageId => String(messageId) === String(requestedFocus))
+        const parsedHead = detail.head_message_id == null ? path[path.length - 1] : parseId(String(detail.head_message_id))
+        const focus = focusInPath ? requestedFocus : parsedHead
+
+        dispatch(
+          chatSliceActions.lineageSelected({
+            conversationId: conversationIdFromUrl,
+            lineageId: lineageIdParam,
+            path,
+            focus,
+          })
+        )
+      })
+      .catch(error => {
+        // A missing/stale lineage link should still open the conversation's normal branch.
+        console.warn('[Chat] Failed to apply lineage deep link:', error)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    acceptedConversationId,
+    conversationIdFromUrl,
+    dispatch,
+    isConversationDataFetched,
+    lineageIdParam,
+    location.search,
+    snapshotConversationId,
+  ])
+
   // If URL contains a #messageId fragment, capture it once
   // const location = useLocation() // Moved to top
   const hashMessageId = React.useMemo(() => {
@@ -5134,12 +5250,7 @@ function Chat() {
         .then(() => {
           clearPendingCwdAnnouncement(currentConversationId, pendingCwdValue)
           dispatch(chatSliceActions.messageArtifactsBackupCleared({ messageId: parsedId }))
-          // Invalidate React Query cache after successful branch to fetch new messages.
-          // Note: messages query now includes tree data, so only one invalidation is needed.
-          queryClient.invalidateQueries({
-            queryKey: ['conversations', currentConversationId, 'messages'],
-            refetchType: 'active',
-          })
+          void refreshConversationSnapshot()
         })
         .catch(error => {
           // Clear optimistic branch message on error
@@ -5158,7 +5269,7 @@ function Chat() {
       replaceFileMentionsWithPath,
       appendIdeContextToMessage,
       conversationMessages,
-      queryClient,
+      refreshConversationSnapshot,
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
       getBranchImageDraftDataUrls,
@@ -5176,17 +5287,13 @@ function Chat() {
       )
         .unwrap()
         .then(() => {
-          if (!currentConversationId) return
-          queryClient.invalidateQueries({
-            queryKey: ['conversations', currentConversationId, 'messages'],
-            refetchType: 'active',
-          })
+          if (currentConversationId) void refreshConversationSnapshot()
         })
         .catch(error => {
           console.error('Failed to update message:', error)
         })
     },
-    [currentConversationId, dispatch, queryClient]
+    [currentConversationId, dispatch, refreshConversationSnapshot]
   )
 
   const handleMessageBranch = useCallback(
@@ -5315,6 +5422,7 @@ function Chat() {
   const handleNodeSelect = useCallback(
     (nodeId: string, path: string[]) => {
       if (!nodeId || !path || path.length === 0) return // ignore clicks on empty space
+      manualLineageSelectionEpochRef.current += 1
 
       const parsedNodeId = parseId(nodeId)
       const isValidNodeId =
@@ -5383,6 +5491,23 @@ function Chat() {
     ]
   )
 
+  const handleOpenParallel = useCallback(
+    (conversationId: ConversationId, messageId: MessageId, path: string[]) => {
+      if (currentConversationId == null || String(conversationId) !== String(currentConversationId)) return
+      const parsedPath = path.map(parseId).filter(id => typeof id === 'string' || typeof id === 'number') as MessageId[]
+      if (parsedPath.length === 0) return
+      setParallelPane({ conversationId, messageId, path: parsedPath })
+      setActiveChatPane('parallel')
+    },
+    [currentConversationId]
+  )
+
+  // Close/reset the session-only second pane when navigating to another conversation.
+  useEffect(() => {
+    setParallelPane(null)
+    setActiveChatPane('primary')
+  }, [conversationIdFromUrl])
+
   // const handleOnResend = (id: string) => {
   //   if (currentConversationId) {
   //     dispatch(
@@ -5417,16 +5542,10 @@ function Chat() {
       } catch (error) {
         console.error('[Chat] Failed to delete message:', error)
       } finally {
-        await queryClient.invalidateQueries({
-          queryKey: ['conversations', currentConversationId, 'messages'],
-        })
-        await queryClient.refetchQueries({
-          queryKey: ['conversations', currentConversationId, 'messages'],
-          type: 'active',
-        })
+        await refreshConversationSnapshot()
       }
     },
-    [dispatch, currentConversationId, conversationStorageMode, queryClient]
+    [dispatch, currentConversationId, conversationStorageMode, refreshConversationSnapshot]
   )
 
   const handleRequestDelete = useCallback(
@@ -5872,6 +5991,10 @@ function Chat() {
   const canOpenHtmlTools = Boolean(htmlRegistry)
   const openToolHtmlModal = canOpenHtmlTools ? handleOpenToolHtmlModal : undefined
 
+  const openSubagentTranscript = useCallback((toolCallId: string) => {
+    setSubagentTranscriptToolCallId(toolCallId)
+  }, [])
+
   // Refresh models using React Query mutation
   // const handleRefreshModels = useCallback(() => {
   //   if (providers.currentProvider) {
@@ -5879,93 +6002,8 @@ function Chat() {
   //   }
   // }, [providers.currentProvider, refreshModelsMutation])
 
-  // Helper: Parse todo items from markdown content
-  const TODO_ITEM_REGEX = /^\s*[-*]\s*\[(x|X| )\]\s*(.*)$/
-  const parseTodoItems = (markdownContent: string): { text: string; done: boolean }[] => {
-    const items: { text: string; done: boolean }[] = []
-    const lines = markdownContent.split('\n')
-    for (const line of lines) {
-      const match = TODO_ITEM_REGEX.exec(line)
-      if (match) {
-        items.push({
-          done: match[1].toLowerCase() === 'x',
-          text: match[2].trim(),
-        })
-      }
-    }
-    return items
-  }
-
-  // Extract the most recent todo_list tool result from displayMessages
-  // This finds the latest tool_use block for 'todo_list' and its corresponding result
-  const latestTodoList = useMemo(() => {
-    // Iterate from most recent to oldest
-    for (let i = displayMessages.length - 1; i >= 0; i--) {
-      const msg = displayMessages[i]
-      if ((msg.role === 'assistant' || msg.role === 'ex_agent') && msg.content_blocks) {
-        let blocks: ContentBlock[] = []
-        try {
-          if (typeof msg.content_blocks === 'object') {
-            blocks = Array.isArray(msg.content_blocks) ? msg.content_blocks : [msg.content_blocks]
-          } else if (typeof msg.content_blocks === 'string') {
-            const parsed = JSON.parse(msg.content_blocks)
-            blocks = Array.isArray(parsed) ? parsed : [parsed]
-          }
-        } catch {
-          continue
-        }
-
-        // Look for tool_use blocks for todo_list and find corresponding tool_result
-        for (const block of blocks) {
-          if (block.type === 'tool_use' && (block as any).name === 'todo_list') {
-            const toolUseBlock = block as any
-            // Find the corresponding tool_result
-            const resultBlock = blocks.find(
-              b => b.type === 'tool_result' && (b as any).tool_use_id === toolUseBlock.id
-            ) as any
-            if (resultBlock && !resultBlock.is_error) {
-              const action = toolUseBlock.input?.action
-              if (action === 'create' || action === 'read' || action === 'edit') {
-                // Parse the result content to extract the markdown content
-                let resultData: any = resultBlock.content
-
-                // If content is a string, try to parse it as JSON
-                if (typeof resultData === 'string') {
-                  try {
-                    resultData = JSON.parse(resultData)
-                  } catch {
-                    // If parsing fails, use the string as-is (might be raw markdown)
-                  }
-                }
-
-                // Extract the markdown content from the result object
-                let markdownContent = ''
-                if (typeof resultData === 'object' && resultData !== null && 'content' in resultData) {
-                  markdownContent = resultData.content || ''
-                } else if (typeof resultData === 'string') {
-                  markdownContent = resultData
-                }
-
-                // Parse the markdown into todo items
-                const items = parseTodoItems(markdownContent)
-
-                // Only return if there are actual todo items
-                if (items.length > 0) {
-                  return {
-                    name: resultData?.name || toolUseBlock.input?.name || 'Todo List',
-                    action,
-                    items,
-                    messageId: msg.id,
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    return null
-  }, [displayMessages])
+  // Extract the most recent direct or multi_call-nested todo_list result from the current branch.
+  const latestTodoList = useMemo(() => extractLatestTodoList(displayMessages), [displayMessages])
 
   const branchFileMutationData = useMemo(() => extractBranchFileMutations(displayMessages), [displayMessages])
   const hasLatestTodoList = Boolean(latestTodoList?.items?.length)
@@ -6171,9 +6209,9 @@ function Chat() {
       className='flex h-full overflow-hidden bg-transparent dark:bg-transparent'
     >
       <div
-        className={`relative flex flex-col ${heimdallVisible && !isMobile ? 'flex-none' : 'flex-1'} rounded-xl mb-2 min-w-0 bg-transparent sm:min-w-[240px] md:min-w-[280px]  overflow-hidden`}
+        className={`relative flex flex-col ${heimdallVisible && !isMobile ? 'flex-none' : 'flex-1'} rounded-xl mb-2 min-w-0 bg-transparent sm:min-w-[240px] md:min-w-[280px] overflow-hidden`}
         style={{
-          width: isMobile ? '100%' : heimdallVisible ? `${leftWidthPct}%` : 'auto',
+          width: isMobile ? '100%' : heimdallVisible ? `${parallelPane ? Math.max(25, leftWidthPct - 20) : leftWidthPct}%` : 'auto',
           backgroundColor: chatSurfaceBackgroundColor,
         }}
       >
@@ -6290,11 +6328,7 @@ function Chat() {
                   className='!rounded-full !p-2 transition-all duration-200 hover:bg-black/5 dark:hover:bg-white/5'
                   aria-label='Refresh Messages'
                   onClick={() => {
-                    if (currentConversationId) {
-                      queryClient.invalidateQueries({
-                        queryKey: ['conversations', currentConversationId, 'messages'],
-                      })
-                    }
+                    if (currentConversationId) void refreshConversationSnapshot()
                   }}
                   title='Sync / Refresh'
                 >
@@ -6393,12 +6427,14 @@ function Chat() {
                                 width='w-full'
                                 fontSizeOffset={fontSizeOffset}
                                 groupToolReasoningRuns={groupToolReasoningRuns}
+                                truncateToolOutput={truncateToolOutput}
                                 customTheme={customTheme}
                                 customThemeEnabled={customThemeEnabled}
                                 isDarkMode={isDarkMode}
                                 className='opacity-70'
                                 userTurnElapsedLabel={userTurnElapsedLabelByMessageId.get(String(message.id))}
                                 onOpenToolHtmlModal={openToolHtmlModal}
+                                onOpenSubagentTranscript={openSubagentTranscript}
                               />
                             </VirtualizedRowContainer>
                           )
@@ -6424,12 +6460,14 @@ function Chat() {
                                 width='w-full'
                                 fontSizeOffset={fontSizeOffset}
                                 groupToolReasoningRuns={groupToolReasoningRuns}
+                                truncateToolOutput={truncateToolOutput}
                                 customTheme={customTheme}
                                 customThemeEnabled={customThemeEnabled}
                                 isDarkMode={isDarkMode}
                                 className='opacity-70'
                                 userTurnElapsedLabel={userTurnElapsedLabelByMessageId.get(String(message.id))}
                                 onOpenToolHtmlModal={openToolHtmlModal}
+                                onOpenSubagentTranscript={openSubagentTranscript}
                               />
                             </VirtualizedRowContainer>
                           )
@@ -6459,12 +6497,14 @@ function Chat() {
                                 width='w-full'
                                 fontSizeOffset={fontSizeOffset}
                                 groupToolReasoningRuns={groupToolReasoningRuns}
+                                truncateToolOutput={truncateToolOutput}
                                 customTheme={customTheme}
                                 customThemeEnabled={customThemeEnabled}
                                 isDarkMode={isDarkMode}
                                 modelName={selectedModel?.name || undefined}
                                 className=''
                                 onOpenToolHtmlModal={openToolHtmlModal}
+                                onOpenSubagentTranscript={openSubagentTranscript}
                               />
                             </VirtualizedRowContainer>
                           )
@@ -6567,10 +6607,12 @@ function Chat() {
                                           artifacts={groupedMessage.artifacts}
                                           fontSizeOffset={fontSizeOffset}
                                           groupToolReasoningRuns={false}
+                                          truncateToolOutput={truncateToolOutput}
                                           customTheme={customTheme}
                                           customThemeEnabled={customThemeEnabled}
                                           isDarkMode={isDarkMode}
                                           onOpenToolHtmlModal={openToolHtmlModal}
+                                          onOpenSubagentTranscript={openSubagentTranscript}
                                         />
                                       )
                                     })}
@@ -6612,10 +6654,12 @@ function Chat() {
                                           artifacts={bridgedMessage.artifacts}
                                           fontSizeOffset={fontSizeOffset}
                                           groupToolReasoningRuns={false}
+                                          truncateToolOutput={truncateToolOutput}
                                           customTheme={customTheme}
                                           customThemeEnabled={customThemeEnabled}
                                           isDarkMode={isDarkMode}
                                           onOpenToolHtmlModal={openToolHtmlModal}
+                                          onOpenSubagentTranscript={openSubagentTranscript}
                                         />
                                       )
                                     })()}
@@ -6673,6 +6717,7 @@ function Chat() {
                               artifacts={msg.artifacts}
                               fontSizeOffset={fontSizeOffset}
                               groupToolReasoningRuns={groupToolReasoningRuns}
+                              truncateToolOutput={truncateToolOutput}
                               customTheme={customTheme}
                               customThemeEnabled={customThemeEnabled}
                               isDarkMode={isDarkMode}
@@ -6689,6 +6734,7 @@ function Chat() {
                               onAddToNote={handleAddToNote}
                               onExplainFromSelection={handleExplainFromSelection}
                               onOpenToolHtmlModal={openToolHtmlModal}
+                              onOpenSubagentTranscript={openSubagentTranscript}
                               onEditingStateChange={handleMessageEditingStateChange}
                             />
                           </VirtualizedRowContainer>
@@ -6718,12 +6764,14 @@ function Chat() {
                     width='w-full'
                     fontSizeOffset={fontSizeOffset}
                     groupToolReasoningRuns={groupToolReasoningRuns}
+                    truncateToolOutput={truncateToolOutput}
                     customTheme={customTheme}
                     customThemeEnabled={customThemeEnabled}
                     isDarkMode={isDarkMode}
                     modelName={selectedModel?.name || undefined}
                     className=''
                     onOpenToolHtmlModal={openToolHtmlModal}
+                    onOpenSubagentTranscript={openSubagentTranscript}
                   />
                 </div>
                 <div
@@ -6790,7 +6838,15 @@ function Chat() {
             <div
               className={`slate-input-wrapper relative z-10 ${leftControlsBorderClasses} bg-neutral-100/40 dark:bg-neutral-900/40 backdrop-blur-xl rounded-3xl px-2 pt-3 pb-2 transition-all duration-300`}
             >
-              {toolCallPermissionRequest && (
+              {operationModeUpgradeRequest && (
+                <ToolPermissionDialog
+                  toolCall={operationModeUpgradeRequest.toolCall}
+                  variant='operation-mode-upgrade'
+                  onGrant={() => dispatch(respondToOperationModeUpgrade(true))}
+                  onDeny={() => dispatch(respondToOperationModeUpgrade(false))}
+                />
+              )}
+              {!operationModeUpgradeRequest && toolCallPermissionRequest && (
                 <ToolPermissionDialog
                   toolCall={toolCallPermissionRequest.toolCall}
                   onGrant={() => dispatch(respondToToolPermission(true))}
@@ -6808,7 +6864,7 @@ function Chat() {
               {/* Todo List / Modified Files Display */}
               {showComposerSummaryPanels && (
                 <div
-                  className={`mx-2 ${toolCallPermissionRequest ? 'mt-1' : 'mt-2'} mb-1 ${
+                  className={`mx-2 ${toolCallPermissionRequest || operationModeUpgradeRequest ? 'mt-1' : 'mt-2'} mb-1 ${
                     showComposerSummaryPanelsAsRow ? 'flex gap-2' : 'block'
                   }`}
                 >
@@ -7404,35 +7460,8 @@ function Chat() {
                               </div>
                             </>
                           )}
-                          {/* Reasoning Effort Options - shown when thinking is enabled */}
                           {selectedModel?.thinking && (
-                            <>
-                              <h1 className='text-black dark:text-neutral-200 text-[16px]'>Reasoning Options</h1>
-                              <div className='flex flex-col gap-1'>
-                                <label className='text-xs text-neutral-500 dark:text-neutral-400'>Effort Level</label>
-                                <Select
-                                  value={reasoningConfig.effort}
-                                  options={REASONING_EFFORT_OPTIONS.map(option => ({
-                                    value: option,
-                                    label:
-                                      option === 'medium'
-                                        ? 'Medium (Default)'
-                                        : option === 'xhigh'
-                                          ? 'X-High'
-                                          : option.charAt(0).toUpperCase() + option.slice(1),
-                                  }))}
-                                  onChange={value =>
-                                    setReasoningConfig(prev => ({
-                                      ...prev,
-                                      effort: value as ReasoningConfig['effort'],
-                                    }))
-                                  }
-                                  placeholder='Select effort level'
-                                  size='small'
-                                  dropdownZIndex={ACTION_POPOVER_SELECT_DROPDOWN_Z_INDEX}
-                                />
-                              </div>
-                              <div className='flex items-center justify-between gap-3'>
+                            <div className='flex items-center justify-between gap-3'>
                                 <div className='flex flex-col'>
                                   <span className='text-xs text-neutral-500 dark:text-neutral-400'>Fast mode</span>
                                   <span className='text-[11px] text-neutral-400 dark:text-neutral-500'>
@@ -7476,7 +7505,6 @@ function Chat() {
                                   />
                                 </button>
                               </div>
-                            </>
                           )}
                           {/* Orchestrator Mode Toggle */}
                           <div className='flex items-center gap-2'>
@@ -7573,45 +7601,18 @@ function Chat() {
                       )}
                     </ActionPopover>
                   )}
-                  {/* Thinking toggle - next to popover, disabled when not supported */}
-                  <button
-                    className={`p-2 rounded-full transition-all duration-200 ${
-                      selectedModel?.thinking
-                        ? 'text-neutral-500 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-white/10 dark:hover:bg-white/5'
-                        : 'text-neutral-300 dark:text-neutral-600 cursor-not-allowed'
-                    }`}
-                    onClick={() => setThink(t => !t)}
-                    disabled={!selectedModel?.thinking}
-                    title={selectedModel?.thinking ? 'Enable thinking' : 'Thinking not supported by this model'}
-                  >
-                    {think ? (
-                      <>
-                        <img
-                          src={getAssetPath('img/thinkingonlightmode.svg')}
-                          alt='Thinking active'
-                          className='w-[22px] h-[22px] dark:hidden'
-                        />
-                        <img
-                          src={getAssetPath('img/thinkingondarkmode.svg')}
-                          alt='Thinking active'
-                          className='w-[22px] h-[22px] hidden dark:block'
-                        />
-                      </>
-                    ) : (
-                      <>
-                        <img
-                          src={getAssetPath('img/thinkingofflightmode.svg')}
-                          alt='Thinking'
-                          className='w-[22px] h-[22px] dark:hidden'
-                        />
-                        <img
-                          src={getAssetPath('img/thinkingoffdarkmode.svg')}
-                          alt='Thinking'
-                          className='w-[22px] h-[22px] hidden dark:block'
-                        />
-                      </>
-                    )}
-                  </button>
+                  <ReasoningLevelControl
+                    supported={Boolean(selectedModel?.thinking)}
+                    level={think ? reasoningConfig.effort : 'off'}
+                    onLevelChange={level => {
+                      if (level === 'off') {
+                        setThink(false)
+                        return
+                      }
+                      setThink(true)
+                      setReasoningConfig(prev => ({ ...prev, effort: level }))
+                    }}
+                  />
                   {/* Attachment upload button */}
                   <input
                     ref={attachmentInputRef}
@@ -7698,6 +7699,18 @@ function Chat() {
         </div>
 
       {/* SEPARATOR - Hidden on mobile */}
+      {parallelPane && !isMobile && (
+        <ParallelChatPane
+          target={parallelPane}
+          active={activeChatPane === 'parallel'}
+          onActivate={() => setActiveChatPane('parallel')}
+          onClose={() => {
+            setParallelPane(null)
+            setActiveChatPane('primary')
+          }}
+        />
+      )}
+
       {heimdallVisible && !isMobile && (
         <div
           className='w-2 z-10 dark:bg-transparent bg-transparent hover:dark:bg-neutral-800 hover:bg-neutral-200 cursor-col-resize select-none'
@@ -7733,6 +7746,7 @@ function Chat() {
             compactMode={compactMode}
             conversationId={currentConversationId}
             onNodeSelect={handleNodeSelect}
+            onOpenParallel={handleOpenParallel}
             visibleMessageId={visibleMessageId}
             storageMode={conversationStorageMode}
           />
@@ -7786,6 +7800,7 @@ function Chat() {
                     compactMode={compactMode}
                     conversationId={currentConversationId}
                     onNodeSelect={handleNodeSelect}
+                    onOpenParallel={handleOpenParallel}
                     visibleMessageId={visibleMessageId}
                     storageMode={conversationStorageMode}
                   />
@@ -7873,6 +7888,10 @@ function Chat() {
         onClose={() => dispatch(chatSliceActions.freeTierLimitModalHidden())}
       />
       <ToolJobsModal isOpen={jobsModalOpen} onClose={() => setJobsModalOpen(false)} />
+      <SubagentTranscriptModal
+        toolCallId={subagentTranscriptToolCallId}
+        onClose={() => setSubagentTranscriptToolCallId(null)}
+      />
 
       {/* OpenRouter login required modal */}
       {openRouterLoginRequiredModalOpen && (

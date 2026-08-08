@@ -1,43 +1,20 @@
 import { v4 as uuidv4 } from 'uuid'
+import type {
+  SubagentMessageRole,
+  SubagentMessageRow,
+  SubagentRunRow,
+  SubagentRunStatus,
+} from '../../../../../shared/types.js'
 
-export type SubagentRunStatus = 'running' | 'completed' | 'error' | 'aborted'
-export type SubagentMessageRole = 'user' | 'assistant' | 'tool' | 'system'
-
-export interface SubagentMessageRow {
-  id: string
-  run_id: string
-  role: string
-  content: string
-  thinking_block: string | null
-  tool_calls: any
-  tool_call_id: string | null
-  content_blocks: any
-  sequence: number
-  created_at: string
-}
-
-export interface SubagentRunRow {
-  id: string
-  conversation_id: string
-  parent_message_id: string
-  tool_call_id: string | null
-  prompt: string
-  provider: string | null
-  model_name: string | null
-  system_prompt: string | null
-  status: string
-  final_response: string | null
-  error: string | null
-  turns_used: number
-  tool_calls_used: number
-  created_at: string
-  updated_at: string
-  messages?: SubagentMessageRow[]
-}
+// The row shapes are defined once in shared/types.ts (so the renderer's transcript
+// viewer shares the exact same contract) and re-exported here for the server code
+// that has always imported them from this repo module.
+export type { SubagentMessageRole, SubagentMessageRow, SubagentRunRow, SubagentRunStatus }
 
 export interface CreateSubagentRunInput {
   id?: string
   conversationId: string
+  lineageId?: string | null
   parentMessageId: string
   toolCallId?: string | null
   prompt: string
@@ -45,6 +22,8 @@ export interface CreateSubagentRunInput {
   modelName?: string | null
   systemPrompt?: string | null
   status?: SubagentRunStatus
+  /** Explicit handle (e.g. re-registration); a unique 6-digit one is minted when omitted. */
+  handle?: string | null
 }
 
 export interface UpdateSubagentRunInput {
@@ -87,6 +66,7 @@ export const normalizeSubagentRunRow = (row: any, messages: SubagentMessageRow[]
   ...row,
   turns_used: Number(row.turns_used || 0),
   tool_calls_used: Number(row.tool_calls_used || 0),
+  attempt: Number(row.attempt || 0),
   messages,
 })
 
@@ -122,7 +102,41 @@ export class SubagentRunRepo {
       now,
       now
     )
+    if (input.lineageId) {
+      if (!this.statements.attachSubagentRunToLineage) {
+        throw new Error('Subagent-run lineage attachment statement is not configured')
+      }
+      this.statements.attachSubagentRunToLineage.run(input.lineageId, runId)
+    }
+    this.assignHandle(runId, input.handle ?? null)
     return normalizeSubagentRunRow(this.statements.getSubagentRunById.get(runId), [])
+  }
+
+  /**
+   * Assigns a short 6-digit handle (the model-facing reference the subagent
+   * manager returns from spawn and keys list/status/cancel/resume on). Uses an
+   * explicit handle when supplied, otherwise mints a unique one with collision
+   * retry against the partial-unique index. No-ops when the statement is absent
+   * so minimal test harnesses stay valid.
+   */
+  private assignHandle(runId: string, requested: string | null): string | null {
+    if (!this.statements.attachSubagentRunHandle) return null
+    if (requested) {
+      this.statements.attachSubagentRunHandle.run(requested, runId)
+      return requested
+    }
+    const MAX_ATTEMPTS = 25
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const candidate = String(100000 + Math.floor(Math.random() * 900000))
+      try {
+        this.statements.attachSubagentRunHandle.run(candidate, runId)
+        return candidate
+      } catch (error: any) {
+        if (error?.code === 'SQLITE_CONSTRAINT_UNIQUE') continue
+        throw error
+      }
+    }
+    throw new Error('Failed to allocate a unique subagent handle after multiple attempts')
   }
 
   updateRun(runId: string, patch: UpdateSubagentRunInput): SubagentRunRow | null {
@@ -236,6 +250,54 @@ export class SubagentRunRepo {
     return this.statements.getSubagentRunsByParentMessageId
       .all(messageId)
       .map((run: any) => normalizeSubagentRunRow(run, this.getMessages(run.id)))
+  }
+
+  /**
+   * All runs currently marked 'running' (lightweight; no transcript). At process
+   * startup these can only be crash orphans — a fresh process has no live loop —
+   * so the startup reconciler flips them to a resumable terminal state.
+   */
+  listRunning(): SubagentRunRow[] {
+    if (!this.statements.getRunningSubagentRuns) return []
+    return this.statements.getRunningSubagentRuns.all().map((run: any) => normalizeSubagentRunRow(run, []))
+  }
+
+  /** Resolve a run by its short 6-digit handle (lightweight; no transcript). */
+  getRunByHandle(handle: string): SubagentRunRow | null {
+    const row = this.statements.getSubagentRunByHandle.get(handle)
+    return row ? normalizeSubagentRunRow(row, []) : null
+  }
+
+  /** All runs spawned by a given provider tool call, with transcripts (UI viewer). */
+  listByToolCall(toolCallId: string): SubagentRunRow[] {
+    return this.statements.getSubagentRunsByToolCallId
+      .all(toolCallId)
+      .map((run: any) => normalizeSubagentRunRow(run, this.getMessages(run.id)))
+  }
+
+  /**
+   * Runs owned by a content lineage, optionally filtered by status. Lightweight
+   * (no transcript) — backs the manager's list/status, which only needs
+   * status/handle/counts. Keying on lineage_id is what isolates one branch's
+   * subagents from a parallel branch's in the same conversation.
+   */
+  listByLineage(lineageId: string, status?: SubagentRunStatus): SubagentRunRow[] {
+    const rows: any[] = status
+      ? this.statements.getSubagentRunsByLineageAndStatus.all(lineageId, status)
+      : this.statements.getSubagentRunsByLineageId.all(lineageId)
+    return rows.map(run => normalizeSubagentRunRow(run, []))
+  }
+
+  /**
+   * Compare-and-set reopen for resume: atomically transitions error|aborted ->
+   * running and bumps attempt. Returns true iff a row transitioned — false when
+   * the run is already running or completed, which is the idempotency /
+   * double-run guard the older unconditional updateRun lacked.
+   */
+  reopenRun(runId: string): boolean {
+    const now = new Date().toISOString()
+    const result = this.statements.reopenSubagentRun.run(now, runId)
+    return (result?.changes ?? 0) > 0
   }
 
   private findMessage(runId: string, messageId: string): SubagentMessageRow | null {

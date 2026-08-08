@@ -22,6 +22,7 @@ import {
   stripAttachedImagePathMetadata,
 } from '../../features/chats/attachedImagePaths'
 import { useAppDispatch } from '../../hooks/redux'
+import { truncateToolOutput as truncateToolOutputPreview } from '../../helpers/toolOutputTruncation'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import { environment, localApi } from '../../utils/api'
 import { Button } from '../Button/button'
@@ -29,6 +30,7 @@ import { EditToolDiffView } from '../EditFileDiffView/EditToolDiffView'
 import { PlanMdToolView } from '../PlanMdToolView'
 import { useHtmlIframeRegistry } from '../HtmlIframeRegistry/HtmlIframeRegistry'
 import { ImageModal } from '../ImageModal/ImageModal'
+import { SubagentToolName } from '../SubagentTranscript/SubagentTranscript'
 import { MarkdownLink } from '../MarkdownLink/MarkdownLink'
 import { McpAppIframe } from '../McpAppIframe/McpAppIframe'
 import { TextArea } from '../TextArea/TextArea'
@@ -102,6 +104,7 @@ interface ChatMessageProps {
   onAddToNote?: (text: string) => void
   onExplainFromSelection?: (id: string, newContent: string) => void
   onOpenToolHtmlModal?: (key?: string) => void
+  onOpenSubagentTranscript?: (toolCallId: string) => void
   isEditing?: boolean
   width: ChatMessageWidth
   // When true (default), message cards have colored backgrounds and left borders.
@@ -115,6 +118,8 @@ interface ChatMessageProps {
   fontSizeOffset?: number
   // Optional UX setting to group long consecutive reasoning/tool chains
   groupToolReasoningRuns?: boolean
+  // Display-only projection; canonical tool results remain complete.
+  truncateToolOutput?: boolean
   customTheme?: CustomChatTheme
   customThemeEnabled?: boolean
   isDarkMode?: boolean
@@ -647,6 +652,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
     onAddToNote: _onAddToNote,
     onExplainFromSelection,
     onOpenToolHtmlModal,
+    onOpenSubagentTranscript,
     isEditing = false,
     width = 'w-3/5',
     colored = true,
@@ -656,6 +662,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
     showInlineActions = true,
     fontSizeOffset = 0,
     groupToolReasoningRuns = false,
+    truncateToolOutput = true,
     customTheme: customThemeProp,
     customThemeEnabled: customThemeEnabledProp,
     isDarkMode: isDarkModeProp,
@@ -1565,6 +1572,21 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       </Button>
     )
 
+    // Opens the persisted subagent transcript for a tool call (Phase 5). toolCallId
+    // is the tool-call group's id, which the by-tool-call read resolves to its run.
+    const renderSubagentTranscriptButton = (toolCallId: string) => (
+      <Button
+        variant='outline2'
+        size='small'
+        onClick={() => onOpenSubagentTranscript?.(toolCallId)}
+        disabled={!onOpenSubagentTranscript}
+        title='View subagent transcript'
+      >
+        <i className='bx bx-conversation text-base' aria-hidden='true'></i>
+        <span className='ml-1'>View transcript</span>
+      </Button>
+    )
+
     const registerAndOpenMcpViewer = (
       entryKey: string,
       payload: {
@@ -1707,6 +1729,8 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         .toLowerCase()
         .replace(/[-\s]/g, '_')
       const isInternalLinkTool = normalizedToolCardName === 'internallink' || normalizedToolCardName === 'internal_link'
+      const isSubagent =
+        normalizedToolCardName === 'subagent' || normalizedToolCardName === 'subagent_manager'
 
       if (isInternalLinkTool) {
         const resultPayload = group.results.length > 0 ? group.results[group.results.length - 1].content : null
@@ -1957,6 +1981,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
         return String(value)
       }
 
+      const getGenericToolOutputPreview = (value: unknown) => {
+        const text = renderToolJsonValue(value)
+        return truncateToolOutput ? truncateToolOutputPreview(text) : { text, truncated: false, omittedCharacters: 0 }
+      }
+
       const parseToolJsonObject = (value: unknown): Record<string, any> | null => {
         if (!value) return null
         if (typeof value === 'object' && !Array.isArray(value)) return value as Record<string, any>
@@ -2061,7 +2090,11 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
           {/* Tool header row */}
           <div className='flex min-w-0 max-w-full flex-wrap items-center gap-2 overflow-hidden'>
             <button onClick={() => handleExpandToggle(toggleKey, group)} className={TOOL_HEADER_BUTTON_CLASS}>
-              <span className={toolNameClass}>{group.name || 'tool'}</span>
+              {isSubagent ? (
+                <SubagentToolName toolCallId={group.id} name={group.name || 'tool'} fallbackClass={toolNameClass} />
+              ) : (
+                <span className={toolNameClass}>{group.name || 'tool'}</span>
+              )}
               {!isExpanded && pathContent && (
                 <span
                   className='text-[0.8125em] text-neutral-500 dark:text-neutral-500 max-w-[200px] overflow-hidden whitespace-nowrap'
@@ -2095,6 +2128,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
               </button>
             )}
             {primaryHtmlResultKey && renderHtmlViewerButton(primaryHtmlResultKey)}
+            {isSubagent && renderSubagentTranscriptButton(group.id)}
           </div>
 
           {/* Expandable content */}
@@ -2172,7 +2206,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
               )}
 
               {/* Tool results */}
-              {group.results.length > 0 && (
+              {isExpanded && group.results.length > 0 && (
                 <div className='min-w-0 max-w-full space-y-2'>
                   {group.results.map((result, resultIdx) => {
                     const resultKey = `${id}-${group.id}-result-${resultIdx}`
@@ -2185,6 +2219,34 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
                           html={maybeHtml.html}
                           toolName={maybeHtml.toolName ?? group.name ?? null}
                         />
+                      )
+                    }
+
+                    const outputPreview = getGenericToolOutputPreview(result.content)
+                    if (outputPreview.truncated) {
+                      return (
+                        <div
+                          key={resultKey}
+                          className={`min-w-0 max-w-full overflow-hidden border-l-2 pl-3 py-1 font-mono text-[0.8125em] leading-relaxed [overflow-wrap:anywhere] ${
+                            result.is_error
+                              ? 'border-red-400/50 dark:border-red-600/50 text-red-600 dark:text-red-400'
+                              : 'border-neutral-300/50 dark:border-neutral-700/50 text-neutral-500 dark:text-neutral-500'
+                          }`}
+                        >
+                          <div className='mb-1 flex min-w-0 max-w-full flex-wrap items-center gap-1.5 overflow-hidden [overflow-wrap:anywhere]'>
+                            <span className='text-neutral-400 dark:text-neutral-600'>output:</span>
+                            {renderToolBadge(`result ${resultIdx + 1}`)}
+                            {renderToolBadge('truncated preview', 'warning')}
+                          </div>
+                          <div className='min-w-0 max-w-full break-words whitespace-pre-wrap text-neutral-600 dark:text-neutral-400 [overflow-wrap:anywhere]'>
+                            {outputPreview.text}
+                          </div>
+                          {!result.is_error && (
+                            <span className='text-neutral-400 dark:text-neutral-600 italic mt-1 block text-[1em] tracking-tight'>
+                              completed
+                            </span>
+                          )}
+                        </div>
                       )
                     }
 
@@ -2882,7 +2944,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
       <div
         id={`message-${id}`}
         ref={messageRef}
-        className={`group px-0 sm:px-2 md:px-2 ${styles.container} ${contextHighlightClass} ${width} ${role === 'user' ? 'mt-4 pb-4' : ''} transition-colors duration-200 rounded-md hover:bg-opacity-80 ${isCompactionSummary ? 'border border-emerald-300/50 dark:border-emerald-600/50 bg-emerald-50/40 dark:bg-emerald-900/10' : ''} ${className ?? ''}`}
+        className={`group px-0 sm:px-2 md:px-2 ${styles.container} ${contextHighlightClass} ${width} ${role === 'user' ? 'mt-4 pt-px pb-[18px] mb-[4px]' : ''} transition-colors duration-200 rounded-md hover:bg-opacity-80 ${isCompactionSummary ? 'border border-emerald-300/50 dark:border-emerald-600/50 bg-emerald-50/40 dark:bg-emerald-900/10' : ''} ${className ?? ''}`}
         style={styles.containerStyle}
         onContextMenu={handleContextMenu}
         onMouseEnter={() => setIsHovering(true)}
@@ -2901,7 +2963,7 @@ const ChatMessage: React.FC<ChatMessageProps> = React.memo(
 
         {/* Header with role */}
         {role === 'user' && (
-          <div className='inline-flex mt-0 items-center gap-2 pt-[3px] pr-2.5 bg-white/[0.03] border border-white/[0.08] rounded-md mb-3 backdrop-blur cursor-default transition-all duration-200'>
+          <div className='inline-flex mt-[2px] items-center gap-2 px-2.5 py-[3px] bg-white/[0.03] border border-white/[0.08] rounded-md mb-3 backdrop-blur cursor-default transition-all duration-200'>
             <div className='w-1 h-1 rounded-full bg-neutral-500 shadow-[0_0_8px_rgba(115,115,115,0.4)]'></div>
             <span className={`text-sm tracking-[0.1em] ${styles.role || 'text-neutral-500'}`} style={styles.roleStyle}>
               {styles.roleText}

@@ -240,6 +240,7 @@ interface HeimdallProps {
   loading?: boolean
   error?: string | null
   onNodeSelect?: (nodeId: string, path: string[]) => void
+  onOpenParallel?: (conversationId: ConversationId, messageId: MessageId, path: string[]) => void
   conversationId?: ConversationId | null
   visibleMessageId?: MessageId | null
   storageMode?: 'local' | 'cloud'
@@ -252,6 +253,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   loading = false,
   error = null,
   onNodeSelect,
+  onOpenParallel,
   conversationId,
   visibleMessageId = null,
   storageMode,
@@ -331,10 +333,10 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const [noteText, setNoteText] = useState<string>('')
   const [noteColor, setNoteColor] = useState<string | null>(null)
   const [hoveredNote, setHoveredNote] = useState<{
+    nodeId: string
     note: string
     sender: 'user' | 'assistant' | 'ex_agent'
-    x: number
-    y: number
+    fallbackPosition: { x: number; y: number }
   } | null>(null)
   const notePreviewCloseTimeoutRef = useRef<number | null>(null)
   // Store message content in ref to avoid stale closures in debounced update
@@ -719,11 +721,9 @@ export const Heimdall: React.FC<HeimdallProps> = ({
 
   const NOTE_PREVIEW_WIDTH = 320
   const NOTE_PREVIEW_MAX_HEIGHT = 280
-  const PREVIEW_HOVER_TRANSFER_GRACE_MS = 180
-  // The message preview is docked away from the cursor, so give it a longer close
-  // delay than the adjacent note preview: long enough to auto-dismiss after the
-  // pointer moves off the node, but with time to travel onto the card to scroll it.
-  const MESSAGE_PREVIEW_CLOSE_DELAY_MS = 450
+  // Hover previews dock away from their graph anchors, so allow enough time to
+  // reach the card and scroll it after leaving a node or note pill.
+  const DOCKED_PREVIEW_CLOSE_DELAY_MS = 450
 
   const getNoteBadgeMetrics = (noteText?: string) => {
     const rawNote = noteText || ''
@@ -963,7 +963,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     notePreviewCloseTimeoutRef.current = window.setTimeout(() => {
       setHoveredNote(null)
       notePreviewCloseTimeoutRef.current = null
-    }, PREVIEW_HOVER_TRANSFER_GRACE_MS)
+    }, DOCKED_PREVIEW_CLOSE_DELAY_MS)
   }, [clearNotePreviewCloseTimeout])
 
   const handleNoteBadgeClick = useCallback(
@@ -988,10 +988,13 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       const containerRect = containerRef.current?.getBoundingClientRect()
       if (!containerRect) return
       setHoveredNote({
+        nodeId: node.id,
         note,
         sender: node.sender,
-        x: event.clientX - containerRect.left,
-        y: event.clientY - containerRect.top,
+        fallbackPosition: {
+          x: event.clientX - containerRect.left,
+          y: event.clientY - containerRect.top,
+        },
       })
     },
     [clearNotePreviewCloseTimeout]
@@ -1507,6 +1510,15 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       }
     }
 
+    // A completed plain click (no drag, not the right button releasing a
+    // right-click/rectangle selection) ends right-click selection mode, so the
+    // previously right-clicked node's highlight clears once the action menu is
+    // dismissed. Pan drags never reach here with hasMovedRef.current still false,
+    // so panning after a right-click select leaves the selection untouched.
+    if (e.button !== 2 && !hasMovedRef.current && selectedNodes.length > 0) {
+      dispatch(chatSliceActions.nodesSelected([]))
+    }
+
     // Reset refs
     pointerDownPosRef.current = null
     hasMovedRef.current = false
@@ -1735,6 +1747,14 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     // This ensures all messages on the branch are included, even if filtered from tree view
     const path = buildBranchPathForMessage(flatMessages as any, nodeIdParsed)
     return path.map(id => String(id))
+  }
+
+  const handleOpenParallel = (): void => {
+    if (!onOpenParallel || !conversationId || selectedNodes.length !== 1) return
+
+    const messageId = selectedNodes[0]
+    onOpenParallel(conversationId, messageId, getPathWithDescendants(String(messageId)))
+    setShowContextMenu(false)
   }
 
   // Reset view when data changes
@@ -2568,7 +2588,13 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       setShowContextMenu(false)
     }
     const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') setShowContextMenu(false)
+      if (ev.key === 'Escape') {
+        setShowContextMenu(false)
+        // Escape has no pointerup to route through, so clear the right-click
+        // selection highlight here directly (mousedown-outside-Heimdall intentionally
+        // leaves it, since that click may be unrelated to the tree entirely).
+        dispatch(chatSliceActions.nodesSelected([]))
+      }
     }
     window.addEventListener('mousedown', onDown)
     window.addEventListener('keydown', onKey)
@@ -2576,7 +2602,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       window.removeEventListener('mousedown', onDown)
       window.removeEventListener('keydown', onKey)
     }
-  }, [showContextMenu])
+  }, [showContextMenu, dispatch])
 
   useEffect(() => {
     if (!showConversationSelector) return
@@ -2751,6 +2777,31 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const visiblePositionValues = useMemo(() => visiblePositionEntries.map(([, pos]) => pos), [visiblePositionEntries])
   const visiblePositionIdSet = useMemo(() => new Set(visiblePositionEntries.map(([id]) => id)), [visiblePositionEntries])
 
+  const getDockedPreviewLayout = (
+    anchorNodeId: string,
+    preferredWidth: number,
+    maxHeight: number,
+    fallbackPosition: { x: number; y: number }
+  ) => {
+    // Dock on the panel half opposite the graph anchor so the preview never
+    // covers the interactive node or note pill that opened it.
+    const dockMargin = 12
+    const halfWidth = dimensions.width / 2
+    const width = Math.min(preferredWidth, Math.max(220, halfWidth - dockMargin * 2))
+    const nodePos = positions[anchorNodeId]
+    const screenTx = cullingPan.x + dimensions.width / 2
+    const screenTy = cullingPan.y + 100
+    const anchorCenterX = nodePos ? (nodePos.x + offsetX) * cullingZoom + screenTx : fallbackPosition.x
+    const anchorTopY = nodePos ? (nodePos.y + offsetY) * cullingZoom + screenTy : fallbackPosition.y
+    const dockRight = anchorCenterX < halfWidth
+
+    return {
+      left: dockRight ? dimensions.width - width - dockMargin : dockMargin,
+      top: Math.max(10, Math.min(anchorTopY, dimensions.height - maxHeight - 10)),
+      width,
+    }
+  }
+
   const clearMessagePreviewCloseTimeout = useCallback(() => {
     if (messagePreviewCloseTimeoutRef.current !== null) {
       window.clearTimeout(messagePreviewCloseTimeoutRef.current)
@@ -2763,8 +2814,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
     messagePreviewCloseTimeoutRef.current = window.setTimeout(() => {
       setSelectedNode(null)
       messagePreviewCloseTimeoutRef.current = null
-    }, MESSAGE_PREVIEW_CLOSE_DELAY_MS)
-  }, [clearMessagePreviewCloseTimeout, MESSAGE_PREVIEW_CLOSE_DELAY_MS])
+    }, DOCKED_PREVIEW_CLOSE_DELAY_MS)
+  }, [clearMessagePreviewCloseTimeout])
 
   const handleNodeMouseEnter = useCallback(
     (e: React.MouseEvent<SVGElement>) => {
@@ -3057,16 +3108,6 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   const heimdallNotePillBorderColor = customThemeEnabled
     ? getThemeModeColor(customTheme.colors.heimdallNotePillBorder, isDarkMode)
     : 'rgba(0,0,0,0.18)'
-  const heimdallNodeHoverModalBackgroundColor = customThemeEnabled
-    ? getThemeModeColor(customTheme.colors.heimdallNodeHoverModalBg, isDarkMode)
-    : isDarkMode
-      ? '#262626'
-      : '#fafafa'
-  const heimdallNodeHoverModalBorderColor = customThemeEnabled
-    ? getThemeModeColor(customTheme.colors.heimdallNodeHoverModalBorder, isDarkMode)
-    : isDarkMode
-      ? '#404040'
-      : '#e7e5e4'
   const heimdallNodeHoverModalTextColor = customThemeEnabled
     ? getThemeModeColor(customTheme.colors.heimdallNodeHoverModalText, isDarkMode)
     : isDarkMode
@@ -3145,6 +3186,13 @@ export const Heimdall: React.FC<HeimdallProps> = ({
   }
   const heimdallContextMenuHeaderStyle: React.CSSProperties | undefined = customThemeEnabled
     ? { color: heimdallContextMenuMutedTextColor }
+    : undefined
+  const heimdallHoverPreviewStyle: React.CSSProperties | undefined = customThemeEnabled
+    ? {
+        backgroundColor: heimdallContextMenuBackgroundColor,
+        borderColor: heimdallContextMenuBorderColor,
+        color: heimdallContextMenuTextColor,
+      }
     : undefined
   const heimdallContextMenuDividerStyle: React.CSSProperties | undefined = customThemeEnabled
     ? { backgroundColor: heimdallContextMenuDividerColor }
@@ -4092,7 +4140,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         <button
           type='button'
           onClick={() => setSearchOpen(true)}
-          className='flex items-center gap-2 px-3 py-2 rounded-xl text-stone-800 dark:text-stone-200 shadow-[0_0px_8px_-4px_rgba(0,0,0,0.2)] dark:shadow-[0_-12px_28px_-6px_rgba(0,0,0,0.65)] hover:bg-neutral-100 dark:hover:bg-neutral-800 active:scale-95 transition'
+          className='flex items-center gap-2 rounded-[20px] border border-stone-200/55 bg-white/75 px-3 py-2 text-stone-800 shadow-[0_18px_36px_-22px_rgba(0,0,0,0.18)] backdrop-blur-2xl transition hover:bg-stone-100/80 active:scale-95 dark:border-neutral-700/55 dark:bg-neutral-900/75 dark:text-stone-200 dark:shadow-[0_30px_60px_-12px_rgba(0,0,0,0.6)] dark:hover:bg-neutral-800/80'
+          style={heimdallHoverPreviewStyle}
         >
           <i className='bx bx-search text-lg' />
           <span className='text-sm font-medium'>Search Messages</span>
@@ -4167,7 +4216,8 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           onClick={handleSearchClose}
         >
           <div
-            className='bg-white/65 dark:bg-neutral-950/65 backdrop-blur-3xl rounded-2xl shadow-xl flex flex-col max-h-[85vh] w-[95%] sm:w-[90%] max-w-6xl'
+            className='flex max-h-[85vh] w-[95%] max-w-6xl flex-col rounded-[20px] border border-stone-200/55 bg-white/75 shadow-[0_18px_36px_-22px_rgba(0,0,0,0.18)] backdrop-blur-2xl sm:w-[90%] dark:border-neutral-700/55 dark:bg-neutral-900/75 dark:shadow-[0_30px_60px_-12px_rgba(0,0,0,0.6)]'
+            style={heimdallHoverPreviewStyle}
             onClick={e => e.stopPropagation()}
             data-heimdall-wheel-exempt='true'
           >
@@ -4360,7 +4410,7 @@ export const Heimdall: React.FC<HeimdallProps> = ({
       {/* Custom context menu after selection */}
       {showContextMenu && contextMenuPos && (
         <div
-          className='absolute z-30 w-[240px] rounded-[20px] border border-stone-200/55 bg-white/75 p-1.5 shadow-[0_30px_60px_-12px_rgba(0,0,0,0.25)] backdrop-blur-2xl animate-menuEntrance dark:border-neutral-700/55 dark:bg-neutral-900/75 dark:shadow-[0_30px_60px_-12px_rgba(0,0,0,0.6)]'
+          className='absolute z-30 w-[240px] rounded-[20px] border border-stone-200/55 bg-white/75 p-1.5 shadow-[0_18px_36px_-22px_rgba(0,0,0,0.18)] backdrop-blur-2xl animate-menuEntrance dark:border-neutral-700/55 dark:bg-neutral-900/75 dark:shadow-[0_30px_60px_-12px_rgba(0,0,0,0.6)]'
           style={heimdallContextMenuStyle}
           onMouseDown={e => e.stopPropagation()}
         >
@@ -4421,6 +4471,25 @@ export const Heimdall: React.FC<HeimdallProps> = ({
               <span className='ml-auto font-mono text-[10px] tracking-[0.05em] text-stone-400 dark:text-neutral-500'>
                 N
               </span>
+            </button>
+          )}
+
+          {selectedNodes.length === 1 && onOpenParallel && (
+            <button
+              className={heimdallContextMenuItemClass}
+              style={getHeimdallContextMenuItemStyle()}
+              onClick={handleOpenParallel}
+            >
+              <svg
+                className='w-4 h-4 opacity-50 group-hover:opacity-100 transition-opacity'
+                fill='none'
+                viewBox='0 0 24 24'
+                stroke='currentColor'
+                strokeWidth={2}
+              >
+                <path d='M12 3v18m-9-9h18M5.5 5.5l4.25 4.25M18.5 5.5l-4.25 4.25M5.5 18.5l4.25-4.25M18.5 18.5l-4.25-4.25' />
+              </svg>
+              <span>Open in Parallel</span>
             </button>
           )}
 
@@ -4543,39 +4612,23 @@ export const Heimdall: React.FC<HeimdallProps> = ({
           const popupWidth = hasImage ? 800 : 320
           const popupMaxHeight = hasImage ? 600 : 450
 
-          // Dock the preview on the side of the panel OPPOSITE the hovered node so it
-          // can never sit over the node (which would block clicks). Cap the width to
-          // the node's opposite half to preserve that guarantee on narrow panels.
-          const DOCK_MARGIN = 12
-          const halfWidth = dimensions.width / 2
-          const dockWidth = Math.min(popupWidth, Math.max(220, halfWidth - DOCK_MARGIN * 2))
-          const nodePos = positions[selectedNode.id]
-          const screenTx = cullingPan.x + dimensions.width / 2
-          const screenTy = cullingPan.y + 100
-          const nodeCenterX = nodePos ? (nodePos.x + offsetX) * cullingZoom + screenTx : mousePosition.x
-          const nodeTopY = nodePos ? (nodePos.y + offsetY) * cullingZoom + screenTy : mousePosition.y
-          // Node in the left half -> dock right; node in the right half -> dock left.
-          const dockRight = nodeCenterX < halfWidth
-          const dockLeft = dockRight ? dimensions.width - dockWidth - DOCK_MARGIN : DOCK_MARGIN
-          const dockTop = Math.max(10, Math.min(nodeTopY, dimensions.height - popupMaxHeight - 10))
+          const dockedPreview = getDockedPreviewLayout(selectedNode.id, popupWidth, popupMaxHeight, mousePosition)
 
           return (
             <div
               className='pointer-events-none absolute z-20'
-              style={{ left: dockLeft, top: dockTop }}
+              style={{ left: dockedPreview.left, top: dockedPreview.top }}
             >
               <div
-                className={`pointer-events-auto p-4 rounded-lg shadow-xl no-scrollbar ${compactMode ? 'border-2' : 'border'}`}
+                className='pointer-events-auto rounded-[20px] border border-stone-200/55 bg-white/75 p-4 shadow-[0_18px_36px_-22px_rgba(0,0,0,0.18)] backdrop-blur-2xl no-scrollbar dark:border-neutral-700/55 dark:bg-neutral-900/75 dark:shadow-[0_30px_60px_-12px_rgba(0,0,0,0.6)]'
                 data-heimdall-wheel-exempt='true'
                 onMouseEnter={handleMessagePreviewEnter}
                 onMouseLeave={handleMessagePreviewLeave}
                 style={{
-                  width: `${dockWidth}px`,
+                  width: `${dockedPreview.width}px`,
                   maxHeight: `${popupMaxHeight}px`,
                   overflow: 'auto',
-                  backgroundColor: heimdallNodeHoverModalBackgroundColor,
-                  borderColor: heimdallNodeHoverModalBorderColor,
-                  color: heimdallNodeHoverModalTextColor,
+                  ...heimdallHoverPreviewStyle,
                 }}
               >
               <div className='text-sm mb-2 font-medium' style={{ color: heimdallNodeHoverModalTitleTextColor }}>
@@ -4723,29 +4776,28 @@ export const Heimdall: React.FC<HeimdallProps> = ({
         })()}
       {hoveredNote &&
         (() => {
+          const dockedPreview = getDockedPreviewLayout(
+            hoveredNote.nodeId,
+            NOTE_PREVIEW_WIDTH,
+            NOTE_PREVIEW_MAX_HEIGHT,
+            hoveredNote.fallbackPosition
+          )
+
           return (
             <div
               className='pointer-events-none absolute z-30'
-              style={{
-                left: Math.max(10, Math.min(hoveredNote.x + 10, dimensions.width - NOTE_PREVIEW_WIDTH - 10)),
-                top: Math.max(
-                  10,
-                  Math.min(hoveredNote.y + 10, dimensions.height - NOTE_PREVIEW_MAX_HEIGHT - 10)
-                ),
-              }}
+              style={{ left: dockedPreview.left, top: dockedPreview.top }}
             >
           <div
-            className='pointer-events-auto p-4 rounded-lg shadow-xl border no-scrollbar'
+            className='pointer-events-auto rounded-[20px] border border-stone-200/55 bg-white/75 p-4 shadow-[0_18px_36px_-22px_rgba(0,0,0,0.18)] backdrop-blur-2xl no-scrollbar dark:border-neutral-700/55 dark:bg-neutral-900/75 dark:shadow-[0_30px_60px_-12px_rgba(0,0,0,0.6)]'
             data-heimdall-wheel-exempt='true'
             onMouseEnter={handleNotePreviewEnter}
             onMouseLeave={handleNotePreviewLeave}
             style={{
-              width: `${NOTE_PREVIEW_WIDTH}px`,
+              width: `${dockedPreview.width}px`,
               maxHeight: `${NOTE_PREVIEW_MAX_HEIGHT}px`,
               overflow: 'auto',
-              backgroundColor: heimdallNodeHoverModalBackgroundColor,
-              borderColor: heimdallNodeHoverModalBorderColor,
-              color: heimdallNodeHoverModalTextColor,
+              ...heimdallHoverPreviewStyle,
             }}
           >
             <div className='text-sm font-medium mb-2' style={{ color: heimdallNodeHoverModalTitleTextColor }}>

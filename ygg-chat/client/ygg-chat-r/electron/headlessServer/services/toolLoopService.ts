@@ -1,5 +1,6 @@
-import type { HeadlessStreamEvent } from '../contracts/headlessApi.js'
+import type { HeadlessStreamEvent } from '../../../../../shared/headlessApi.js'
 import { MessageRepo } from '../persistence/messageRepo.js'
+import { ToolInvocationRepo } from '../persistence/toolInvocationRepo.js'
 import { TreeMessageSink, type MessageSink } from './messageSink.js'
 import type {
   ProviderGenerateInput,
@@ -10,8 +11,13 @@ import type {
 import { ProviderRouter, normalizeProviderRoute } from './providerRouter.js'
 import { persistWithFallback, type ToolResultPersistencePolicy } from './toolResultPersistenceService.js'
 import { sanitizeToolResultContentForModel } from '../providers/toolResultSanitizer.js'
-import { formatProviderErrorForAssistant, type FormattedProviderError } from '../providers/providerErrorFormatter.js'
-import { assertToolAllowedForOperationMode } from '../../../../../shared/operationModeToolPolicy.js'
+import {
+  formatProviderErrorForAssistant,
+  isTransientProviderError,
+  type FormattedProviderError,
+} from '../providers/providerErrorFormatter.js'
+import { trimHistoryToLatestCompaction } from './compactionService.js'
+import { assertToolAllowedForOperationMode, requiresAgentMode } from '../../../../../shared/operationModeToolPolicy.js'
 import {
   extractOpenAIContextUsageFromBlocks,
   openAIModelContextLength,
@@ -25,8 +31,17 @@ export interface ToolExecutionContext {
   streamId?: string | null
   rootPath?: string | null
   operationMode?: 'plan' | 'execute'
+  provider?: string
+  modelName?: string
+  autoApprove?: boolean
+  subagentReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh'
   timeoutMs?: number
   signal?: AbortSignal
+  /** Policy-aware executor used by composite tools for each nested call. */
+  nestedExecutor?: ToolExecutor
+  /** Durable execution identity of the currently executing parent tool. */
+  parentToolInvocationId?: string | null
+  lineageId?: string | null
 }
 
 export type ToolExecutor = (toolCall: ProviderToolCall, context: ToolExecutionContext) => Promise<any>
@@ -52,6 +67,7 @@ interface ToolLoopServiceDeps {
   sink?: MessageSink
   providerRouter: ProviderRouter
   executeTool?: ToolExecutor
+  toolInvocationRepo?: ToolInvocationRepo
   maxTurns?: number
   persistencePolicy?: Partial<ToolResultPersistencePolicy>
   providerTurnTimeoutMs?: number
@@ -67,6 +83,35 @@ export interface ToolLoopRobustnessOptions {
   finalizationInstruction?: string
   /** Base delay (ms) before an empty-turn retry; jitter is added on top. */
   emptyTurnRetryDelayMs?: number
+  /**
+   * Retry a provider turn on a TRANSIENT provider error (429 / 408 / 5xx /
+   * overloaded / usage-limit / timeout) before persisting the error and failing
+   * the turn. The turn counter is not advanced across retries; the error row is
+   * persisted only once retries are exhausted. Off by default (main chat opts
+   * out); subagents opt in.
+   */
+  retryProviderError?: boolean
+  /** Max provider-error retries before giving up. Default 2 (=> up to 3 total attempts). */
+  maxProviderRetries?: number
+  /** Base backoff (ms) before a provider-error retry; multiplied by attempt, plus jitter. */
+  providerRetryBackoffMs?: number
+}
+
+/**
+ * Phase 3 chat-hook adapter. Supplied only by the ChatOrchestrator (via a
+ * ChatHookSession) when hooks are enabled for the run; absent for subagents/tests,
+ * which then behave exactly as before. Implemented in chatHookService.ts.
+ */
+export interface ToolLoopHooks {
+  /** Shared accumulator the executor (Pre/Post/Failure) and the loop (Stop) both push to. */
+  hookContext: string[]
+  /**
+   * Fold the currently-accumulated hook context onto the run's base system prompt.
+   * MUST return the base unchanged (possibly null) when nothing is accumulated.
+   */
+  foldSystemPrompt(baseSystemPrompt: string | null): string | null
+  /** Stop hook: returns true to force one more turn on a would-be natural stop. */
+  runStop(params: { assistantMessage: any; streamId: string | null }): Promise<boolean>
 }
 
 export interface ToolLoopRunInput {
@@ -74,6 +119,8 @@ export interface ToolLoopRunInput {
   operation?: 'send' | 'repeat' | 'branch' | 'edit-branch'
   modelName: string
   conversationId: string
+  /** Stable content lineage. Optional so subagent and legacy callers remain unaffected. */
+  lineageId?: string | null
   assistantParentId: string | null
   history: any[]
   userContent: string
@@ -98,7 +145,15 @@ export interface ToolLoopRunInput {
   streamId?: string | null
   rootPath?: string | null
   operationMode?: 'plan' | 'execute'
+  /** Agent-mode prompt selected by the orchestrator if this run is upgraded mid-turn. */
+  agentSystemPrompt?: string | null
+  /** Server-owned prompt to switch the current Plan-mode run to Agent mode. */
+  requestOperationModeUpgrade?: (toolCall: ProviderToolCall) => Promise<boolean>
   toolTimeoutMs?: number
+  /** Parent tool-approval policy, forwarded to server-owned subagent calls. */
+  toolAutoApprove?: boolean
+  /** Reasoning effort to apply to child subagent calls. */
+  subagentReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh'
   autoCompactionEnabled?: boolean
   contextLength?: number
   compactionThresholdPercent?: number
@@ -113,8 +168,21 @@ export interface ToolLoopRunInput {
   railwaySessionId?: string | null
   /** Forwarded to openaichatgpt so commentary text can back-fill an empty final answer. */
   allowCommentaryFallbackText?: boolean
+  /**
+   * Phase 4: relay Railway free-tier SSE frames (free_generations_update /
+   * generation_limit_reached) up through the OpenRouter provider. Set only by the
+   * server-owned cloud chat path. Absent (subagents/tests/native providers) => the
+   * provider drops the frames exactly as before.
+   */
+  relayFreeTierEvents?: boolean
   /** Opt-in robustness behaviors; all default off so main-chat behavior is unchanged. */
   robustness?: ToolLoopRobustnessOptions
+  /**
+   * Opt-in chat hooks (Phase 3). When present, the loop folds accumulated hook
+   * context into each turn's system prompt and runs the Stop hook at a natural stop.
+   * Absent (subagents/tests) => no fold, no Stop hook — behavior is unchanged.
+   */
+  hooks?: ToolLoopHooks
 }
 
 export interface ToolLoopRunResult {
@@ -156,6 +224,9 @@ const DEFAULT_MAX_TURNS = 400
 const DEFAULT_PROVIDER_TURN_TIMEOUT_MS = 180_000
 const EMPTY_TURN_RETRY_BASE_MS = 600
 const EMPTY_TURN_RETRY_JITTER_MS = 400
+const DEFAULT_MAX_PROVIDER_RETRIES = 2
+const DEFAULT_PROVIDER_RETRY_BACKOFF_MS = 750
+const PROVIDER_RETRY_JITTER_MS = 400
 const DEFAULT_FINALIZATION_INSTRUCTION =
   'Summarize the tool results above and provide the final answer. Do not call tools. Be concise and complete.'
 const THINKING_WRAPPER_PATTERN = /<thinking>[\s\S]*?<\/thinking>\s*/gi
@@ -275,12 +346,38 @@ function approximateTokens(value: unknown): number {
   return Math.ceil(serialized.length / 4)
 }
 
+/**
+ * Estimate the model-visible token cost of one history message for the compaction
+ * projection. Deliberately NOT `approximateTokens(wholeRow)`: a persisted row duplicates
+ * its text across `content`, `plain_text_content`, AND `content_blocks`, carries row
+ * metadata (ids, children_ids, timestamps, note), and re-escapes the already-stringified
+ * `content_blocks` — inflating the estimate several-fold. That inflation, fed through
+ * resolveOpenAIContinuationCompaction's Math.max(reported, projected), let compaction fire
+ * while the real reported usage was still low (the ~50k early-fire). Count ONE canonical
+ * text representation per message, and skip `role:'tool'` entries whose result is already
+ * merged into the preceding assistant message's content_blocks (avoids double-counting).
+ */
+export function estimateHistoryMessageTokens(message: unknown): number {
+  if (message == null) return 0
+  if (typeof message !== 'object') return approximateTokens(message)
+  const msg = message as { role?: unknown; content?: unknown; content_blocks?: unknown }
+  // Tool-result entries are also merged into the assistant row's content_blocks — count once.
+  if (msg.role === 'tool') return 0
+  // content_blocks (when present) is the richest single representation (text + tool_use +
+  // tool_result); fall back to `content`. Take the larger so an empty blocks array does not
+  // under-count. Estimate content_blocks as its raw string (no whole-row re-escaping).
+  const blocks = msg.content_blocks
+  const fromBlocks = blocks == null ? 0 : approximateTokens(typeof blocks === 'string' ? blocks : JSON.stringify(blocks))
+  const fromContent = approximateTokens(msg.content)
+  return Math.max(fromBlocks, fromContent)
+}
+
 function projectedReplayTokens(input: ToolLoopRunInput, history: any[]): number {
   return (
     approximateTokens(input.systemPrompt) +
     approximateTokens(input.conversationContext) +
     approximateTokens(input.projectContext) +
-    history.reduce((total, message) => total + approximateTokens(message), 0)
+    history.reduce((total, message) => total + estimateHistoryMessageTokens(message), 0)
   )
 }
 
@@ -303,13 +400,18 @@ function getToolResultModelContent(result: any): any {
   return getToolResultPersistedContent(result)
 }
 
-function toToolResultContent(result: any): string {
+export function toToolResultContent(result: any): string {
   const persistedContent = getToolResultPersistedContent(result)
   if (typeof persistedContent === 'string') return persistedContent
   try {
-    return JSON.stringify(persistedContent)
+    // Coalesce undefined -> null so this always returns a string (JSON.stringify(undefined)
+    // is the JS value `undefined`, not "null"). Mirrors the renderer's
+    // serializeToolResultContent(getToolResultPersistedContent(result)) which does
+    // JSON.stringify(content ?? null) — keeps the persisted tool_result block AND the
+    // PostToolUse hook payload's tool_result identical across renderer/server.
+    return JSON.stringify(persistedContent ?? null)
   } catch {
-    return String(persistedContent)
+    return String(persistedContent ?? null)
   }
 }
 
@@ -374,6 +476,7 @@ export class ToolLoopService {
   private readonly sink: MessageSink
   private readonly providerRouter: ProviderRouter
   private readonly executeTool?: ToolExecutor
+  private readonly toolInvocationRepo?: ToolInvocationRepo
   private readonly maxTurns: number
   private readonly persistencePolicy?: Partial<ToolResultPersistencePolicy>
   private readonly providerTurnTimeoutMs: number
@@ -389,6 +492,7 @@ export class ToolLoopService {
     }
     this.providerRouter = deps.providerRouter
     this.executeTool = deps.executeTool
+    this.toolInvocationRepo = deps.toolInvocationRepo
     this.maxTurns = Math.max(1, deps.maxTurns ?? DEFAULT_MAX_TURNS)
     this.persistencePolicy = deps.persistencePolicy
     this.providerTurnTimeoutMs = Math.max(5_000, deps.providerTurnTimeoutMs ?? DEFAULT_PROVIDER_TURN_TIMEOUT_MS)
@@ -410,12 +514,17 @@ export class ToolLoopService {
     maxTurns: number
     disableTools: boolean
     emit: (event: HeadlessStreamEvent) => void
+    /**
+     * Per-turn system prompt (Phase 3 hook fold). When provided (even null), it
+     * replaces input.systemPrompt for this turn. Absent => input.systemPrompt as before.
+     */
+    systemPromptOverride?: string | null
   }): Promise<ProviderGenerateOutput> {
     const { input, emit, turn, maxTurns } = params
     const providerRoute = normalizeProviderRoute(input.provider)
     const providerInput: ProviderGenerateInput = {
       modelName: input.modelName,
-      systemPrompt: input.systemPrompt ?? null,
+      systemPrompt: params.systemPromptOverride !== undefined ? params.systemPromptOverride : (input.systemPrompt ?? null),
       history: params.history,
       userContent: params.userContent,
       userId: input.userId ?? null,
@@ -440,6 +549,7 @@ export class ToolLoopService {
               executionMode: input.executionMode,
               isBranch: input.isBranch,
               storageMode: 'local',
+              relayFreeTierEvents: input.relayFreeTierEvents ?? false,
               isElectron: input.isElectron ?? true,
               imageConfig: input.imageConfig,
               reasoningConfig: input.reasoningConfig,
@@ -452,72 +562,100 @@ export class ToolLoopService {
           : null,
     }
 
-    let streamedTextDuringTurn = false
-    let streamedReasoningDuringTurn = false
-    let output: ProviderGenerateOutput
-    try {
-      output = await withTimeoutAndAbort(
-        this.providerRouter.generate(input.provider, providerInput, event => {
-          if (event?.type === 'chunk' && event.part === 'text' && typeof event.delta === 'string' && event.delta.length > 0) {
-            streamedTextDuringTurn = true
+    const maxProviderRetries = input.robustness?.retryProviderError
+      ? Math.max(0, input.robustness.maxProviderRetries ?? DEFAULT_MAX_PROVIDER_RETRIES)
+      : 0
+
+    // Attempt loop for TRANSIENT provider errors (opt-in via robustness). On a
+    // retryable failure we back off and re-issue the SAME turn — WITHOUT persisting
+    // an error row and WITHOUT advancing the turn counter. The error is persisted
+    // and thrown only once retries are exhausted (or immediately when disabled /
+    // the error is not transient). for(;;) exits only via return or throw.
+    for (let attempt = 1; ; attempt++) {
+      let streamedTextDuringTurn = false
+      let streamedReasoningDuringTurn = false
+      let output: ProviderGenerateOutput
+      try {
+        output = await withTimeoutAndAbort(
+          this.providerRouter.generate(input.provider, providerInput, event => {
+            if (event?.type === 'chunk' && event.part === 'text' && typeof event.delta === 'string' && event.delta.length > 0) {
+              streamedTextDuringTurn = true
+            }
+            if (
+              event?.type === 'chunk' &&
+              event.part === 'reasoning' &&
+              typeof event.delta === 'string' &&
+              event.delta.length > 0
+            ) {
+              streamedReasoningDuringTurn = true
+            }
+            emit(event)
+          }),
+          this.providerTurnTimeoutMs,
+          `Provider turn ${turn}/${maxTurns}`,
+          input.signal
+        )
+      } catch (error) {
+        // Cancellation is not a provider failure; propagate it so the run aborts cleanly.
+        if (input.signal?.aborted || isAbortError(error)) {
+          throw error
+        }
+
+        // Transient failure with retries left: back off and try the same turn again.
+        // Deferred persistence — nothing is written until retries are exhausted.
+        if (attempt <= maxProviderRetries && isTransientProviderError(error)) {
+          emit({
+            type: 'tool_loop',
+            status: 'provider_retry',
+            turn,
+            maxTurns,
+            attempt,
+            maxAttempts: maxProviderRetries,
+          })
+          const base = input.robustness?.providerRetryBackoffMs ?? DEFAULT_PROVIDER_RETRY_BACKOFF_MS
+          // Rejects with AbortError if the run is cancelled mid-backoff -> propagates.
+          await abortAwareSleep(base * attempt + Math.floor(Math.random() * PROVIDER_RETRY_JITTER_MS), input.signal)
+          continue
+        }
+
+        const providerError = formatProviderErrorForAssistant(error, {
+          provider: input.provider,
+          modelName: input.modelName,
+        })
+
+        if (providerError) {
+          const assistantMessage = this.sink.persistAssistantMessage({
+            conversationId: input.conversationId,
+            parentId: params.parentId,
+            content: providerError.message,
+            modelName: input.modelName,
+            contentBlocks: [{ type: 'text', content: providerError.message }],
+          })
+
+          if (!streamedTextDuringTurn) {
+            emit({ type: 'chunk', part: 'text', delta: providerError.message })
           }
-          if (
-            event?.type === 'chunk' &&
-            event.part === 'reasoning' &&
-            typeof event.delta === 'string' &&
-            event.delta.length > 0
-          ) {
-            streamedReasoningDuringTurn = true
-          }
-          emit(event)
-        }),
-        this.providerTurnTimeoutMs,
-        `Provider turn ${turn}/${maxTurns}`,
-        input.signal
-      )
-    } catch (error) {
-      // Cancellation is not a provider failure; propagate it so the run aborts cleanly.
-      if (input.signal?.aborted || isAbortError(error)) {
+          emit({ type: 'assistant_message_persisted', message: assistantMessage })
+          throw new ProviderErrorAssistantResponse({ assistantMessage, providerError, turnsUsed: turn })
+        }
+
+        const message = error instanceof Error ? error.message : String(error)
+        emit({ type: 'error', error: `Continuation generation failed on turn ${turn}/${maxTurns}: ${message}` })
         throw error
       }
 
-      const providerError = formatProviderErrorForAssistant(error, {
-        provider: input.provider,
-        modelName: input.modelName,
-      })
-
-      if (providerError) {
-        const assistantMessage = this.sink.persistAssistantMessage({
-          conversationId: input.conversationId,
-          parentId: params.parentId,
-          content: providerError.message,
-          modelName: input.modelName,
-          contentBlocks: [{ type: 'text', content: providerError.message }],
-        })
-
-        if (!streamedTextDuringTurn) {
-          emit({ type: 'chunk', part: 'text', delta: providerError.message })
-        }
-        emit({ type: 'assistant_message_persisted', message: assistantMessage })
-        throw new ProviderErrorAssistantResponse({ assistantMessage, providerError, turnsUsed: turn })
+      if (output.contextUsage) {
+        emit({ type: 'context_usage', usage: output.contextUsage })
+      }
+      if (output.reasoning && !streamedReasoningDuringTurn) {
+        emit({ type: 'chunk', part: 'reasoning', delta: output.reasoning })
+      }
+      if (output.content && !streamedTextDuringTurn) {
+        emit({ type: 'chunk', part: 'text', delta: output.content })
       }
 
-      const message = error instanceof Error ? error.message : String(error)
-      emit({ type: 'error', error: `Continuation generation failed on turn ${turn}/${maxTurns}: ${message}` })
-      throw error
+      return output
     }
-
-    if (output.contextUsage) {
-      emit({ type: 'context_usage', usage: output.contextUsage })
-    }
-    if (output.reasoning && !streamedReasoningDuringTurn) {
-      emit({ type: 'chunk', part: 'reasoning', delta: output.reasoning })
-    }
-    if (output.content && !streamedTextDuringTurn) {
-      emit({ type: 'chunk', part: 'text', delta: output.content })
-    }
-
-    return output
   }
 
   /**
@@ -561,6 +699,8 @@ export class ToolLoopService {
       contentBlocks,
       contextUsage: output.contextUsage,
       thinkingBlock: output.reasoning ?? null,
+      // Phase 4: adopt Railway's id on the cloud path (see the main-turn persist site).
+      providerMessageId: output.raw && typeof output.raw.id === 'string' ? output.raw.id : null,
     })
     emit({ type: 'assistant_message_persisted', message: assistantMessage })
 
@@ -585,12 +725,32 @@ export class ToolLoopService {
     const robustness = input.robustness
     let currentParentId = input.assistantParentId
     let currentUserContent = input.userContent
-    let history = [...(input.history || [])]
+    // Defend the provider boundary for direct callers as well as ChatOrchestrator.
+    // Persistence retains the full branch; model replay begins at its latest summary.
+    let history = trimHistoryToLatestCompaction(input.history || [])
     let lastAssistantMessage: any = null
     let anyToolsExecuted = false
+    let activeOperationMode = input.operationMode ?? 'execute'
+    // Phase 3: true iff the most recent iteration was a natural stop (no tool calls)
+    // that a Stop hook forced to continue. Used only at the max-turns boundary to
+    // finalize gracefully with the valid persisted answer (parity with the renderer,
+    // which exits its while loop at MAX_TURNS and completes) instead of hard-erroring.
+    let stopHookForcedContinue = false
 
     for (let turn = 1; turn <= maxTurns; turn++) {
       input.signal?.throwIfAborted()
+      stopHookForcedContinue = false
+
+      // Phase 3: fold accumulated hook context into this turn's system prompt, then
+      // clear the buffer (parity with the renderer's per-iteration fold+clear,
+      // chatActions.ts:3217-3225). `undefined` => no hooks => provider gets
+      // input.systemPrompt unchanged.
+      let turnSystemPromptOverride: string | null | undefined
+      if (input.hooks) {
+        turnSystemPromptOverride = input.hooks.foldSystemPrompt(input.systemPrompt ?? null)
+        input.hooks.hookContext.length = 0
+      }
+
       emit({
         type: 'tool_loop',
         status: 'turn_started',
@@ -608,6 +768,7 @@ export class ToolLoopService {
         maxTurns,
         disableTools: false,
         emit,
+        systemPromptOverride: turnSystemPromptOverride,
       })
 
       if (robustness?.retryEmptyTurn && isEmptyTurnOutput(output)) {
@@ -623,6 +784,7 @@ export class ToolLoopService {
           maxTurns,
           disableTools: false,
           emit,
+          systemPromptOverride: turnSystemPromptOverride,
         })
       }
 
@@ -644,6 +806,10 @@ export class ToolLoopService {
         contentBlocks: assistantContentBlocks,
         contextUsage: output.contextUsage,
         thinkingBlock: output.reasoning ?? null,
+        // Phase 4: Railway's authoritative message id (when the provider surfaced a
+        // complete frame). Only CloudMirrorSink adopts it; TreeMessageSink ignores it,
+        // and it is null for native providers / streamed-only frames => mint parity.
+        providerMessageId: output.raw && typeof output.raw.id === 'string' ? output.raw.id : null,
       })
 
       lastAssistantMessage = assistantMessage
@@ -652,6 +818,25 @@ export class ToolLoopService {
       emit({ type: 'assistant_message_persisted', message: assistantMessage })
 
       if (!assistantToolCalls.length) {
+        // Phase 3 Stop hook (parity with the renderer's shouldContinueFromStopHook,
+        // chatActions.ts:3567-3587): on a would-be natural stop, a configured Stop hook
+        // may force one more turn. Reuses the existing for-loop — no parallel loop. The
+        // just-persisted assistantMessage is already in history; continuing injects an
+        // empty user turn parented on it, exactly like the renderer. No-op without hooks.
+        if (input.hooks) {
+          const forceContinue = await input.hooks.runStop({
+            assistantMessage,
+            streamId: input.streamId ?? null,
+          })
+          if (forceContinue) {
+            emit({ type: 'tool_loop', status: 'turn_completed', turn, maxTurns, continued: true })
+            currentParentId = assistantMessage.id
+            currentUserContent = ''
+            stopHookForcedContinue = true
+            continue
+          }
+        }
+
         const strippedText = stripThinkingWrapper(output.content || '')
 
         // Tools ran but the model gave no visible answer: recover with a summary turn.
@@ -714,10 +899,26 @@ export class ToolLoopService {
       for (const toolCall of assistantToolCalls) {
         input.signal?.throwIfAborted()
         emit({ type: 'chunk', part: 'tool_call', toolCall })
+
+        // Invocation lifecycle persistence is strict at create time: executing without
+        // an ownership record would violate durability. It is enabled only when a
+        // stable content lineage is available, preserving subagent/legacy behavior.
+        const invocation = input.lineageId && this.toolInvocationRepo
+          ? this.toolInvocationRepo.create({
+              conversationId: input.conversationId,
+              lineageId: input.lineageId,
+              runId: input.streamId ?? null,
+              toolCallId: toolCall.id,
+              assistantMessageId: assistantMessage.id,
+              toolName: toolCall.name,
+            })
+          : null
         emit({
           type: 'tool_execution',
           status: 'started',
           toolCallId: toolCall.id,
+          toolInvocationId: invocation?.id,
+          lineageId: input.lineageId ?? null,
           toolName: toolCall.name,
         })
 
@@ -727,43 +928,129 @@ export class ToolLoopService {
         const startedAt = Date.now()
 
         try {
-          const operationMode = input.operationMode ?? 'execute'
-          assertToolAllowedForOperationMode(toolCall, operationMode)
+          if (requiresAgentMode(toolCall, activeOperationMode)) {
+            const upgraded = await input.requestOperationModeUpgrade?.(toolCall)
+            if (!upgraded) {
+              // The user declined, OR no upgrade handler is wired at all (subagents
+              // never wire one, and chatOrchestrator only does when a decisionBroker
+              // and streamId exist). Either way: the tool must NOT run, and the run
+              // must STAY in plan mode.
+              //
+              // assertToolAllowedForOperationMode alone is NOT sufficient here — it
+              // throws only for CHAT_MODE_BLOCKED_TOOL_NAMES and `mcp__*`, whereas
+              // requiresAgentMode is true for anything outside the plan allow list.
+              // A tool in neither set (html_renderer, theme_manager, any custom tool)
+              // used to fall straight through: it executed AND promoted
+              // activeOperationMode to 'execute' for the remainder of the run, with no
+              // user consent and no event emitted. Assert first so blocked/mcp tools
+              // keep their specific message, then fail closed for everything else.
+              assertToolAllowedForOperationMode(toolCall, activeOperationMode)
+              throw new Error(
+                `Tool "${toolCall.name}" is not available in Chat Mode. Switch to Agent Mode to run tools that can modify files, system state, or app state.`
+              )
+            }
+            activeOperationMode = 'execute'
+            input.systemPrompt = input.agentSystemPrompt ?? input.systemPrompt
+          }
+          assertToolAllowedForOperationMode(toolCall, activeOperationMode)
+
+          const executeNested: ToolExecutor = async (nestedCall, nestedContext) => {
+            const nestedInvocation = input.lineageId && this.toolInvocationRepo
+              ? this.toolInvocationRepo.create({
+                  conversationId: input.conversationId,
+                  lineageId: input.lineageId,
+                  runId: input.streamId ?? null,
+                  parentToolInvocationId: nestedContext.parentToolInvocationId ?? invocation?.id ?? null,
+                  toolCallId: nestedCall.id,
+                  assistantMessageId: assistantMessage.id,
+                  toolName: nestedCall.name,
+                })
+              : null
+            const nestedStartedAt = Date.now()
+            emit({ type: 'tool_execution', status: 'started', toolCallId: nestedCall.id, toolInvocationId: nestedInvocation?.id, lineageId: input.lineageId ?? null, toolName: nestedCall.name })
+            try {
+              const nestedResult = await this.executeTool!(nestedCall, {
+                ...nestedContext,
+                parentToolInvocationId: nestedInvocation?.id ?? nestedContext.parentToolInvocationId ?? null,
+                lineageId: input.lineageId ?? null,
+                nestedExecutor: executeNested,
+              })
+              nestedInvocation && this.toolInvocationRepo?.finish(nestedInvocation.id, { status: 'completed' })
+              emit({ type: 'tool_execution', status: 'completed', toolCallId: nestedCall.id, toolInvocationId: nestedInvocation?.id, lineageId: input.lineageId ?? null, toolName: nestedCall.name, durationMs: Math.max(0, Date.now() - nestedStartedAt) })
+              return nestedResult
+            } catch (error) {
+              const aborted = nestedContext.signal?.aborted || isAbortError(error)
+              const errorText = aborted ? 'Tool execution aborted' : error instanceof Error ? error.message : String(error)
+              nestedInvocation && this.toolInvocationRepo?.finish(nestedInvocation.id, { status: aborted ? 'aborted' : 'failed', error: errorText })
+              emit({ type: 'tool_execution', status: aborted ? 'aborted' : 'failed', toolCallId: nestedCall.id, toolInvocationId: nestedInvocation?.id, lineageId: input.lineageId ?? null, toolName: nestedCall.name, durationMs: Math.max(0, Date.now() - nestedStartedAt), error: errorText })
+              throw error
+            }
+          }
 
           const result = await this.executeTool(toolCall, {
             conversationId: input.conversationId,
             messageId: assistantMessage.id,
             streamId: input.streamId ?? null,
             rootPath: input.rootPath ?? null,
-            operationMode,
+            operationMode: activeOperationMode,
+            provider: input.provider,
+            modelName: input.modelName,
+            autoApprove: input.toolAutoApprove !== false,
+            subagentReasoningEffort: input.subagentReasoningEffort,
             timeoutMs: input.toolTimeoutMs,
             signal: input.signal,
+            parentToolInvocationId: invocation?.id ?? null,
+            lineageId: input.lineageId ?? null,
+            nestedExecutor: executeNested,
           })
 
           toolResultContent = toToolResultContent(result)
           modelToolResultContent = getToolResultModelContent(result)
           toolError = false
 
+          invocation && this.toolInvocationRepo?.finish(invocation.id, { status: 'completed' })
           emit({
             type: 'tool_execution',
             status: 'completed',
             toolCallId: toolCall.id,
+            toolInvocationId: invocation?.id,
+            lineageId: input.lineageId ?? null,
             toolName: toolCall.name,
             durationMs: Math.max(0, Date.now() - startedAt),
           })
         } catch (error) {
-          // A cancelled tool means the whole run is aborting; propagate.
+          // A cancelled tool means the whole run is aborting; close ownership first.
           if (input.signal?.aborted || isAbortError(error)) {
+            invocation && this.toolInvocationRepo?.finish(invocation.id, {
+              status: 'aborted',
+              error: 'Tool execution aborted',
+            })
+            emit({
+              type: 'tool_execution',
+              status: 'aborted',
+              toolCallId: toolCall.id,
+              toolInvocationId: invocation?.id,
+              lineageId: input.lineageId ?? null,
+              toolName: toolCall.name,
+              durationMs: Math.max(0, Date.now() - startedAt),
+              error: 'Tool execution aborted',
+            })
             throw error
           }
           toolError = true
           toolResultContent = error instanceof Error ? error.message : String(error)
           modelToolResultContent = toolResultContent
 
+          invocation && this.toolInvocationRepo?.finish(invocation.id, {
+            status: 'failed',
+            error: toolResultContent,
+          })
           emit({
             type: 'tool_execution',
             status: 'failed',
             toolCallId: toolCall.id,
+            toolInvocationId: invocation?.id,
+            lineageId: input.lineageId ?? null,
             toolName: toolCall.name,
             durationMs: Math.max(0, Date.now() - startedAt),
             error: toolResultContent,
@@ -836,6 +1123,13 @@ export class ToolLoopService {
         const assistantForContinuation = persistResult.result ?? inMemoryAssistant
         lastAssistantMessage = assistantForContinuation
         history[assistantHistoryIndex] = assistantForContinuation
+
+        // Re-emit the merged assistant row (now carrying tool_result blocks) so SSE
+        // clients can update the intermediate turn's message in place. The initial
+        // assistant_message_persisted at :652 fired BEFORE tools ran, so without this
+        // a thin client renders the turn without its tool results until a DB reload.
+        // Clients that ignore this event (subagent transcript, mobile UI) are unaffected.
+        emit({ type: 'assistant_message_persisted', message: assistantForContinuation })
       }
 
       // Continue the loop even when all tool calls fail. Before issuing the next
@@ -924,6 +1218,20 @@ export class ToolLoopService {
       maxTurns,
       continued: false,
     })
+
+    // Phase 3: if a Stop hook forced continuation past the turn cap, the last turn was
+    // a valid natural stop (no pending tool calls) already persisted. Finalize with it
+    // instead of throwing — parity with the renderer, which exits its `while (turnCount
+    // < MAX_TURNS)` loop and completes with the last message rather than erroring. The
+    // tool-driven max-turns case (marker false) still falls through to the throw below,
+    // where the "without a final assistant response without tool calls" wording is accurate.
+    if (stopHookForcedContinue && lastAssistantMessage) {
+      return {
+        finalAssistantMessage: lastAssistantMessage,
+        turnsUsed: maxTurns,
+        anyToolsExecuted,
+      }
+    }
 
     // Recover a silent max-turns exhaustion with a summary turn when enabled.
     if (robustness?.finalizeOnSilentToolEnd && anyToolsExecuted && lastAssistantMessage) {

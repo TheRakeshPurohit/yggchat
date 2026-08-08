@@ -9,6 +9,8 @@ import {
   ChatState,
   ImageDraft,
   ImageDraftTarget,
+  LineageId,
+  LineageSelectionPayload,
   Message,
   MessageInput,
   OperationMode,
@@ -19,9 +21,11 @@ import {
   StreamState,
   StreamUndoSummary,
   ToolCallPermissionRequest,
+  OperationModeUpgradeRequest,
   UserSystemPrompt,
 } from './chatTypes'
 import { createEmptyStreamState, DEFAULT_STREAM_ID } from './streamHelpers'
+import { buildPathToConversationMessage } from './conversationTree'
 import toolDefinitions, { ToolDefinition } from './toolDefinitions'
 
 // Helper to deep clone tool definitions for mutable Redux state
@@ -199,6 +203,8 @@ const makeInitialState = (): ChatState => {
     },
     conversation: {
       currentConversationId: null,
+      currentLineageId: null,
+      snapshotConversationId: null,
       focusedChatMessageId: null,
       currentPath: [],
       messages: [],
@@ -228,10 +234,10 @@ const makeInitialState = (): ChatState => {
     },
     tools: cloneTools(toolDefinitions),
     toolCallPermissionRequest: null,
+    operationModeUpgradeRequest: null,
     planClarificationRequest: null,
     toolAutoApprove: false,
     operationMode: 'plan',
-    ccSlashCommands: [],
     freeTier: {
       freeGenerationsRemaining: null,
       showLimitModal: false,
@@ -747,6 +753,7 @@ export const chatSlice = createSlice({
       state,
       action: PayloadAction<{
         streamId: string
+        lineageId?: LineageId | null
         targetParentId?: MessageId | null
         originMessageId?: MessageId | null
         rootMessageId?: MessageId | null
@@ -757,6 +764,7 @@ export const chatSlice = createSlice({
     ) => {
       const {
         streamId,
+        lineageId,
         targetParentId,
         originMessageId,
         rootMessageId,
@@ -766,6 +774,35 @@ export const chatSlice = createSlice({
       } = action.payload
       const stream = state.streaming.byId[streamId]
       if (stream) {
+        if (lineageId !== undefined) {
+          const previousStreamLineageId = stream.lineage.lineageId
+          const currentPathIds = new Set(state.conversation.currentPath.map(id => String(id)))
+          const streamBelongsToCurrentPath =
+            currentPathIds.size === 0 ||
+            [
+              stream.lineage.rootMessageId,
+              stream.lineage.originMessageId,
+              stream.branchAnchorMessageId,
+              stream.currentBranchAnchorMessageId,
+            ].some(id => id != null && currentPathIds.has(String(id)))
+          const streamOwnsSelection = state.conversation.currentLineageId != null
+            ? previousStreamLineageId != null &&
+              String(previousStreamLineageId) === String(state.conversation.currentLineageId)
+            : streamBelongsToCurrentPath
+
+          stream.lineage.lineageId = lineageId ?? undefined
+          if (
+            lineageId &&
+            stream.conversationId === state.conversation.currentConversationId &&
+            streamOwnsSelection
+          ) {
+            // A stream may continue in the background after the user selects another
+            // branch. Keep its exact identity stream-local unless it still represents
+            // the selected lineage/path; otherwise a late event can pair lineage C with
+            // a source message on B and make a valid fork fail server membership checks.
+            state.conversation.currentLineageId = lineageId
+          }
+        }
         if (originMessageId !== undefined) {
           stream.lineage.originMessageId = originMessageId ?? undefined
         }
@@ -846,13 +883,52 @@ export const chatSlice = createSlice({
     },
 
     conversationSet: (state, action: PayloadAction<ConversationId>) => {
-      state.conversation.currentConversationId = action.payload
+      const nextConversationId = action.payload
+      const conversationChanged =
+        state.conversation.currentConversationId != null &&
+        String(state.conversation.currentConversationId) !== String(nextConversationId)
+      if (
+        state.conversation.snapshotConversationId != null &&
+        String(state.conversation.snapshotConversationId) !== String(nextConversationId)
+      ) {
+        state.conversation.messages = []
+        state.conversation.snapshotConversationId = null
+        state.heimdall.treeData = null
+        state.heimdall.subagentMap = {}
+      }
+      if (conversationChanged) {
+        state.conversation.currentLineageId = null
+        state.conversation.currentPath = []
+        state.conversation.focusedChatMessageId = null
+      }
+      state.conversation.currentConversationId = nextConversationId
+    },
+
+    // Select conversation, exact lineage, visible path, and focus as one render-safe transition.
+    lineageSelected: (state, action: PayloadAction<LineageSelectionPayload>) => {
+      const { conversationId, lineageId, path, focus } = action.payload
+      if (
+        state.conversation.snapshotConversationId != null &&
+        String(state.conversation.snapshotConversationId) !== String(conversationId)
+      ) {
+        state.conversation.messages = []
+        state.conversation.snapshotConversationId = null
+        state.heimdall.treeData = null
+        state.heimdall.subagentMap = {}
+      }
+      state.conversation.currentConversationId = conversationId
+      state.conversation.currentLineageId = lineageId
+      state.conversation.currentPath = path
+      state.conversation.focusedChatMessageId = focus
     },
 
     conversationCleared: state => {
       state.conversation.currentConversationId = null
+      state.conversation.currentLineageId = null
+      state.conversation.snapshotConversationId = null
       state.conversation.messages = []
       state.conversation.currentPath = []
+      state.conversation.focusedChatMessageId = null
       state.conversation.ccCwd = ''
     },
 
@@ -936,6 +1012,7 @@ export const chatSlice = createSlice({
 
       // If the conversation becomes empty, clear the currentPath to avoid stale selection
       if (!state.conversation.messages || state.conversation.messages.length === 0) {
+        state.conversation.currentLineageId = null
         state.conversation.currentPath = []
       } else {
         const validIds = new Set(state.conversation.messages.map(m => m.id))
@@ -943,9 +1020,43 @@ export const chatSlice = createSlice({
 
         // Only update if the path actually changed (to avoid unnecessary re-renders)
         if (cleanedPath.length !== state.conversation.currentPath.length) {
+          state.conversation.currentLineageId = null
           state.conversation.currentPath = cleanedPath
         }
       }
+    },
+
+    conversationSnapshotApplied: (
+      state,
+      action: PayloadAction<{
+        conversationId: ConversationId
+        messages: Message[]
+        tree: ChatState['heimdall']['treeData']
+      }>
+    ) => {
+      if (String(state.conversation.currentConversationId ?? '') !== String(action.payload.conversationId)) return
+
+      const existingArtifactsById = new Map<string, string[]>()
+      for (const message of state.conversation.messages) {
+        if (message.artifacts?.length) existingArtifactsById.set(String(message.id), message.artifacts)
+      }
+      state.conversation.snapshotConversationId = action.payload.conversationId
+      state.conversation.messages = action.payload.messages.map(message => {
+        if (message.artifacts?.length) return message
+        const attachmentMeta = message as Message & { has_attachments?: boolean; attachments_count?: number }
+        if (attachmentMeta.has_attachments === false || attachmentMeta.attachments_count === 0) return message
+        const artifacts = existingArtifactsById.get(String(message.id))
+        return artifacts?.length ? { ...message, artifacts } : message
+      })
+
+      const previousTip = state.conversation.currentPath.at(-1)
+      state.conversation.currentPath = previousTip == null
+        ? []
+        : buildPathToConversationMessage(state.conversation.messages, String(previousTip))
+      state.heimdall.treeData = action.payload.tree
+      state.heimdall.subagentMap = {}
+      state.heimdall.loading = false
+      state.heimdall.error = null
     },
 
     // Branching support
@@ -998,12 +1109,14 @@ export const chatSlice = createSlice({
         newMessage.role === 'user' || state.conversation.currentPath.length === 0 || currentTip === newMessage.parent_id
 
       if (shouldSwitch) {
+        state.conversation.currentLineageId = null
         state.conversation.currentPath = buildPathToMessage(newMessage.id)
       }
     },
 
     // Set current path for navigation through branches
     conversationPathSet: (state, action: PayloadAction<MessageId[]>) => {
+      state.conversation.currentLineageId = null
       state.conversation.currentPath = action.payload
     },
 
@@ -1014,16 +1127,10 @@ export const chatSlice = createSlice({
         .filter(id => id !== 'empty' && id !== '' && id !== 'root') // Filter out empty/default/synthetic root nodes
         .map(id => parseId(id))
         .filter(id => (typeof id === 'number' && !isNaN(id)) || typeof id === 'string') // Filter out invalid IDs
+      state.conversation.currentLineageId = null
       state.conversation.currentPath = parsedPath
     },
 
-    // Update Claude Code session info
-    ccSessionUpdated: (
-      state,
-      action: PayloadAction<{ sessionId: string; lastMessageAt: string; messageCount: number; cwd: string }>
-    ) => {
-      state.conversation.ccSession = action.payload
-    },
     ccCwdSet: (state, action: PayloadAction<string>) => {
       state.conversation.ccCwd = action.payload
     },
@@ -1055,6 +1162,14 @@ export const chatSlice = createSlice({
     initializationCompleted: (state, action: PayloadAction<{ userId: string; conversationId: ConversationId }>) => {
       state.initialization.loading = false
       state.initialization.userId = action.payload.userId
+      if (
+        state.conversation.currentConversationId != null &&
+        String(state.conversation.currentConversationId) !== String(action.payload.conversationId)
+      ) {
+        state.conversation.currentLineageId = null
+        state.conversation.currentPath = []
+        state.conversation.focusedChatMessageId = null
+      }
       state.conversation.currentConversationId = action.payload.conversationId
     },
     initializationError: (state, action: PayloadAction<string>) => {
@@ -1172,6 +1287,14 @@ export const chatSlice = createSlice({
       state.toolCallPermissionRequest = null
     },
 
+    operationModeUpgradeRequested: (state, action: PayloadAction<OperationModeUpgradeRequest>) => {
+      state.operationModeUpgradeRequest = action.payload
+    },
+
+    operationModeUpgradeResponded: state => {
+      state.operationModeUpgradeRequest = null
+    },
+
     planClarificationRequested: (state, action: PayloadAction<import('./planToolTypes').PlanClarificationRequest>) => {
       state.planClarificationRequest = action.payload
     },
@@ -1198,15 +1321,6 @@ export const chatSlice = createSlice({
 
     operationModeToggled: state => {
       state.operationMode = state.operationMode === 'plan' ? 'execute' : 'plan'
-    },
-
-    // CC Slash Commands
-    ccSlashCommandsLoaded: (state, action: PayloadAction<string[]>) => {
-      state.ccSlashCommands = action.payload
-    },
-
-    ccSlashCommandsCleared: state => {
-      state.ccSlashCommands = []
     },
 
     /* Free tier reducers */

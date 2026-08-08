@@ -1,5 +1,6 @@
 import type { OpenAIContextUsage } from '../../../../../shared/contextUsage.js'
 import type { MessageRepo } from '../persistence/messageRepo.js'
+import type { LineageRepo } from '../persistence/lineageRepo.js'
 import type { ProviderToolCall } from '../providers/openRouterProvider.js'
 
 /**
@@ -25,6 +26,18 @@ export interface AssistantMessageDraft {
    * transcript sinks persist it so the subagent viewer can show it.
    */
   thinkingBlock?: string | null
+  /**
+   * Phase 4: the Railway-authoritative message id, when the provider surfaced one.
+   * ONLY CloudMirrorSink adopts it (so the local row shares Railway's id); every
+   * other sink ignores it, and it is null off the cloud path.
+   */
+  providerMessageId?: string | null
+}
+
+const runMessageTransaction = <T>(messageRepo: MessageRepo, operation: () => T): T => {
+  const transaction = (messageRepo as MessageRepo & { transaction?: <R>(callback: () => R) => R }).transaction
+  // Function.prototype.call does not preserve the generic, so annotate the call site.
+  return typeof transaction === 'function' ? transaction.call<unknown, [() => T], T>(messageRepo, operation) : operation()
 }
 
 export interface MessageSink {
@@ -42,21 +55,92 @@ export interface MessageSink {
  */
 export class TreeMessageSink implements MessageSink {
   private readonly messageRepo: MessageRepo
+  private readonly lineageRepo?: LineageRepo
+  private readonly lineageId?: string | null
+  private pendingOperationId?: string | null
 
-  constructor(deps: { messageRepo: MessageRepo }) {
+  constructor(deps: { messageRepo: MessageRepo; lineageRepo?: LineageRepo; lineageId?: string | null; pendingOperationId?: string | null }) {
     this.messageRepo = deps.messageRepo
+    this.lineageRepo = deps.lineageRepo
+    this.lineageId = deps.lineageId
+    this.pendingOperationId = deps.pendingOperationId
   }
 
   persistAssistantMessage(draft: AssistantMessageDraft): any {
-    return this.messageRepo.createMessage({
-      conversationId: draft.conversationId,
-      parentId: draft.parentId,
-      role: 'assistant',
-      content: draft.content ?? '',
-      modelName: draft.modelName,
-      toolCalls: draft.toolCalls ?? undefined,
-      contentBlocks: draft.contentBlocks ?? undefined,
-      contextUsage: draft.contextUsage ?? undefined,
+    return runMessageTransaction(this.messageRepo, () => {
+      const message = this.messageRepo.createMessage({
+        conversationId: draft.conversationId,
+        parentId: draft.parentId,
+        role: 'assistant',
+        content: draft.content ?? '',
+        modelName: draft.modelName,
+        toolCalls: draft.toolCalls ?? undefined,
+        contentBlocks: draft.contentBlocks ?? undefined,
+        contextUsage: draft.contextUsage ?? undefined,
+      })
+      if (this.lineageRepo && this.lineageId) {
+        if (this.pendingOperationId) {
+          this.lineageRepo.materialize(this.pendingOperationId, message.id)
+          this.pendingOperationId = null
+        } else {
+          this.lineageRepo.appendMessage(this.lineageId, message.id)
+        }
+      }
+      return message
+    })
+  }
+
+  updateAssistantToolState(
+    messageId: string,
+    update: { contentBlocks?: any[] | null; toolCalls?: any[] | null }
+  ): any | null {
+    return this.messageRepo.updateAssistantToolState(messageId, update)
+  }
+}
+
+/**
+ * Cloud sink: identical to TreeMessageSink except it adopts the Railway-authoritative
+ * message id (draft.providerMessageId) so the local SQLite row shares Railway's id —
+ * the server-side replacement for the renderer dualSyncManager's id adoption. When the
+ * provider surfaced no id (streamed-only frame / native provider), providerMessageId is
+ * null and MessageRepo mints a uuid, so the fallback matches TreeMessageSink exactly.
+ * Selected in ChatOrchestrator only for the openrouter route under gateway.chat.
+ */
+export class CloudMirrorSink implements MessageSink {
+  private readonly messageRepo: MessageRepo
+  private readonly lineageRepo?: LineageRepo
+  private readonly lineageId?: string | null
+  private pendingOperationId?: string | null
+
+  constructor(deps: { messageRepo: MessageRepo; lineageRepo?: LineageRepo; lineageId?: string | null; pendingOperationId?: string | null }) {
+    this.messageRepo = deps.messageRepo
+    this.lineageRepo = deps.lineageRepo
+    this.lineageId = deps.lineageId
+    this.pendingOperationId = deps.pendingOperationId
+  }
+
+  persistAssistantMessage(draft: AssistantMessageDraft): any {
+    return runMessageTransaction(this.messageRepo, () => {
+      const message = this.messageRepo.createMessage({
+        id: draft.providerMessageId ?? undefined,
+        conversationId: draft.conversationId,
+        parentId: draft.parentId,
+        role: 'assistant',
+        content: draft.content ?? '',
+        modelName: draft.modelName,
+        toolCalls: draft.toolCalls ?? undefined,
+        contentBlocks: draft.contentBlocks ?? undefined,
+        contextUsage: draft.contextUsage ?? undefined,
+      })
+      if (this.lineageRepo && this.lineageId) {
+        if (this.pendingOperationId) {
+          this.lineageRepo.materialize(this.pendingOperationId, message.id)
+          this.pendingOperationId = null
+        } else {
+          this.lineageRepo.appendMessage(this.lineageId, message.id)
+        }
+      }
+      return message
     })
   }
 

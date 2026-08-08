@@ -118,16 +118,6 @@ export interface StreamChunk {
   remaining?: number
   // tool permission request correlation id
   requestId?: string
-  // CC-specific chunk type (from Claude Code SDK streaming events)
-  chunkType?:
-    | 'content_delta'
-    | 'thinking_delta'
-    | 'tool_start'
-    | 'tool_end'
-    | 'tool_progress'
-    | 'result_output'
-    | 'system_output'
-    | string
 }
 
 // Sequential event for streaming to preserve order
@@ -160,12 +150,18 @@ export type StreamLifecycleStatus =
   | 'completed'
   | 'error'
 
+// Renderer-owned identity for an exact conversation branch/lineage. The optional
+// brand keeps string interoperability for existing callers while documenting when
+// an arbitrary string is being used as a lineage identity.
+export type LineageId = string & { readonly __lineageIdBrand?: never }
+
 // Lineage metadata for tracking stream hierarchy (subagents, tool-spawned streams)
 export interface StreamLineage {
+  lineageId?: LineageId          // Exact renderer branch/lineage identity
   parentStreamId?: string        // If spawned from another stream
   rootMessageId?: MessageId      // The message whose branch this stream belongs to
   originMessageId?: MessageId    // The message that triggered this subagent/tool-run
-  branchId?: string              // Optional disambiguator for branches sharing a root
+  branchId?: string              // Legacy optional branch disambiguator
 }
 
 export interface StreamState {
@@ -326,6 +322,9 @@ export interface CompositionState {
 
 export interface ConversationState {
   currentConversationId: ConversationId | null
+  currentLineageId: LineageId | null
+  /** Conversation whose messages/tree/path are currently installed. */
+  snapshotConversationId: ConversationId | null
   focusedChatMessageId: MessageId | null
   currentPath: MessageId[] // Array of message IDs forming current branch
   messages: Message[] // Linear messages in current path order
@@ -333,8 +332,6 @@ export interface ConversationState {
   excludedMessages: MessageId[] //id of each message which are NOT to be sent for chat,
   context: string
   ccCwd: string
-  // Claude Code session tracking
-  ccSession?: CCSessionInfo | null
 }
 
 // Core chat state - ONLY chat concerns
@@ -363,9 +360,20 @@ export interface InitializationState {
 
 export interface ToolCallPermissionRequest {
   toolCall: ToolCall
+  // Set when the request originates from the server-owned loop (Phase 2): the
+  // resolver thunk POSTs the decision to /api/resume keyed by these, instead of
+  // resolving the in-process client-loop promise.
+  streamId?: string
+  toolCallId?: string
 }
 
 export type OperationMode = 'plan' | 'execute'
+
+export interface OperationModeUpgradeRequest {
+  toolCall: ToolCall
+  streamId?: string
+  toolCallId?: string
+}
 
 export interface ChatState {
   providerState: ProviderState
@@ -382,10 +390,10 @@ export interface ChatState {
   attachments: AttachmentsState
   tools: tools[]
   toolCallPermissionRequest: ToolCallPermissionRequest | null
+  operationModeUpgradeRequest: OperationModeUpgradeRequest | null
   planClarificationRequest: PlanClarificationRequest | null
   toolAutoApprove: boolean
   operationMode: OperationMode
-  ccSlashCommands: string[]
   freeTier: {
     freeGenerationsRemaining: number | null
     showLimitModal: boolean
@@ -395,8 +403,18 @@ export interface ChatState {
 }
 
 // Action payloads
+export interface LineageSelectionPayload {
+  conversationId: ConversationId
+  lineageId: LineageId
+  path: MessageId[]
+  focus: MessageId | null
+}
+
 export interface SendMessagePayload {
   conversationId: ConversationId
+  /** Immutable branch context captured by a transcript pane before dispatch. */
+  lineageId?: LineageId | null
+  branchPath?: MessageId[]
   input: MessageInput
   parent: MessageId
   repeatNum: number
@@ -412,6 +430,9 @@ export interface SendMessagePayload {
 
 export interface EditMessagePayload {
   conversationId: ConversationId
+  /** Immutable branch context captured by a transcript pane before dispatch. */
+  lineageId?: LineageId | null
+  branchPath?: MessageId[]
   originalMessageId: MessageId
   newContent: string
   modelOverride?: string
@@ -425,6 +446,9 @@ export interface EditMessagePayload {
 
 export interface BranchMessagePayload {
   conversationId: ConversationId
+  /** Immutable branch context captured by a transcript pane before dispatch. */
+  lineageId?: LineageId | null
+  branchPath?: MessageId[]
   parentId: MessageId
   content: string
   modelOverride?: string
@@ -435,34 +459,6 @@ export interface BranchMessagePayload {
   // Captured at send time: 'plan' = Chat Mode, 'execute' = Agent Mode.
   operationMode?: OperationMode
 }
-
-export interface CCSessionInfo {
-  sessionId: string
-  lastMessageAt: string
-  messageCount: number
-  cwd: string
-}
-
-export interface SlashCommand {
-  name: string
-  description?: string
-}
-
-export interface SendCCMessagePayload {
-  conversationId: ConversationId
-  message: string
-  cwd?: string
-  permissionMode?: 'default' | 'plan' | 'bypassPermissions' | 'acceptEdits'
-  resume?: boolean
-  parentId?: MessageId | null
-  sessionId?: string
-  forkSession?: boolean
-}
-
-export interface SendCCBranchPayload extends Omit<SendCCMessagePayload, 'parentId'> {
-  parentId: MessageId
-}
-
 
 export interface ModelSelectionPayload {
   model: Model

@@ -357,13 +357,16 @@ export const localApi = {
   post: async <T>(endpoint: string, data?: any, options?: RequestInit): Promise<T> => {
     const requestStart = Date.now()
     const method = 'POST'
+    // FormData (multipart uploads) is passed through untouched — never JSON-encoded —
+    // and we let fetch set the multipart Content-Type + boundary itself.
+    const isFormData = data && typeof FormData !== 'undefined' && data instanceof FormData
 
     try {
       const response = await fetch(await buildLocalApiUrl(endpoint), {
         ...options,
         method,
-        headers: { 'Content-Type': 'application/json', ...options?.headers },
-        body: data ? JSON.stringify(data) : undefined,
+        headers: { ...(isFormData ? {} : { 'Content-Type': 'application/json' }), ...options?.headers },
+        body: isFormData ? data : data ? JSON.stringify(data) : undefined,
       })
       if (!response.ok) {
         const error = await createLocalApiHttpError(response)
@@ -509,6 +512,29 @@ export const localApi = {
     }
   },
 }
+
+/**
+ * Phase 5 thin-client gateways. Both hit the LOCAL server (:3002) — the renderer
+ * never talks to Railway directly anymore:
+ *  - gwApi (/api/gw/*): storage-aware CRUD/reads. The server owns the local-vs-cloud
+ *    branch + dual-fetch/merge + dual-write; the renderer just calls one path.
+ *  - cloudApi (/api/cloud/*): authenticated pass-through to Railway-authoritative
+ *    resources. The server injects the Bearer, so callers pass no token.
+ * Both reuse localApi's transport, error handling, and network-failure reporting.
+ */
+function makeLocalGateway(prefix: string) {
+  const p = (endpoint: string) => `${prefix}${normalizeEndpoint(endpoint)}`
+  return {
+    get: <T>(endpoint: string, options?: RequestInit): Promise<T> => localApi.get<T>(p(endpoint), options),
+    post: <T>(endpoint: string, data?: any, options?: RequestInit): Promise<T> => localApi.post<T>(p(endpoint), data, options),
+    patch: <T>(endpoint: string, data?: any, options?: RequestInit): Promise<T> => localApi.patch<T>(p(endpoint), data, options),
+    put: <T>(endpoint: string, data?: any, options?: RequestInit): Promise<T> => localApi.put<T>(p(endpoint), data, options),
+    delete: <T>(endpoint: string, options?: RequestInit): Promise<T> => localApi.delete<T>(p(endpoint), options),
+  }
+}
+
+export const gwApi = makeLocalGateway('/gw')
+export const cloudApi = makeLocalGateway('/cloud')
 
 if (typeof window !== 'undefined' && environment === 'electron') {
   void refreshLocalServerStatus().catch(() => {
@@ -975,29 +1001,32 @@ export interface UpdateUserSystemPromptPayload {
   isDefault?: boolean
 }
 
-export const getUserSystemPrompts = (accessToken: string | null) =>
-  api.get<UserSystemPrompt[]>('/system-prompts', accessToken)
+// Phase 5: system prompts are Railway-authoritative — routed through the /api/cloud/*
+// pass-through (server injects the Bearer). The accessToken param is retained but
+// unused so existing call sites need no change.
+export const getUserSystemPrompts = (_accessToken?: string | null) =>
+  cloudApi.get<UserSystemPrompt[]>('/system-prompts')
 
-export const getUserSystemPromptById = (id: string, accessToken: string | null) =>
-  api.get<UserSystemPrompt>(`/system-prompts/${id}`, accessToken)
+export const getUserSystemPromptById = (id: string, _accessToken?: string | null) =>
+  cloudApi.get<UserSystemPrompt>(`/system-prompts/${id}`)
 
-export const getDefaultUserSystemPrompt = (accessToken: string | null) =>
-  api.get<UserSystemPrompt | null>('/system-prompts/default', accessToken)
+export const getDefaultUserSystemPrompt = (_accessToken?: string | null) =>
+  cloudApi.get<UserSystemPrompt | null>('/system-prompts/default')
 
-export const createUserSystemPrompt = (data: CreateUserSystemPromptPayload, accessToken: string | null) =>
-  api.post<UserSystemPrompt>('/system-prompts', accessToken, data)
+export const createUserSystemPrompt = (data: CreateUserSystemPromptPayload, _accessToken?: string | null) =>
+  cloudApi.post<UserSystemPrompt>('/system-prompts', data)
 
-export const updateUserSystemPrompt = (id: string, data: UpdateUserSystemPromptPayload, accessToken: string | null) =>
-  api.put<UserSystemPrompt>(`/system-prompts/${id}`, accessToken, data)
+export const updateUserSystemPrompt = (id: string, data: UpdateUserSystemPromptPayload, _accessToken?: string | null) =>
+  cloudApi.put<UserSystemPrompt>(`/system-prompts/${id}`, data)
 
-export const setDefaultUserSystemPrompt = (id: string, accessToken: string | null) =>
-  api.patch<UserSystemPrompt>(`/system-prompts/${id}/default`, accessToken)
+export const setDefaultUserSystemPrompt = (id: string, _accessToken?: string | null) =>
+  cloudApi.patch<UserSystemPrompt>(`/system-prompts/${id}/default`)
 
-export const deleteUserSystemPrompt = (id: string, accessToken: string | null) =>
-  api.delete<{ message: string; id: string }>(`/system-prompts/${id}`, accessToken)
+export const deleteUserSystemPrompt = (id: string, _accessToken?: string | null) =>
+  cloudApi.delete<{ message: string; id: string }>(`/system-prompts/${id}`)
 
-export const clearDefaultUserSystemPrompt = (accessToken: string | null) =>
-  api.delete<{ message: string }>('/system-prompts/default', accessToken)
+export const clearDefaultUserSystemPrompt = (_accessToken?: string | null) =>
+  cloudApi.delete<{ message: string }>('/system-prompts/default')
 
 // Stripe Payment API functions
 export interface SubscriptionStatus {
@@ -1051,21 +1080,8 @@ export const createCheckoutSession = async (
   email?: string
 ): Promise<CheckoutSessionResponse> => {
   assertCloudBackendAllowed('/stripe/create-checkout-session', 'createCheckoutSession')
-
-  const response = await fetch(`${API_BASE}/stripe/create-checkout-session`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ userId, tier, email }),
-  })
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ error: 'Failed to create checkout session' }))
-    throw new Error(errorData.error || 'Failed to create checkout session')
-  }
-
-  return response.json()
+  // Railway-authoritative via the /api/cloud/* pass-through (server injects the Bearer).
+  return cloudApi.post<CheckoutSessionResponse>('/stripe/create-checkout-session', { userId, tier, email })
 }
 
 /**
@@ -1073,15 +1089,7 @@ export const createCheckoutSession = async (
  */
 export const getSubscriptionStatus = async (userId: number): Promise<SubscriptionStatus> => {
   assertCloudBackendAllowed('/stripe/subscription-status', 'getSubscriptionStatus')
-
-  const response = await fetch(`${API_BASE}/stripe/subscription-status?userId=${userId}`)
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ error: 'Failed to get subscription status' }))
-    throw new Error(errorData.error || 'Failed to get subscription status')
-  }
-
-  return response.json()
+  return cloudApi.get<SubscriptionStatus>(`/stripe/subscription-status?userId=${userId}`)
 }
 
 /**
@@ -1089,21 +1097,7 @@ export const getSubscriptionStatus = async (userId: number): Promise<Subscriptio
  */
 export const cancelSubscription = async (userId: number): Promise<{ success: boolean; message: string }> => {
   assertCloudBackendAllowed('/stripe/cancel-subscription', 'cancelSubscription')
-
-  const response = await fetch(`${API_BASE}/stripe/cancel-subscription`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ userId }),
-  })
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ error: 'Failed to cancel subscription' }))
-    throw new Error(errorData.error || 'Failed to cancel subscription')
-  }
-
-  return response.json()
+  return cloudApi.post<{ success: boolean; message: string }>('/stripe/cancel-subscription', { userId })
 }
 
 /**
@@ -1114,15 +1108,7 @@ export const getCreditHistory = async (
   limit: number = 100
 ): Promise<{ history: CreditTransaction[] }> => {
   assertCloudBackendAllowed('/stripe/credit-history', 'getCreditHistory')
-
-  const response = await fetch(`${API_BASE}/stripe/credit-history?userId=${userId}&limit=${limit}`)
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ error: 'Failed to get credit history' }))
-    throw new Error(errorData.error || 'Failed to get credit history')
-  }
-
-  return response.json()
+  return cloudApi.get<{ history: CreditTransaction[] }>(`/stripe/credit-history?userId=${userId}&limit=${limit}`)
 }
 
 /**
@@ -1130,13 +1116,5 @@ export const getCreditHistory = async (
  */
 export const getPricingInfo = async (): Promise<PricingInfo> => {
   assertCloudBackendAllowed('/stripe/pricing-info', 'getPricingInfo')
-
-  const response = await fetch(`${API_BASE}/stripe/pricing-info`)
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ error: 'Failed to get pricing info' }))
-    throw new Error(errorData.error || 'Failed to get pricing info')
-  }
-
-  return response.json()
+  return cloudApi.get<PricingInfo>('/stripe/pricing-info')
 }

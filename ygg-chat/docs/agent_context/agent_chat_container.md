@@ -1,6 +1,6 @@
 # Agent Context: Chat Container
 
-Last reviewed: 2026-06-16
+Last reviewed: 2026-08-01
 
 ## Purpose
 
@@ -23,6 +23,7 @@ Use this when changing:
 - `client/ygg-chat-r/src/containers/Chat.tsx`: main container and UI orchestration.
 - `client/ygg-chat-r/src/components/ChatMessage/ChatMessage.tsx`: individual message rendering/actions.
 - `client/ygg-chat-r/src/components/Heimdall/Heimdall.tsx`: conversation tree panel rendered by Chat.
+- `client/ygg-chat-r/src/components/ParallelChatPane/ParallelChatPane.tsx`: session-only secondary branch transcript.
 - `client/ygg-chat-r/src/features/chats/chatActions.ts`: send/branch/edit/delete/stream thunks.
 - `client/ygg-chat-r/src/features/chats/chatSlice.ts`: chat Redux state and reducers.
 - `client/ygg-chat-r/src/features/chats/chatSelectors.ts`: selected/display messages, stream selectors, Heimdall selectors.
@@ -72,12 +73,12 @@ Use this value for message fetches and mutations tied to the current conversatio
 
 ## Message and Tree Loading Flow
 
-1. `useConversationMessages(conversationIdFromUrl, conversationStorageMode)` fetches `{ messages, tree, meta }`.
-2. On route/conversation switch, Chat clears visible Redux messages immediately with `messagesLoaded([])` to prevent stale bleed.
-3. When query data resolves, Chat dispatches `messagesLoaded(fetchedMessages)`.
-4. In Electron, Chat calls `syncConversationToLocal()` to mirror cloud-fetched messages into local SQLite when appropriate.
-5. Attachment metadata is dispatched, and binaries are fetched/converted to base64 artifacts asynchronously.
-6. Chat dispatches `heimdallDataLoaded({ treeData, subagentMap: {} })` whenever tree data changes, including null/empty tree.
+1. `useConversationSnapshotCoordinator(conversationIdFromUrl, conversationStorageMode)` starts an authoritative persisted fetch on every Chat route entry.
+2. A same-conversation remount (for example Settings → Back) retains Redux messages, Heimdall, path, and live stream state. Only an actual A → B switch clears visible state.
+3. The coordinator generation-gates requests, reconciles fetched rows with active-stream/terminal-lease-protected Redux rows, and treats other fetched omissions as authoritative deletions.
+4. It rebuilds Heimdall with `buildConversationTree()` and dispatches one `conversationSnapshotApplied` action so messages/tree/path change atomically.
+5. Only accepted snapshots are written to the exact React Query key; raw or superseded responses never enter the cache.
+6. In Electron, Chat runs post-acceptance local mirroring and attachment hydration.
 7. Project conversations from React Query are mirrored into Redux via `conversationsLoaded(projectConversations)` so current conversation metadata is available to selectors and prompts.
 
 ## Rendering Pipeline
@@ -158,11 +159,21 @@ Normal send flow:
 7. It creates optimistic user state and dispatches `sendMessage()` with explicit `streamId`.
 8. Success relies on SSE/user-message chunks and reducers rather than immediately refetching.
 
+After the headless thin-client migration, the three chat thunks (`sendMessage`, `editMessageWithBranching`, `sendMessageToBranch` in `chatActions.ts`) no longer run any loop in the renderer. They POST the send/edit/branch routes on the local headless server (`http://127.0.0.1:3002`), and the server-owned loop's SSE events are streamed by `runServerChatLoop` (`src/features/chats/mainChatClient.ts`) and projected onto the existing Redux stream vocabulary by `projectServerEvent` (`src/features/chats/sseProjection.ts`). These thunks require Electron and throw `'The server-owned chat loop requires Electron.'` otherwise. Chat.tsx's dispatch sites and the optimistic-bubble logic are unchanged; only what happens behind the thunk moved server-side.
+
 Slash commands currently include:
 - `/status-openai`
 - `/compactify`
 - `/bench on|off|status|export|reset`
 - `/theme-demo on|off`
+
+## Tool Permission and Plan Clarification Dialogs
+
+Chat.tsx renders the tool-permission panel and `PlanClarificationPanel` from the `state.chat.toolCallPermissionRequest` / `state.chat.planClarificationRequest` slice fields, and wires them to the resolver thunks `respondToToolPermission`, `respondToToolPermissionAndEnableAll`, `respondToPlanClarification`, and `cancelPlanClarification` (`chatActions.ts`).
+
+The dialogs are unchanged in Chat.tsx, but their **data source moved server-side** with the headless migration:
+- The server-owned chat loop pauses mid-turn and emits `permission_required` / `clarify_required` SSE events. `projectServerEvent` (`src/features/chats/sseProjection.ts`) projects these onto the **same existing reducers** (`toolPermissionRequested` / `planClarificationRequested` in `chatSlice.ts`), so the slice fields Chat reads are populated exactly as before — no renderer-side tool execution or pending-promise machinery is involved.
+- The four resolver thunks now `POST /api/resume` on the local server (shared helper `postDecisionResume`, `chatActions.ts`) instead of resolving in-renderer promises; the correlation ids (`streamId`, `toolCallId`) travel on the slice fields. Their public signatures are unchanged, which is why Chat.tsx needed no edits (zero-diff cutover).
 
 ## Branch/Edit/Explain Actions
 
@@ -198,6 +209,15 @@ Chat passes Heimdall:
 
 Mobile layout may render Heimdall differently/conditionally, but most desktop tree work should be validated on non-mobile first.
 
+## Parallel Branch Pane (Desktop MVP)
+
+`Chat.tsx` remains the sole route/snapshot owner. It can render one optional `ParallelChatPane` next to the primary transcript and the shared Heimdall tree. The secondary pane is session-only: it resets on a conversation route change or reload.
+
+- Heimdall's single-message **Open in Parallel** action calls `onOpenParallel(conversationId, messageId, path)` without mutating the primary Redux `currentPath`.
+- The pane renders from the shared conversation snapshot with `selectDisplayMessagesFor(messages, path)` and resolves only its branch stream with `selectCurrentViewStreamFor(streaming, { conversationId, lineageId, path })`.
+- Its composer and pending stream are local to the pane; its send passes explicit `branchPath` and `lineageId` to `sendMessage`, so thunk history cannot be changed by a later primary-path selection.
+- The MVP intentionally leaves mobile single-pane and retains the existing primary transcript's full composer/action surface. Avoid mounting a second full `Chat` container because it would duplicate route, snapshot, global listener, and singleton-composition behavior.
+
 ## Local CWD and IDE Context
 
 - `ccCwd` is kept in Redux conversation state but loaded/persisted from the local conversation row in Electron.
@@ -222,7 +242,8 @@ When adding new persistent UI settings, prefer helper modules in `src/helpers/*S
 ## Important Invariants
 
 - Keep route-derived `conversationIdFromUrl` as the fetch identity; Redux can lag route changes.
-- Clear Redux messages immediately on conversation switch to avoid stale message bleed.
+- Clear Redux messages/tree only on an actual conversation switch; retain them across same-conversation route remounts.
+- Persisted snapshots may enter Redux only through the generation-gated coordinator and its atomic snapshot action.
 - Do not dispatch data for another conversation into current Redux message/tree state.
 - Use explicit `streamId` for sends and branches.
 - Keep composer input local; avoid putting every keystroke into Redux.
@@ -264,7 +285,7 @@ When adding new persistent UI settings, prefer helper modules in `src/helpers/*S
 
 ## Testing and Validation
 
-- Build: `npm --prefix client/ygg-chat-r run build:web` or `npm --prefix client/ygg-chat-r run build:electron`.
+- Build: `npm --prefix client/ygg-chat-r run build:electron` (Electron-only — the chat thunks throw outside Electron, so a web build cannot exercise the chat loop).
 - Manual checks:
   - load existing local and cloud conversations;
   - switch routes quickly and verify no stale messages appear;
@@ -291,4 +312,8 @@ When adding new persistent UI settings, prefer helper modules in `src/helpers/*S
 
 ## Active-run Compaction
 
-Renderer-managed OpenAI send, edit, repeat, and branch tool loops invoke the same `compactBranch` operation before a required continuation when usage reaches 85%. The summary marker becomes the mutable loop parent and branch lineage anchor, allowing work to continue without another user message. Manual `/compactify` and pre-send compaction remain available as controls and fallback paths.
+In-loop (mid-turn) auto-compaction now runs **server-side** inside the headless chat loop (`electron/headlessServer/services/compactionService.ts`, driven by `ToolLoopService`); the renderer no longer orchestrates compaction during a running send/edit/repeat/branch tool loop. The server-emitted `context_compaction` SSE events are received but currently no-op in the renderer projection (`sseProjection.ts` default case).
+
+The renderer keeps two client-side compaction controls, both via the `compactBranch` thunk (`chatActions.ts`):
+- the manual `/compactify` command (`handleManualCompactifyCommand` in `Chat.tsx`);
+- the pre-send auto-compaction guard in `handleSend` (runs before dispatching the send when usage reaches the 85% threshold), so the produced summary marker anchors the continuation without another user message.

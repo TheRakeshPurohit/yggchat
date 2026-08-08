@@ -16,10 +16,22 @@ import { registerCustomToolRpcRoutes } from './routes/customToolRpcRoutes.js'
 import { registerEphemeralGenerateRoutes } from './routes/ephemeralGenerateRoutes.js'
 import { registerSubagentRoutes } from './routes/subagentRoutes.js'
 import { registerTestHarnessRoutes } from './routes/testHarnessRoutes.js'
+import { registerGatewayRoutes } from './routes/gatewayRoutes.js'
+import { registerLineageRoutes } from './routes/lineageRoutes.js'
+import { registerCloudProxyRoutes } from './routes/cloudProxyRoutes.js'
+import { createAppAuthTokenManager } from './services/appAuthTokenManager.js'
+import { createRailwayClient } from './services/railwayClient.js'
+import { createCloudMirrorService } from './services/cloudMirrorService.js'
+import { runHookRequest } from '../hooks/hookRunner.js'
 import { ChatOrchestrator } from './services/chatOrchestrator.js'
+import { DecisionBroker } from './services/decisionBroker.js'
+import { RunSessionRegistry } from './services/runSessionRegistry.js'
 import { CompactionService } from './services/compactionService.js'
 import { SubagentRunService } from './services/subagentRunService.js'
-import { normalizeProviderRoute } from './services/providerRouter.js'
+import { createSubagentDispatchExecutor, createSubagentManagerExecutor } from './services/subagentToolExecutor.js'
+import { createMultiCallDispatchExecutor } from './services/multiCallExecutor.js'
+import { ProviderRouter, normalizeProviderRoute } from './services/providerRouter.js'
+import { resolveGatewayFlags } from './config/gatewayFlags.js'
 import type { ToolExecutor } from './services/toolLoopService.js'
 
 interface HeadlessServerRouteDeps {
@@ -53,6 +65,9 @@ const HEADLESS_RUNTIME_BUILTIN_TOOL_NAMES = new Set([
   'custom_tool_manager',
   'mcp_manager',
   'skill_manager',
+  'subagent',
+  'subagent_manager',
+  'multi_call',
 ])
 
 const BUILT_IN_INFERENCE_TOOLS: InferenceToolDefinition[] = BUILTIN_TOOL_DEFINITIONS.filter(tool =>
@@ -120,8 +135,12 @@ const resolveDefaultInferenceTools = (): InferenceToolDefinition[] => {
   return dedupeToolsByName(tools)
 }
 
-// The subagent tool is always excluded (no nested subagents).
-const SUBAGENT_EXCLUDED_TOOL_NAMES = new Set(['subagent'])
+// The subagent + subagent_manager tools are always excluded (no nested subagents).
+const SUBAGENT_EXCLUDED_TOOL_NAMES = new Set(['subagent', 'subagent_manager'])
+
+// These orchestration tools are always exposed to a child, including when a
+// parent supplies an explicit tool whitelist.
+const REQUIRED_SUBAGENT_TOOL_NAMES = new Set(['multi_call'])
 
 // Default tool set when a subagent request omits `tools`. Mirrors the renderer's
 // DEFAULT_SUBAGENT_TOOLS; every name here is in HEADLESS_RUNTIME_BUILTIN_TOOL_NAMES.
@@ -134,6 +153,7 @@ const DEFAULT_SUBAGENT_TOOL_NAMES = [
   'brave_search',
   'edit_file',
   'multi_edit',
+  'multi_call',
   'create_file',
   'delete_file',
   'bash',
@@ -143,7 +163,10 @@ const resolveInferenceToolsByName = (
   names: string[] | undefined
 ): { tools: InferenceToolDefinition[]; resolvedNames: string[]; unknownNames: string[] } => {
   const requested = Array.isArray(names) ? names : DEFAULT_SUBAGENT_TOOL_NAMES
-  const wanted = new Set(requested.filter(name => typeof name === 'string' && !SUBAGENT_EXCLUDED_TOOL_NAMES.has(name)))
+  const wanted = new Set([
+    ...requested.filter(name => typeof name === 'string' && !SUBAGENT_EXCLUDED_TOOL_NAMES.has(name)),
+    ...REQUIRED_SUBAGENT_TOOL_NAMES,
+  ])
   const available = resolveDefaultInferenceTools()
   const tools = available.filter(tool => wanted.has(tool.name))
   const resolvedNames = tools.map(tool => tool.name)
@@ -230,6 +253,25 @@ export function registerHeadlessServerRoutes(app: Express, deps: HeadlessServerR
   const tokenStore = new ProviderTokenStore(deps.db)
   bootstrapHeadlessProviderTokens(tokenStore)
 
+  // Gateway flags are resolved once at startup. Chat and route-independent runs default on.
+  const gatewayFlags = resolveGatewayFlags()
+  // One process-wide app-session owner for every Railway-backed path, including
+  // OpenRouter streaming (which previously bypassed this shared refresh policy).
+  const appAuth = createAppAuthTokenManager()
+  const railway = createRailwayClient({ auth: appAuth })
+  const providerRouter = new ProviderRouter({ tokenStore, appAuth })
+
+  // One shared pause/resume registry across the chat orchestrator (which pauses the
+  // loop) and the POST /api/resume route (which resolves the paused decision).
+  const decisionBroker = new DecisionBroker()
+
+  // Detach/reattach registry (gateway.resumableRuns, default ON). A chat run's lifetime
+  // is owned by its RunSession rather than the SSE socket, so route changes and renderer
+  // reloads detach instead of aborting. Explicit false retains the legacy
+  // disconnect==abort path and leaves the reaper stopped.
+  const runSessions = new RunSessionRegistry()
+  if (gatewayFlags.resumableRuns) runSessions.startReaper()
+
   registerCrudRoutes(app, deps)
   registerProviderAuthRoutes(app, { tokenStore })
   registerMobileUiRoutes(app)
@@ -237,29 +279,82 @@ export function registerHeadlessServerRoutes(app: Express, deps: HeadlessServerR
   registerCustomToolRpcRoutes(app)
   registerCapabilityRoutes(app, { getDefaultTools: resolveDefaultInferenceTools })
   registerEphemeralGenerateRoutes(app, { tokenStore })
+  registerLineageRoutes(app, deps)
+
+  // Phase 5 cloud gateway: storage-aware /api/gw/* CRUD + merge and /api/cloud/*
+  // authenticated pass-through. Mounted UNCONDITIONALLY — the renderer is now a thin
+  // client that routes all CRUD/reads/cloud through these paths (Phase 5 cutover), so
+  // they must always be available. They are additive routes (nothing else served
+  // /api/gw or /api/cloud), so mounting them changes no existing behavior. Both share
+  // one single-flight app-token manager (sole Supabase refresher) + one Railway client.
+  {
+    registerGatewayRoutes(app, {
+      railway,
+      mirror: createCloudMirrorService({ db: deps.db, statements: deps.statements }),
+      auth: appAuth,
+      db: deps.db,
+      statements: deps.statements,
+      enabled: true,
+    })
+    registerCloudProxyRoutes(app, { railway, enabled: true })
+  }
 
   const compactionService = new CompactionService({
     ...deps,
     tokenStore,
+    providerRouter,
+  })
+
+  const multiCallToolExecutor = createMultiCallDispatchExecutor(executeToolViaOrchestrator)
+  const subagentRunService = new SubagentRunService({
+    statements: deps.statements,
+    tokenStore,
+    providerRouter,
+    // Child tools use the leaf executor. They can never re-enter the parent
+    // subagent dispatcher, preserving the no-nested-subagents invariant.
+    toolExecutor: multiCallToolExecutor,
+    resolveToolsByName: resolveInferenceToolsByName,
+    compactionService,
+    refreshProviderTokens: async (provider: string) => {
+      // Re-sync provider auth from the Electron store in case the user signed
+      // in or tokens rotated after the server started.
+      if (normalizeProviderRoute(provider) === 'openaichatgpt') {
+        syncOpenAiChatGptTokenFromElectronStorage(tokenStore, { preferNewest: true })
+      } else {
+        await syncOpenRouterTokenFromElectronSession(tokenStore)
+      }
+    },
+    // Share the chat RunSessionRegistry so background subagent runs publish their
+    // stream events to a session the existing GET /api/streams/:streamId route can
+    // replay — this is what lets the transcript viewer watch a run live. Gated on
+    // resumableRuns (same gate as that route); off => runs just don't stream live.
+    runSessions: gatewayFlags.resumableRuns ? runSessions : undefined,
+  })
+  // Startup reconciler: any subagent run left 'running' by a previous process
+  // crash is an orphan (this fresh process owns no live loop), so flip it to a
+  // resumable terminal state now, before anything can read stale 'running' rows.
+  try {
+    const reconciled = subagentRunService.reconcileOrphanedRuns()
+    if (reconciled > 0) console.log(`[subagent] reconciled ${reconciled} orphaned running run(s) -> resumable`)
+  } catch (error) {
+    console.warn('[subagent] orphaned-run reconciliation failed (continuing):', error)
+  }
+
+  // Compose two interceptors ahead of the orchestrator registry:
+  //   subagent_manager (global async manager, branch-scoped) -> subagent (legacy
+  //   blocking dispatch) -> multiCall/leaf. Both interceptors see the full
+  //   ToolExecutionContext (incl. lineageId) that the registry path would drop.
+  const subagentDispatchExecutor = createSubagentDispatchExecutor({
+    leafExecutor: multiCallToolExecutor,
+    subagentRunner: subagentRunService,
+  })
+  const chatToolExecutor = createSubagentManagerExecutor({
+    leafExecutor: subagentDispatchExecutor,
+    runner: subagentRunService,
   })
 
   registerSubagentRoutes(app, {
-    runService: new SubagentRunService({
-      statements: deps.statements,
-      tokenStore,
-      toolExecutor: executeToolViaOrchestrator,
-      resolveToolsByName: resolveInferenceToolsByName,
-      compactionService,
-      refreshProviderTokens: async (provider: string) => {
-        // Re-sync provider auth from the Electron store in case the user signed
-        // in or tokens rotated after the server started.
-        if (normalizeProviderRoute(provider) === 'openaichatgpt') {
-          syncOpenAiChatGptTokenFromElectronStorage(tokenStore, { preferNewest: true })
-        } else {
-          await syncOpenRouterTokenFromElectronSession(tokenStore)
-        }
-      },
-    }),
+    runService: subagentRunService,
     validateTarget: (conversationId: string, parentMessageId: string) => {
       const conversation = deps.statements.getConversationById?.get(conversationId)
       if (!conversation) return { status: 404, error: 'Conversation not found' }
@@ -276,10 +371,19 @@ export function registerHeadlessServerRoutes(app: Express, deps: HeadlessServerR
     orchestrator: new ChatOrchestrator({
       ...deps,
       tokenStore,
-      toolExecutor: executeToolViaOrchestrator,
+      providerRouter,
+      toolExecutor: chatToolExecutor,
       defaultToolsProvider: resolveDefaultInferenceTools,
       compactBranch: input => compactionService.compactBranch(input),
+      decisionBroker,
+      // Phase 3: in-process chat hooks (fires only when a request sets hooksEnabled).
+      hookRunner: runHookRequest,
+      // Phase 4: cloud (openrouter) free-tier relay + Railway id adoption. Default OFF.
+      cloudChatEnabled: gatewayFlags.chat,
     }),
     compactionService,
+    decisionBroker,
+    runSessions,
+    resumableRuns: gatewayFlags.resumableRuns,
   })
 }

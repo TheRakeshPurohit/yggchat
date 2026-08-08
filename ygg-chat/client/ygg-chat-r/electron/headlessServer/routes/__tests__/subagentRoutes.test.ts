@@ -10,6 +10,7 @@ describe('registerSubagentRoutes', () => {
   let baseUrl = ''
   let seenRequests: any[]
   let runImpl: (request: any, emit: (event: any) => void, signal: AbortSignal) => Promise<void>
+  let listByToolCallImpl: (toolCallId: string) => any[]
 
   const validBody = () => ({
     conversationId: 'c1',
@@ -22,6 +23,7 @@ describe('registerSubagentRoutes', () => {
 
   beforeEach(() => {
     seenRequests = []
+    listByToolCallImpl = () => []
     runImpl = async (request, emit) => {
       emit({
         type: 'started',
@@ -52,6 +54,9 @@ describe('registerSubagentRoutes', () => {
           seenRequests.push(request)
           return runImpl(request, emit, signal)
         },
+        listByToolCall: (toolCallId: string) => listByToolCallImpl(toolCallId),
+        latestStreamIdForToolCall: (toolCallId: string) =>
+          listByToolCallImpl(toolCallId).length > 0 ? `stream-${toolCallId}` : null,
       } as unknown as SubagentRunService,
       validateTarget: (conversationId, parentMessageId) => {
         if (conversationId === 'missing-convo') return { status: 404, error: 'Conversation not found' }
@@ -90,14 +95,21 @@ describe('registerSubagentRoutes', () => {
     expect(events[2]).toMatchObject({ type: 'complete', result: 'final text' })
   })
 
-  it('normalizes the request body (tool names, autoApprove, streamId)', async () => {
+  it('normalizes the request body (tool names, autoApprove, streamId, lineageId)', async () => {
     await fetch(`${baseUrl}/api/headless/subagent/stream`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...validBody(), streamId: 'parent-s', tools: ['read_file', { name: 'ripgrep' }], autoApprove: false }),
+      body: JSON.stringify({
+        ...validBody(),
+        streamId: 'parent-s',
+        lineage_id: 'content-lineage-1',
+        tools: ['read_file', { name: 'ripgrep' }],
+        autoApprove: false,
+      }),
     })
     expect(seenRequests[0]).toMatchObject({
       streamId: 'parent-s',
+      lineageId: 'content-lineage-1',
       tools: ['read_file', 'ripgrep'],
       autoApprove: false,
     })
@@ -147,6 +159,42 @@ describe('registerSubagentRoutes', () => {
     expect(res.status).toBe(200)
     const events = parseSse(await res.text())
     expect(events.some(e => e.type === 'error' && e.error === 'engine exploded')).toBe(true)
+  })
+
+  it('GET by-tool-call returns the runs (with transcripts) for a tool call', async () => {
+    let seenToolCallId = ''
+    listByToolCallImpl = toolCallId => {
+      seenToolCallId = toolCallId
+      return [
+        {
+          id: 'run-1',
+          tool_call_id: 'tc-1',
+          status: 'completed',
+          final_response: 'done',
+          messages: [
+            { id: 'm1', role: 'user', content: 'go', sequence: 0 },
+            { id: 'm2', role: 'assistant', content: 'done', sequence: 1 },
+          ],
+        },
+      ]
+    }
+    const res = await fetch(`${baseUrl}/api/subagents/by-tool-call/tc-1`)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(seenToolCallId).toBe('tc-1')
+    expect(body.runs).toHaveLength(1)
+    expect(body.runs[0]).toMatchObject({ id: 'run-1', status: 'completed' })
+    expect(body.runs[0].messages).toHaveLength(2)
+    // The current child streamId is surfaced for the live viewer subscription.
+    expect(body.streamId).toBe('stream-tc-1')
+  })
+
+  it('GET by-tool-call returns an empty array when no runs match', async () => {
+    listByToolCallImpl = () => []
+    const res = await fetch(`${baseUrl}/api/subagents/by-tool-call/unknown-tc`)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.runs).toEqual([])
   })
 
   it('aborts the engine signal when the client disconnects', async () => {

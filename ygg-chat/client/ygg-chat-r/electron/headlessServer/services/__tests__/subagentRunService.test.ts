@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import type { HeadlessSubagentStreamRequest, HeadlessSubagentStreamEvent } from '../../contracts/headlessApi.js'
+import { describe, expect, it, vi } from 'vitest'
+import type { HeadlessSubagentStreamRequest, HeadlessSubagentStreamEvent } from '../../../../../../shared/headlessApi.js'
 import type { ProviderRouter } from '../providerRouter.js'
 import type { SubagentRunRepo } from '../../persistence/subagentRunRepo.js'
 import type { StreamingRunRepo } from '../../persistence/streamingRunRepo.js'
@@ -11,10 +11,12 @@ class FakeRunRepo {
   private seq = 0
 
   createRun(input: any): any {
-    const id = input.id || `run-${++this.seq}`
+    const seq = ++this.seq
+    const id = input.id || `run-${seq}`
     const row = {
       id,
       conversation_id: input.conversationId,
+      lineage_id: input.lineageId ?? null,
       parent_message_id: input.parentMessageId,
       tool_call_id: input.toolCallId ?? null,
       prompt: input.prompt,
@@ -26,6 +28,9 @@ class FakeRunRepo {
       error: null,
       turns_used: 0,
       tool_calls_used: 0,
+      handle: input.handle ?? String(100000 + seq),
+      attempt: 0,
+      last_turn_at: null,
     }
     this.runs.set(id, row)
     this.messages.set(id, [])
@@ -78,6 +83,21 @@ class FakeRunRepo {
   getMessages(runId: string): any[] {
     return (this.messages.get(runId) || []).map(m => ({ ...m }))
   }
+
+  /** Compare-and-set reopen: only error|aborted -> running (bumps attempt). */
+  reopenRun(runId: string): boolean {
+    const row = this.runs.get(runId)
+    if (!row) return false
+    if (row.status !== 'error' && row.status !== 'aborted') return false
+    row.status = 'running'
+    row.error = null
+    row.attempt = (row.attempt ?? 0) + 1
+    return true
+  }
+
+  listRunning(): any[] {
+    return [...this.runs.values()].filter(r => r.status === 'running').map(r => ({ ...r, messages: [] }))
+  }
 }
 
 class FakeStreamingRunRepo {
@@ -129,11 +149,36 @@ function baseRequest(overrides: Partial<HeadlessSubagentStreamRequest> = {}): He
     parentMessageId: 'p1',
     toolCallId: 'call-1',
     streamId: 'parent-stream-1',
+    lineageId: 'content-lineage-1',
     prompt: 'do the task',
     provider: 'openaichatgpt',
     modelName: 'gpt-5.6-sol',
     autoApprove: true,
     ...overrides,
+  }
+}
+
+/**
+ * Minimal RunSessionRegistry stand-in that records what each run publishes, so we
+ * can assert live-stream events reach the session backing GET /api/streams/:id.
+ */
+class FakeRunSessionRegistry {
+  sessions = new Map<string, { conversationId: string | null; published: any[]; terminal: boolean }>()
+
+  create(streamId: string, conversationId: string | null) {
+    if (!this.sessions.has(streamId)) this.sessions.set(streamId, { conversationId, published: [], terminal: false })
+    return this.get(streamId)
+  }
+
+  get(streamId: string) {
+    const record = this.sessions.get(streamId)
+    if (!record) return undefined
+    return {
+      publish: (event: any) => {
+        record.published.push(event)
+        if (event.type === 'complete' || event.type === 'error') record.terminal = true
+      },
+    }
   }
 }
 
@@ -144,6 +189,7 @@ function buildService(opts: {
   toolExecutor?: (toolCall: any, ctx: any) => Promise<any>
   resolveToolsByName?: (names: string[] | undefined) => ResolvedSubagentTools
   generateCompactionSummary?: (input: any) => Promise<string>
+  runSessions?: FakeRunSessionRegistry
 }): SubagentRunService {
   return new SubagentRunService({
     runRepo: opts.runRepo as unknown as SubagentRunRepo,
@@ -155,7 +201,16 @@ function buildService(opts: {
       generateCompactionSummary:
         opts.generateCompactionSummary ?? (async () => 'Following is summary of the session, you have to resume the work.\n\nsummary'),
     },
+    runSessions: opts.runSessions as unknown as import('../runSessionRegistry.js').RunSessionRegistry | undefined,
   })
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 1000): Promise<void> {
+  const start = Date.now()
+  while (!condition()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
 }
 
 describe('SubagentRunService', () => {
@@ -172,14 +227,18 @@ describe('SubagentRunService', () => {
     const started = events.find(e => e.type === 'started') as any
     expect(started.subagentRunId).toBeTruthy()
     expect(started.streamId).toBe('sub-stream-1')
+    expect(started.lineageId).toBe('content-lineage-1')
+    expect(started.streamId).not.toBe(started.lineageId)
     expect(started.resolvedToolNames).toEqual(['read_file', 'bash'])
 
     const complete = events.find(e => e.type === 'complete') as any
     expect(complete.result).toBe('the final answer')
+    expect(complete.lineageId).toBe('content-lineage-1')
     expect(complete.stats.turnsUsed).toBe(1)
 
     const runId = started.subagentRunId
     expect(runRepo.getRunById(runId)?.status).toBe('completed')
+    expect(runRepo.getRunById(runId)?.lineage_id).toBe('content-lineage-1')
     expect(runRepo.getRunById(runId)?.final_response).toBe('the final answer')
 
     // First transcript row is the user prompt with the subagent_role marker.
@@ -191,10 +250,35 @@ describe('SubagentRunService', () => {
     expect(streamingRunRepo.upsertCalls[0]).toMatchObject({
       streamType: 'subagent',
       source: 'subagent',
+      lineageId: 'content-lineage-1',
       parentStreamId: 'parent-stream-1',
       metadata: { subagent_run_id: runId },
     })
     expect(streamingRunRepo.finishCalls[0]).toMatchObject({ status: 'completed' })
+  })
+
+  it('returns the terminal result to a server-owned parent tool call', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({ content: 'programmatic result' })
+    const runRepo = new FakeRunRepo()
+    const streamingRunRepo = new FakeStreamingRunRepo()
+    const service = buildService({ providerRouter, runRepo, streamingRunRepo })
+
+    await expect(service.runForTool(baseRequest(), new AbortController().signal)).resolves.toBe('programmatic result')
+    expect([...runRepo.runs.values()][0].status).toBe('completed')
+  })
+
+  it('rejects a server-owned parent tool call when the child ends in error', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({ content: '' })
+    providerRouter.enqueue({ content: '' })
+    const service = buildService({
+      providerRouter,
+      runRepo: new FakeRunRepo(),
+      streamingRunRepo: new FakeStreamingRunRepo(),
+    })
+
+    await expect(service.runForTool(baseRequest(), new AbortController().signal)).rejects.toThrow('empty response')
   })
 
   it('merges tool results and responses_output_items into the transcript', async () => {
@@ -264,7 +348,7 @@ describe('SubagentRunService', () => {
     ])
   })
 
-  it('filters mcp tools out of the tool set in plan mode', async () => {
+  it('keeps mcp tools model-visible in plan mode (execution is gated in the tool loop)', async () => {
     const providerRouter = new FakeProviderRouter()
     providerRouter.enqueue({ content: 'planned' })
     const runRepo = new FakeRunRepo()
@@ -283,9 +367,14 @@ describe('SubagentRunService', () => {
     const events: HeadlessSubagentStreamEvent[] = []
     await service.run(baseRequest({ operationMode: 'plan' }), event => events.push(event), new AbortController().signal)
 
+    // filterToolsForOperationMode is deliberately identity-valued: Agent-only schemas
+    // stay visible so the model can ASK for an Agent-mode upgrade. For a subagent no
+    // upgrade prompt exists (requestOperationModeUpgrade is unset), so ToolLoopService
+    // falls through to assertToolAllowedForOperationMode, which throws on `mcp__*`.
+    // See the plan-mode execution-gate test in operationModeSystemPrompt.test.ts.
     const started = events.find(e => e.type === 'started') as any
-    expect(started.resolvedToolNames).toEqual(['read_file'])
-    expect(providerRouter.calls[0].input.tools.map((t: any) => t.name)).toEqual(['read_file'])
+    expect(started.resolvedToolNames).toEqual(['read_file', 'mcp__server__do'])
+    expect(providerRouter.calls[0].input.tools.map((t: any) => t.name)).toEqual(['read_file', 'mcp__server__do'])
   })
 
   it('marks the run errored when the provider stays empty', async () => {
@@ -304,6 +393,63 @@ describe('SubagentRunService', () => {
     const errorEvent = events.find(e => e.type === 'error') as any
     expect(errorEvent.error).toContain('empty response')
     expect(streamingRunRepo.finishCalls[0]).toMatchObject({ status: 'error' })
+  })
+
+  it('retries a transient provider error and recovers (subagents opt into retryProviderError)', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue(new Error('request failed (429): too many requests'))
+    providerRouter.enqueue({ content: 'recovered after retry' })
+    const runRepo = new FakeRunRepo()
+    const streamingRunRepo = new FakeStreamingRunRepo()
+    const service = buildService({ providerRouter, runRepo, streamingRunRepo })
+
+    const events: HeadlessSubagentStreamEvent[] = []
+    await service.run(baseRequest(), event => events.push(event), new AbortController().signal)
+
+    // The transient 429 triggered one retry, surfaced as a provider_retry status.
+    const retry = events.find(e => e.type === 'tool_loop' && (e as any).status === 'provider_retry') as any
+    expect(retry).toBeTruthy()
+    expect(retry.attempt).toBe(1)
+    expect(providerRouter.calls).toHaveLength(2) // first (429) + retry (success)
+
+    const complete = events.find(e => e.type === 'complete') as any
+    expect(complete.result).toBe('recovered after retry')
+    const runId = (events.find(e => e.type === 'started') as any).subagentRunId
+    expect(runRepo.getRunById(runId)?.status).toBe('completed')
+  })
+
+  it('errors after exhausting provider retries (initial + 2)', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue(new Error('request failed (503): overloaded'))
+    providerRouter.enqueue(new Error('request failed (503): overloaded'))
+    providerRouter.enqueue(new Error('request failed (503): overloaded'))
+    const runRepo = new FakeRunRepo()
+    const streamingRunRepo = new FakeStreamingRunRepo()
+    const service = buildService({ providerRouter, runRepo, streamingRunRepo })
+
+    const events: HeadlessSubagentStreamEvent[] = []
+    await service.run(baseRequest(), event => events.push(event), new AbortController().signal)
+
+    expect(providerRouter.calls).toHaveLength(3) // initial + 2 retries, then give up
+    const runId = (events.find(e => e.type === 'started') as any).subagentRunId
+    expect(runRepo.getRunById(runId)?.status).toBe('error')
+    expect(events.filter(e => e.type === 'tool_loop' && (e as any).status === 'provider_retry')).toHaveLength(2)
+  })
+
+  it('does not retry a non-transient provider error', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue(new Error('request failed (400): bad request'))
+    const runRepo = new FakeRunRepo()
+    const streamingRunRepo = new FakeStreamingRunRepo()
+    const service = buildService({ providerRouter, runRepo, streamingRunRepo })
+
+    const events: HeadlessSubagentStreamEvent[] = []
+    await service.run(baseRequest(), event => events.push(event), new AbortController().signal)
+
+    expect(providerRouter.calls).toHaveLength(1) // a 400 is not transient => no retry
+    expect(events.some(e => e.type === 'tool_loop' && (e as any).status === 'provider_retry')).toBe(false)
+    const runId = (events.find(e => e.type === 'started') as any).subagentRunId
+    expect(runRepo.getRunById(runId)?.status).toBe('error')
   })
 
   it('marks the run aborted when the signal fires', async () => {
@@ -333,6 +479,64 @@ describe('SubagentRunService', () => {
     expect(runRepo.getRunById(runId)?.status).toBe('aborted')
     expect(streamingRunRepo.finishCalls[0]).toMatchObject({ status: 'aborted' })
     expect(providerRouter.calls).toHaveLength(1)
+  })
+
+  it('spawnDetached returns a handle immediately and completes in the background', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({ content: 'async answer' })
+    const runRepo = new FakeRunRepo()
+    const streamingRunRepo = new FakeStreamingRunRepo()
+    const service = buildService({ providerRouter, runRepo, streamingRunRepo })
+
+    const { handle, runId, streamId } = await service.spawnDetached(baseRequest())
+
+    // Handle is returned and the run row exists synchronously (before the loop finishes).
+    expect(handle).toMatch(/^\d{6}$/)
+    expect(streamId).toBe('sub-stream-1')
+    expect(runRepo.getRunById(runId)?.prompt).toBe('do the task')
+
+    await waitFor(() => runRepo.getRunById(runId)?.status === 'completed')
+    expect(runRepo.getRunById(runId)?.final_response).toBe('async answer')
+    // Deregistered from the in-process active-run map once terminal.
+    expect(service.isActive(handle!)).toBe(false)
+  })
+
+  it('cancel(handle) aborts a detached run that is still executing', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({ content: '', toolCalls: [{ id: 'c1', name: 'read_file', arguments: {} }] })
+    providerRouter.enqueue({ content: 'unreached' })
+    const runRepo = new FakeRunRepo()
+    const streamingRunRepo = new FakeStreamingRunRepo()
+
+    let releaseTool!: () => void
+    const toolGate = new Promise<void>(resolve => {
+      releaseTool = resolve
+    })
+    let signalToolStarted!: () => void
+    const toolStarted = new Promise<void>(resolve => {
+      signalToolStarted = resolve
+    })
+    const service = buildService({
+      providerRouter,
+      runRepo,
+      streamingRunRepo,
+      toolExecutor: async () => {
+        signalToolStarted()
+        await toolGate
+        return 'ok'
+      },
+    })
+
+    const { handle, runId } = await service.spawnDetached(baseRequest())
+    await toolStarted // run is now mid-flight inside the tool
+    expect(service.isActive(handle!)).toBe(true)
+    expect(service.cancel(handle!)).toBe(true)
+    releaseTool()
+
+    await waitFor(() => runRepo.getRunById(runId)?.status === 'aborted')
+    expect(streamingRunRepo.finishCalls.at(-1)).toMatchObject({ status: 'aborted' })
+    expect(providerRouter.calls).toHaveLength(1) // second turn never ran
+    expect(service.cancel(handle!)).toBe(false) // no longer active
   })
 
   it('compacts the transcript when usage crosses the threshold', async () => {
@@ -378,5 +582,145 @@ describe('SubagentRunService', () => {
     const runId = (events.find(e => e.type === 'started') as any).subagentRunId
     const systemRow = runRepo.getMessages(runId).find(m => m.role === 'system')
     expect(systemRow?.content).toContain('Following is summary of the session')
+  })
+
+  // Seed a terminated run + its transcript directly on the fake repo (as a crash
+  // would have left it) so resume has something to rebuild from.
+  function seedTerminatedRun(
+    runRepo: FakeRunRepo,
+    opts: { status?: 'error' | 'aborted'; danglingToolCall?: boolean } = {}
+  ): string {
+    const run = runRepo.createRun(baseRequest())
+    const runId = run.id
+    runRepo.appendMessage(runId, {
+      role: 'user',
+      content: 'do the task',
+      contentBlocks: [{ type: 'text', content: 'do the task', subagent_role: 'user_prompt' }],
+    })
+    runRepo.appendMessage(runId, {
+      role: 'assistant',
+      content: 'starting work',
+      toolCalls: opts.danglingToolCall ? [{ id: 'call-x', name: 'read_file', arguments: { path: 'a' } }] : null,
+      contentBlocks: opts.danglingToolCall
+        ? [
+            { type: 'text', content: 'starting work' },
+            { type: 'tool_use', id: 'call-x', name: 'read_file', input: { path: 'a' } },
+          ]
+        : [{ type: 'text', content: 'starting work' }],
+    })
+    runRepo.updateRun(runId, { status: opts.status ?? 'error', error: 'boom' })
+    return runId
+  }
+
+  it('resumes a terminated run from its persisted transcript (rebuilt history, budget carried)', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({ content: 'resumed final answer' })
+    const runRepo = new FakeRunRepo()
+    const streamingRunRepo = new FakeStreamingRunRepo()
+    const service = buildService({ providerRouter, runRepo, streamingRunRepo })
+    const runId = seedTerminatedRun(runRepo)
+
+    const outcome = await service.resumeDetached(runId, baseRequest())
+    expect(outcome).not.toBeNull()
+    expect(outcome!.runId).toBe(runId)
+    await waitFor(() => runRepo.getRunById(runId)?.status === 'completed')
+
+    // The provider was replayed with the REBUILT transcript (prompt + the prior
+    // assistant turn), not a fresh single user turn. (The loop mutates this array
+    // by reference as it appends new turns, so assert the rebuilt prefix, not the
+    // post-run length.)
+    const firstTurnHistory = providerRouter.calls[0].input.history
+    expect(firstTurnHistory[0].role).toBe('user')
+    expect(firstTurnHistory[0].content).toContain('do the task')
+    expect(firstTurnHistory[1].role).toBe('assistant')
+    expect(firstTurnHistory[1].content).toBe('starting work')
+
+    // Budget carried: 1 prior assistant turn + 1 resumed turn = 2.
+    const run = runRepo.getRunById(runId)
+    expect(run?.status).toBe('completed')
+    expect(run?.final_response).toBe('resumed final answer')
+    expect(run?.turns_used).toBe(2)
+    expect(run?.attempt).toBe(1) // reopenRun bumped it
+
+    // A fresh streaming row was opened for the resumed attempt.
+    const lastUpsert = streamingRunRepo.upsertCalls[streamingRunRepo.upsertCalls.length - 1]
+    expect(lastUpsert.metadata).toMatchObject({ subagent_run_id: runId, resumed: true })
+  })
+
+  it('repairs a dangling tool_use before replay (synthesizes an is_error result, never re-executes)', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({ content: 'done after repair' })
+    const runRepo = new FakeRunRepo()
+    const toolExecutor = vi.fn(async () => 'should not run')
+    const service = buildService({ providerRouter, runRepo, streamingRunRepo: new FakeStreamingRunRepo(), toolExecutor })
+    const runId = seedTerminatedRun(runRepo, { danglingToolCall: true })
+
+    await service.resumeDetached(runId, baseRequest())
+    await waitFor(() => runRepo.getRunById(runId)?.status === 'completed')
+
+    // The interrupted tool was NOT re-executed.
+    expect(toolExecutor).not.toHaveBeenCalled()
+
+    // The tail assistant now carries a synthetic is_error tool_result for call-x.
+    const assistant = runRepo.getMessages(runId).find(m => m.role === 'assistant' && Array.isArray(m.tool_calls))
+    const resultBlock = (assistant?.content_blocks as any[]).find(
+      b => b.type === 'tool_result' && b.tool_use_id === 'call-x'
+    )
+    expect(resultBlock).toBeTruthy()
+    expect(resultBlock.is_error).toBe(true)
+    // And the provider's replayed history includes that repaired assistant.
+    const replayed = providerRouter.calls[0].input.history.find((m: any) => Array.isArray(m.tool_calls))
+    expect(replayed.content_blocks.some((b: any) => b.type === 'tool_result' && b.tool_use_id === 'call-x')).toBe(true)
+  })
+
+  it('does not resume a run that is not in a resumable state (reopen CAS fails)', async () => {
+    const providerRouter = new FakeProviderRouter()
+    const runRepo = new FakeRunRepo()
+    const service = buildService({ providerRouter, runRepo, streamingRunRepo: new FakeStreamingRunRepo() })
+    const run = runRepo.createRun(baseRequest()) // status 'running'
+
+    const outcome = await service.resumeDetached(run.id, baseRequest())
+    expect(outcome).toBeNull()
+    expect(providerRouter.calls).toHaveLength(0) // nothing driven
+  })
+
+  it('publishes stream events into the run session for live viewing', async () => {
+    const providerRouter = new FakeProviderRouter()
+    providerRouter.enqueue({ content: 'live answer' })
+    const runRepo = new FakeRunRepo()
+    const streamingRunRepo = new FakeStreamingRunRepo()
+    const runSessions = new FakeRunSessionRegistry()
+    const service = buildService({ providerRouter, runRepo, streamingRunRepo, runSessions })
+
+    await service.run(baseRequest(), () => {}, new AbortController().signal)
+
+    // A session was created for the child streamId and received started -> complete.
+    const session = runSessions.sessions.get('sub-stream-1')
+    expect(session).toBeTruthy()
+    const types = session!.published.map(e => e.type)
+    expect(types[0]).toBe('started')
+    expect(types).toContain('complete')
+    expect(session!.terminal).toBe(true)
+  })
+
+  it('reconciles orphaned running runs into a resumable error state at startup', async () => {
+    const runRepo = new FakeRunRepo()
+    const service = buildService({
+      providerRouter: new FakeProviderRouter(),
+      runRepo,
+      streamingRunRepo: new FakeStreamingRunRepo(),
+    })
+    const orphanA = runRepo.createRun(baseRequest()) // running
+    const orphanB = runRepo.createRun(baseRequest()) // running
+    const done = runRepo.createRun(baseRequest())
+    runRepo.updateRun(done.id, { status: 'completed' })
+
+    const count = service.reconcileOrphanedRuns()
+    expect(count).toBe(2)
+    expect(runRepo.getRunById(orphanA.id)?.status).toBe('error')
+    expect(runRepo.getRunById(orphanB.id)?.status).toBe('error')
+    expect(runRepo.getRunById(done.id)?.status).toBe('completed')
+    // Idempotent: a second sweep finds nothing still running.
+    expect(service.reconcileOrphanedRuns()).toBe(0)
   })
 })

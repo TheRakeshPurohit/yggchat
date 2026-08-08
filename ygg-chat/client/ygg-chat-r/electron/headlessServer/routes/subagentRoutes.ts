@@ -1,5 +1,5 @@
 import type { Express } from 'express'
-import type { HeadlessSubagentStreamRequest } from '../contracts/headlessApi.js'
+import type { HeadlessSubagentStreamRequest } from '../../../../../shared/headlessApi.js'
 import type { SubagentRunService } from '../services/subagentRunService.js'
 import { normalizeProviderRoute } from '../services/providerRouter.js'
 import { initializeSse, startSseHeartbeat, writeSseEvent } from '../stream/sseWriter.js'
@@ -26,6 +26,7 @@ function buildSubagentStreamRequest(body: any): HeadlessSubagentStreamRequest {
     ).trim(),
     toolCallId: body?.toolCallId ?? body?.tool_call_id ?? null,
     streamId: body?.streamId ?? body?.stream_id ?? null,
+    lineageId: body?.lineageId ?? body?.lineage_id ?? null,
     prompt: typeof body?.prompt === 'string' ? body.prompt : '',
     systemPrompt:
       typeof body?.systemPrompt === 'string'
@@ -43,6 +44,10 @@ function buildSubagentStreamRequest(body: any): HeadlessSubagentStreamRequest {
     tools: normalizeToolNames(body?.tools),
     maxTurns: typeof body?.maxTurns === 'number' ? body.maxTurns : undefined,
     temperature: typeof body?.temperature === 'number' ? body.temperature : undefined,
+    reasoningEffort:
+      body?.reasoningEffort === 'low' || body?.reasoningEffort === 'medium' || body?.reasoningEffort === 'high' || body?.reasoningEffort === 'xhigh'
+        ? body.reasoningEffort
+        : undefined,
     operationMode: body?.operationMode === 'plan' || body?.operation_mode === 'plan' ? 'plan' : 'execute',
     autoApprove: body?.autoApprove === true || body?.auto_approve === true,
     rootPath: typeof body?.rootPath === 'string' ? body.rootPath : typeof body?.root_path === 'string' ? body.root_path : null,
@@ -58,6 +63,23 @@ function buildSubagentStreamRequest(body: any): HeadlessSubagentStreamRequest {
 }
 
 export function registerSubagentRoutes(app: Express, deps: RegisterSubagentRoutesDeps): void {
+  // Persisted transcript viewer (Phase 5): resolve the run(s) a given provider tool
+  // call spawned, WITH their transcripts, so the renderer can show the full subagent
+  // conversation after the fact. One tool call maps to one run in practice, but the
+  // repo returns an array (kept as-is here) so a multi-run tool call still renders.
+  app.get('/api/subagents/by-tool-call/:toolCallId', (req, res) => {
+    const toolCallId = String(req.params.toolCallId ?? '').trim()
+    if (!toolCallId) {
+      res.status(400).json({ error: 'toolCallId is required' })
+      return
+    }
+    const runs = deps.runService.listByToolCall(toolCallId)
+    // The current child streamId lets the viewer subscribe to GET /api/streams/:id
+    // for live progress while a run is 'running' (null once nothing is streaming).
+    const streamId = deps.runService.latestStreamIdForToolCall(toolCallId)
+    res.json({ runs, streamId })
+  })
+
   app.post('/api/headless/subagent/stream', async (req, res) => {
     const request = buildSubagentStreamRequest(req.body ?? {})
 

@@ -157,15 +157,19 @@ export const selectStreamCountByType = createSelector([selectStreamingRoot], str
   return counts
 })
 
-// Get the stream that should be displayed for the current view.
-// Branch selection should win over global active streams.
-export const selectCurrentViewStream = createSelector(
-  [
-    selectStreamingRoot,
-    (state: RootState) => state.chat.conversation.currentPath,
-    (state: RootState) => state.chat.conversation.currentConversationId,
-  ],
-  (streaming, currentPath, currentConversationId) => {
+// Pure pane-parameterized helper. Branch selection should win over global active streams.
+export const selectCurrentViewStreamFor = (
+  streaming: ReturnType<typeof selectStreamingRoot>,
+  {
+    conversationId: currentConversationId,
+    lineageId: currentLineageId,
+    path: currentPath,
+  }: {
+    conversationId: string | null | undefined
+    lineageId: string | null | undefined
+    path: readonly MessageId[]
+  }
+) => {
     const activeStreams = Object.entries(streaming.byId).filter(([, stream]) => {
       if (!stream.active) return false
       if (currentConversationId == null) return true
@@ -174,6 +178,22 @@ export const selectCurrentViewStream = createSelector(
 
     if (activeStreams.length === 0) {
       return null
+    }
+
+    // Exact renderer lineage identity takes precedence over mutable message anchors.
+    // Streams without lineageId continue through the legacy branch-anchor ranking below.
+    if (currentLineageId != null) {
+      const exactLineageStreams = activeStreams.filter(
+        ([, stream]) => stream.lineage.lineageId != null && String(stream.lineage.lineageId) === String(currentLineageId)
+      )
+      if (exactLineageStreams.length > 0) {
+        const [id, stream] = exactLineageStreams.sort((a, b) => {
+          if (a[0] === streaming.primaryStreamId) return -1
+          if (b[0] === streaming.primaryStreamId) return 1
+          return b[1].createdAt.localeCompare(a[1].createdAt)
+        })[0]
+        return { id, ...stream }
+      }
     }
 
     // If no path is selected yet, fall back to conversation-scoped primary/first active stream.
@@ -257,9 +277,20 @@ export const selectCurrentViewStream = createSelector(
       return { id: winner.id, ...winner.stream }
     }
 
-    // Path exists but no stream matches that branch closely enough.
-    return null
-  }
+  // Path exists but no stream matches that branch closely enough.
+  return null
+}
+
+// Legacy selector wrapper uses the renderer-owned current pane parameters.
+export const selectCurrentViewStream = createSelector(
+  [
+    selectStreamingRoot,
+    (state: RootState) => state.chat.conversation.currentPath,
+    (state: RootState) => state.chat.conversation.currentConversationId,
+    (state: RootState) => state.chat.conversation.currentLineageId,
+  ],
+  (streaming, path, conversationId, lineageId) =>
+    selectCurrentViewStreamFor(streaming, { conversationId, lineageId, path })
 )
 
 // Get all active streams with their IDs (for multi-stream UI)
@@ -302,6 +333,10 @@ export const selectConversationMessages = createSelector(
   conversation => conversation.messages
 )
 export const selectCurrentPath = createSelector([selectConversationState], conversation => conversation.currentPath)
+export const selectCurrentLineageId = createSelector(
+  [selectConversationState],
+  conversation => conversation.currentLineageId
+)
 export const selectCcCwd = createSelector([selectConversationState], conversation => conversation.ccCwd)
 export const selectBookmarkedMessages = createSelector(
   [selectConversationState],
@@ -326,9 +361,11 @@ export const selectFocusedChatMessageId = createSelector(
   conversation => conversation.focusedChatMessageId
 )
 
-export const selectDisplayMessages = createSelector(
-  [selectConversationMessages, selectCurrentPath],
-  (messages, currentPath) => {
+// Pure pane-parameterized helper for rendering messages on an explicit branch path.
+export const selectDisplayMessagesFor = (
+  messages: ReturnType<typeof selectConversationMessages>,
+  currentPath: readonly MessageId[]
+) => {
     const isPersistentGlobalAgentType = (value: string | null | undefined): boolean =>
       value === 'persistent_agent' || value === 'persistent_agent_summary'
 
@@ -379,10 +416,15 @@ export const selectDisplayMessages = createSelector(
       }
     }
 
-    const unique = new Map<MessageId, (typeof displayableMessages)[number]>()
-    for (const m of displayableMessages) if (!unique.has(m.id)) unique.set(m.id, m)
-    return [...unique.values()].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-  }
+  const unique = new Map<MessageId, (typeof displayableMessages)[number]>()
+  for (const m of displayableMessages) if (!unique.has(m.id)) unique.set(m.id, m)
+  return [...unique.values()].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+}
+
+// Legacy selector wrapper uses the renderer-owned current path.
+export const selectDisplayMessages = createSelector(
+  [selectConversationMessages, selectCurrentPath],
+  (messages, path) => selectDisplayMessagesFor(messages, path)
 )
 
 // Tools selectors
@@ -392,9 +434,6 @@ export const selectToolByName = createSelector(
   [selectTools, (_state: RootState, toolName: string) => toolName],
   (tools, toolName) => tools.find(tool => tool.name === toolName)
 )
-
-// CC Slash Commands selector
-export const selectCCSlashCommands = createSelector([selectChatState], chat => chat.ccSlashCommands)
 
 export const selectStreamUndoRoot = createSelector([selectChatState], chat => chat.streamUndo)
 
