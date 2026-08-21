@@ -17,6 +17,7 @@ import {
   filterToolsForOperationMode,
 } from '../../../../src/features/chats/operationModeSystemPrompt.js'
 import type { ToolDefinition } from '../../../../src/features/chats/toolDefinitions.js'
+import { requiresAgentMode } from '../../../../../../shared/operationModeToolPolicy.js'
 
 describe('buildOperationModeSystemPrompt', () => {
   it('adds concise Plan response style by default', () => {
@@ -25,6 +26,8 @@ describe('buildOperationModeSystemPrompt', () => {
     expect(prompt).toContain('Agent Prompt: Plan mode')
     expect(prompt).toContain('## Plan Response Style')
     expect(prompt).toContain('Use short, concise plans')
+    expect(prompt).toContain('action: "wait"')
+    expect(prompt).toContain('instead of repeatedly polling `status`')
   })
 
   it('adds selected Plan response verbosity', () => {
@@ -41,6 +44,8 @@ describe('buildOperationModeSystemPrompt', () => {
     const prompt = buildOperationModeSystemPrompt({ operationMode: 'execute', includeCustomToolsPrompt: false })
 
     expect(prompt).toContain('Agent Prompt: Coding mode')
+    expect(prompt).toContain('action: "wait"')
+    expect(prompt).toContain('do not repeatedly poll `status`')
     expect(prompt).not.toContain('## Plan Response Style')
   })
 })
@@ -65,9 +70,17 @@ describe('plan mode tool filtering', () => {
   })
 
   it('allows tool-manager calls in plan mode', () => {
-    for (const name of ['bash', 'powershell', 'custom_tool_manager', 'mcp_manager', 'skill_manager']) {
+    for (const name of [
+      'bash',
+      'powershell',
+      'subagent_manager',
+      'custom_tool_manager',
+      'mcp_manager',
+      'skill_manager',
+    ]) {
       expect(() => assertToolAllowedForOperationMode({ name }, 'plan')).not.toThrow()
     }
+    expect(requiresAgentMode({ name: 'subagent_manager' }, 'plan')).toBe(false)
   })
 
   it('blocks file-mutating and mcp tools at execution time in plan mode', () => {

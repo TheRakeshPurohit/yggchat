@@ -136,6 +136,11 @@ Both entry paths now share the server-side `SubagentRunService`:
   Parent-chat `multi_call` batches may invoke `subagent` through the parent dispatcher;
   `multi_call` still rejects recursive `multi_call`, and `SubagentRunService` never
   receives the parent subagent dispatcher, so recursive agents remain impossible.
+- `subagent_manager.wait(handle)` verifies the same branch/conversation ownership
+  as `status`, then awaits the detached attempt's in-process completion promise
+  without polling. It re-reads SQLite before returning the canonical terminal
+  status/result. Aborting the parent releases only the waiter; it does not cancel
+  the child (that remains the explicit `cancel` action).
 - Parent operation mode, stream/message/tool-call lineage, root path, provider/model,
   abort signal, and auto-approve policy are forwarded. `orchestratorMode:true` uses
   the requested child tool names plus the always-required `multi_call` tool; otherwise
@@ -164,7 +169,9 @@ does not round-trip through the renderer or the unfinished `tool_request` bridge
 - **Transcripts, not the chat tree.** Subagent turns go to `subagent_runs` /
   `subagent_messages` via `SubagentTranscriptSink`; they never enter the
   conversation message tree.
-- **No nested subagents.** The engine always excludes `subagent` from a subagent's tool set.
+- **No nested subagents.** The engine always excludes `subagent` and
+  `subagent_manager` from a subagent's tool set. The parent chat may use both in
+  Plan Mode; child runs still cannot spawn nested agents.
 - **Local providers only.** `openrouter` subagents fall back to the default local
   provider client-side and are rejected server-side (`subagentRoutes.ts`).
 - **Abort = close the SSE connection.** The route aborts an `AbortController` on
@@ -173,8 +180,14 @@ does not round-trip through the renderer or the unfinished `tool_request` bridge
 - **Empty output is a typed failure**, never a fake-success "No response generated":
   the loop retries an empty turn once, finalizes when tools ran but produced no
   answer, and otherwise raises `ProviderEmptyResponseError`.
-- **Settings travel per request.** The caller composes the system prompt and selects
-  tools; the server stores nothing between runs.
+- **Settings travel per request.** The renderer forwards its selected subagent baseline
+  on each parent chat request; server-owned `subagent` / `subagent_manager` calls inherit
+  it and append any per-call `systemPrompt`. Direct subagent requests still provide their
+  composed prompt explicitly. The server stores no prompt setting between runs.
+- **Wait is lifecycle-backed, not timer-backed.** Manager `wait` shares the active
+  attempt's completion promise, supports multiple waiters, and has no default
+  timeout. Persisted terminal state remains authoritative; startup reconciliation
+  turns process-lost running rows into resumable errors.
 
 ## Testing and Validation
 

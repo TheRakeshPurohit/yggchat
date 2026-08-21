@@ -107,7 +107,7 @@ The loop pauses mid-turn to ask the renderer for a tool-permission or `plan_md` 
 - **Where it pauses:** inside `createChatPausingExecutor` (`chatOrchestrator.ts:95`), per tool call, *before* delegating to the base executor — `await broker.requestDecision({ streamId, toolCallId, signal })`. `ToolLoopService` itself has no pause concept. Pause is skipped when `broker.isAutoApproveAll(streamId)` or the tool is bypassed (`ALWAYS_BYPASS_TOOLS`, plus `custom_tool_manager` non-`invoke` actions).
 - **SSE decision events** emitted by the pausing executor before awaiting: `permission_required` `{streamId, toolCallId, toolName, toolInput}` and `clarify_required` `{streamId, toolCallId, toolName, questions}` (the latter for `plan_md action==='clarify'`, intercepted and routed through the broker's clarify channel).
 - **`POST /api/resume`** (`chatRoutes.ts:146`, plain JSON): requires `streamId` + `toolCallId` (400 otherwise). Decoding: `body.decision` string → permission (`allow_once | allow_always | deny`); `body.answers`/`body.cancelled` → clarify; `body.result`/`body.error` → tool-bridge decision (future). `decisionBroker.resolve(...)` → 200 `{success:true}` if matched, else **409**.
-- Wrapper handling: `deny` → throw (`is_error` tool_result); `allow_always` → `broker.setAutoApproveAll(streamId)` then execute; `allow_once` → execute.
+- Wrapper handling: `deny` → throw (`is_error` tool_result); `allow_always` atomically promotes the stream and releases every permission waiter already parked for that stream (parallel `multi_call` workers included), while leaving clarify/operation-mode waits interactive; `allow_once` → execute.
 - Renderer side: the 4 resolver thunks (`respondToToolPermission`, `respondToToolPermissionAndEnableAll`, `respondToPlanClarification`, `cancelPlanClarification`) POST `/api/resume` via `postDecisionResume`; the old module-level `pending*Resolve` promises are **deleted**.
 
 ## Detach / reattach — resumable runs (`gateway.resumableRuns`, default ON)
@@ -124,6 +124,7 @@ The loop pauses mid-turn to ask the renderer for a tool-permission or `plan_md` 
   the accepted ceiling; there is no cross-restart durability.
 - Sessions accept one subscriber and use last-attach-wins semantics; renderer per-stream
   reader ownership prevents route remounts from replacing a surviving subscriber.
+- A repeated POST that reuses an existing `streamId` is treated as an idempotent re-attach to the existing session; it must never start a second orchestrator run. The registry also exposes abort-before-replace for explicit replacement callers. Never restore delete-without-abort: it orphaned branch runs outside abort, reattach, and reaper reachability.
 - Explicit `gateway.resumableRuns === false`: `runSseOrchestrator` keeps the legacy path
   (disconnect == abort) and `/api/streams/*` return `501`.
 - Renderer counterpart: `mainChatClient.ts` (in-session resubscribe + `postStreamAbort`) + `resumeInFlightStreams` (mount-time re-attach after a reload) + `inflightStreams.ts` (localStorage tracking) — see `agent_chat_streaming_state.md`.

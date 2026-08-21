@@ -21,6 +21,7 @@ import { isManagedToolPath } from './utils/managedToolPaths.js'
 import { registerHeadlessServerRoutes } from './headlessServer/index.js'
 import { SubagentRunRepo } from './headlessServer/persistence/subagentRunRepo.js'
 import { embedText as embedTextWithLmStudio, embedTexts as embedTextsWithLmStudio, getLmStudioBaseUrl } from './headlessServer/providers/lmStudioEmbeddings.js'
+import { attachChatErrorCode } from './headlessServer/providers/providerErrorFormatter.js'
 import {
   handleLspWebSocketUpgrade,
   initializeLspLocalServer,
@@ -3557,7 +3558,12 @@ function setupServer() {
 
   // GET /api/openai/models - Get available ChatGPT models
   app.get('/api/openai/models', (_req, res) => {
-    // Return hardcoded list of ChatGPT models available with Plus/Pro subscription
+    // Return hardcoded model capabilities with the user's global ChatGPT context override.
+    const configuredContextLength = Number(process.env.YGG_OPENAI_CHATGPT_MAX_CONTEXT_TOKENS)
+    const globalContextLength =
+      Number.isFinite(configuredContextLength) && configuredContextLength > 0
+        ? Math.max(1_000, Math.min(2_000_000, Math.floor(configuredContextLength)))
+        : 258_000
     const models = [
       {
         id: 'gpt-5.5',
@@ -3620,8 +3626,9 @@ function setupServer() {
     res.json({
       models: models.map(m => ({
         ...m,
+        contextLength: globalContextLength,
         version: 'chatgpt',
-        inputTokenLimit: m.contextLength,
+        inputTokenLimit: globalContextLength,
         outputTokenLimit: m.maxCompletionTokens,
         promptCost: 0,
         completionCost: 0,
@@ -9641,13 +9648,21 @@ export async function startLocalServer(
         toolOrchestrator.registerTool(qualifiedName, async (args, _options) => {
           try {
             const mcpResult = await mcpManager.callTool(qualifiedName, args)
+            // A tool-level failure reported BY a reachable MCP server (isError: true) is a
+            // legitimate, model-visible result and still resolves — only a transport-level
+            // failure (below) is an execution error.
             return toMcpExecutionResult(mcpResult)
           } catch (error) {
+            // MUST rethrow. Resolving with { success: false } made the orchestrator mark the
+            // job COMPLETE, so every MCP transport failure (server disconnected, stdio process
+            // dead, HTTP endpoint down, OAuth expired, MCP's own request timeout) surfaced as a
+            // successful tool result with is_error: false. Throwing turns it into a genuine
+            // failed job -> is_error tool result, and gives a retry policy something to hook.
             console.error(`[LocalServer] MCP tool execution error (${qualifiedName}):`, error)
-            return {
-              success: false,
-              error: error instanceof Error ? error.message : String(error),
-            }
+            throw attachChatErrorCode(
+              error instanceof Error ? error : new Error(String(error)),
+              'mcp_unavailable'
+            )
           }
         })
       }

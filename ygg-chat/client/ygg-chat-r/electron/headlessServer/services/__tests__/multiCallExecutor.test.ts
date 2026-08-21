@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createMultiCallDispatchExecutor, executeMultiCall } from '../multiCallExecutor.js'
+import { createChatPausingExecutor } from '../chatOrchestrator.js'
+import { DecisionBroker } from '../decisionBroker.js'
+import { createSubagentDispatchExecutor } from '../subagentToolExecutor.js'
 
 const context = (overrides: Record<string, any> = {}) => ({
   conversationId: 'conversation-1',
@@ -58,6 +61,42 @@ describe('multiCallExecutor', () => {
     expect(result.results.map(item => item.data)).toEqual(['first', 'second', 'third'])
   })
 
+  it('Ask then Allow all releases every parallel nested permission and completes the batch', async () => {
+    const broker = new DecisionBroker()
+    broker.initSession('stream-1', { autoApproveAll: false })
+    const leaf = vi.fn(async nested => nested.name)
+    const emitted: any[] = []
+    const multiCallDispatch = createMultiCallDispatchExecutor(leaf)
+    const permissionExecutor = createChatPausingExecutor({
+      base: multiCallDispatch,
+      broker,
+      streamId: 'stream-1',
+      emit: event => emitted.push(event),
+    })
+    const run = permissionExecutor(
+      call({
+        calls: ['read_file', 'glob', 'ripgrep'].map(tool => ({ tool })),
+        parallel: true,
+        maxConcurrency: 3,
+      }),
+      context({ streamId: 'stream-1', autoApprove: false })
+    )
+
+    for (let i = 0; i < 200 && emitted.filter(event => event.type === 'permission_required').length < 3; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+    const prompts = emitted.filter(event => event.type === 'permission_required')
+    expect(prompts.map(event => event.toolCallId)).toEqual(['batch-1:1', 'batch-1:2', 'batch-1:3'])
+
+    expect(broker.resolve('stream-1', 'batch-1:3', 'allow_always')).toBe(true)
+    const result = await run
+
+    expect(result.results.map(item => item.data)).toEqual(['read_file', 'glob', 'ripgrep'])
+    expect(leaf).toHaveBeenCalledTimes(3)
+    expect(leaf.mock.calls.every(([, nestedContext]) => nestedContext.autoApprove === true)).toBe(true)
+    expect(broker.isAutoApproveAll('stream-1')).toBe(true)
+  })
+
   it('stops sequential execution after an error by default', async () => {
     const execute = vi.fn(async nested => {
       if (nested.name === 'bad') throw new Error('boom')
@@ -104,6 +143,27 @@ describe('multiCallExecutor', () => {
     expect(leaf).not.toHaveBeenCalled()
     expect(nestedExecutor).toHaveBeenCalledOnce()
     expect(result.results[0]).toEqual({ tool: 'read_file', ok: true, data: 'read_file' })
+  })
+
+  it('preserves the custom subagent baseline through a nested multi_call dispatch', async () => {
+    const runForTool = vi.fn(async () => 'subagent result')
+    const subagentDispatch = createSubagentDispatchExecutor({
+      leafExecutor: vi.fn(),
+      subagentRunner: { runForTool },
+    })
+    const dispatch = createMultiCallDispatchExecutor(subagentDispatch)
+    const toolContext = context({
+      subagentSystemPrompt: 'Custom Subagent baseline',
+      nestedExecutor: subagentDispatch,
+    })
+
+    const result = await dispatch(
+      call({ calls: [{ tool: 'subagent', args: { prompt: 'Scout', systemPrompt: 'Report facts only' } }] }),
+      toolContext
+    )
+
+    expect(result.results[0]).toEqual({ tool: 'subagent', ok: true, data: 'subagent result' })
+    expect(runForTool.mock.calls[0][0].systemPrompt).toBe('Custom Subagent baseline\n\nReport facts only')
   })
 
   it('does not expose ephemeral nested modelContent in the aggregate result', async () => {

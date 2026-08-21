@@ -1,10 +1,71 @@
 import type { Express, Request, Response } from 'express'
+import type { ChatErrorCode, ChatErrorEnvelope } from '../../../../../shared/chatErrors.js'
+import { buildChatErrorEnvelope } from '../../../../../shared/chatErrors.js'
 import type { HeadlessChatOperation, HeadlessMessageRequest, HeadlessStreamEvent } from '../../../../../shared/headlessApi.js'
+import { classifyChatError } from '../providers/providerErrorFormatter.js'
 import type { HeadlessChatOrchestrator } from '../services/chatOrchestrator.js'
 import type { CompactionService } from '../services/compactionService.js'
 import type { Decision, DecisionBroker } from '../services/decisionBroker.js'
 import type { RunSessionRegistry, RunSubscriber } from '../services/runSessionRegistry.js'
 import { initializeSse, startSseHeartbeat, writeSseEvent } from '../stream/sseWriter.js'
+
+/**
+ * Did the orchestrator ALREADY publish a classified terminal frame for this error?
+ *
+ * `chatOrchestrator` emits its own `{type:'error', envelope}` (and `reauth_required`,
+ * and the ProviderErrorAssistantResponse `complete`) before rethrowing, so the route's
+ * catch used to emit a SECOND, worse terminal frame for the same failure. The renderer
+ * keeps the LAST frame, so the good envelope lost to the raw `Error.message` one.
+ *
+ * The orchestrator marks such an error; we only fall back for exceptions that never
+ * reached its catch at all (request-parse failures, throws before `runMessage`).
+ * Several spellings are tolerated so this stays correct regardless of which one the
+ * orchestrator settles on — `chatErrorPublished` is the canonical name.
+ */
+function orchestratorAlreadyPublished(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const e = error as Record<string, unknown>
+  return e.chatErrorPublished === true || e.__chatErrorPublished === true || e.terminalFramePublished === true
+}
+
+/**
+ * Build the route's own terminal frame for an exception the orchestrator never
+ * classified. `error` keeps the raw text (logs / `envelope.detail`); `envelope` is the
+ * only thing a renderer may show.
+ */
+function buildRouteErrorEvent(error: unknown, body: Record<string, any>): HeadlessStreamEvent {
+  const message = error instanceof Error ? error.message : String(error)
+  const provider = typeof body.provider === 'string' ? body.provider : undefined
+  const modelName =
+    typeof body.modelName === 'string' ? body.modelName : typeof body.model_name === 'string' ? body.model_name : undefined
+  const envelope = classifyChatError(error, { provider, modelName, phase: 'lifecycle' })
+  if (!envelope.detail) envelope.detail = message
+  return {
+    type: 'error',
+    error: message,
+    lineageId: (error as any)?.lineageId ?? null,
+    envelope,
+  } as HeadlessStreamEvent
+}
+
+/**
+ * A non-SSE JSON error body. `error` stays the raw/technical string (logs, existing
+ * callers); `envelope` carries the user-facing prose + the single call to action.
+ */
+function sendJsonError(
+  res: Response,
+  status: number,
+  detail: string,
+  code: ChatErrorCode,
+  overrides: Partial<Omit<ChatErrorEnvelope, 'code'>> = {},
+  extra: Record<string, unknown> = {}
+): void {
+  res.status(status).json({
+    error: detail,
+    ...extra,
+    envelope: buildChatErrorEnvelope(code, { status, detail, ...overrides }),
+  })
+}
 
 interface RegisterChatRoutesDeps {
   orchestrator: HeadlessChatOrchestrator
@@ -63,6 +124,9 @@ function buildHeadlessMessageRequest(req: Request, operation: HeadlessChatOperat
     accessToken: body.accessToken ?? body.access_token ?? (authorizationHeader?.replace(/^Bearer\s+/i, '') ?? null),
     accountId: body.accountId ?? body.account_id ?? accountIdFromHeader ?? null,
     systemPrompt: body.systemPrompt ?? body.system_prompt ?? null,
+    operationModePrompt: body.operationModePrompt ?? body.operation_mode_prompt ?? null,
+    agentModePrompt: body.agentModePrompt ?? body.agent_mode_prompt ?? null,
+    subagentModePrompt: body.subagentModePrompt ?? body.subagent_mode_prompt ?? null,
     conversationContext: body.conversationContext ?? body.conversation_context ?? null,
     projectContext: body.projectContext ?? body.project_context ?? null,
     think: typeof body.think === 'boolean' ? body.think : undefined,
@@ -127,9 +191,9 @@ function buildHeadlessMessageRequest(req: Request, operation: HeadlessChatOperat
     localApiBase: body.localApiBase ?? body.local_api_base ?? null,
     // Auto-compaction / context settings. Previously DROPPED here, so the orchestrator
     // received undefined and the server applied its defaults (autoCompactionEnabled ?? true;
-    // contextLength ?? openAIModelContextLength(model); thresholdPercent ?? 85) — ignoring the
-    // user's disable toggle, threshold, and the selected model's real window. Parsed
-    // undefined-safe so the mobile LAN UI / subagents (which omit them) keep the defaults.
+    // contextLength is resolved again by ProviderRouter: ChatGPT always uses the global
+    // provider override mirrored into the Electron process; other providers retain the
+    // selected model value. Parsed undefined-safe for mobile/direct callers.
     autoCompactionEnabled:
       typeof body.autoCompactionEnabled === 'boolean'
         ? body.autoCompactionEnabled
@@ -202,7 +266,11 @@ async function runSseOrchestrator(
           parentId: body.parentId ?? body.parent_id ?? null,
         })
       }
-      writeSseEvent(res, { type: 'error', error: message, lineageId: (error as any)?.lineageId ?? null })
+      // Only a genuine fallback: if the orchestrator already published a classified
+      // terminal frame, a second one here would OVERWRITE it in the renderer.
+      if (!orchestratorAlreadyPublished(error)) {
+        writeSseEvent(res, buildRouteErrorEvent(error, body))
+      }
     } finally {
       finished = true
       stopHeartbeat()
@@ -216,14 +284,33 @@ async function runSseOrchestrator(
   // POST /api/streams/:id/abort or the reaper cancels it. ──
   const registry = opts.runSessions!
   const conversationId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
-  // A fresh start supersedes any stale/lingering session for this id. streamIds are
-  // unique per send, so this is virtually always a no-op.
-  registry.delete(String(streamId))
-  const session = registry.create(String(streamId), conversationId || null)
+  const normalizedStreamId = String(streamId)
 
   initializeSse(res)
   const stopHeartbeat = startSseHeartbeat(res)
-  const subscriber = makeSubscriber(res)
+  const baseSubscriber = makeSubscriber(res)
+  const subscriber: RunSubscriber = {
+    send: frame => baseSubscriber.send(frame),
+    end: () => {
+      stopHeartbeat()
+      baseSubscriber.end()
+    },
+  }
+
+  // A repeated POST for the same stream is an idempotent re-attach, not a second run.
+  // Starting a replacement while the old run unwinds lets its broker cleanup reject the
+  // replacement branch's decisions; deleting it instead makes the old run unreachable.
+  const existingSession = registry.get(normalizedStreamId)
+  if (existingSession) {
+    res.on('close', () => {
+      stopHeartbeat()
+      existingSession.detach(subscriber)
+    })
+    existingSession.attach(subscriber)
+    return
+  }
+
+  const session = registry.create(normalizedStreamId, conversationId || null)
   res.on('close', () => {
     stopHeartbeat()
     session.detach(subscriber) // keep the run alive; only release this socket
@@ -247,12 +334,66 @@ async function runSseOrchestrator(
         parentId: body.parentId ?? body.parent_id ?? null,
       })
     }
-    session.publish({ type: 'error', error: message, lineageId: (error as any)?.lineageId ?? null } as HeadlessStreamEvent)
+    // Same rule as the legacy path: never publish a second terminal frame over the
+    // orchestrator's classified one — the session buffer replays the LAST one too.
+    if (!orchestratorAlreadyPublished(error)) {
+      session.publish(buildRouteErrorEvent(error, body))
+    }
   } finally {
     stopHeartbeat()
     // No res.end()/delete here: a terminal publish already released the live subscriber,
     // and the session lingers for a late reconnect until the reaper evicts it.
   }
+}
+
+/**
+ * Why a reattach found no session. The 410 used to mean all of these at once, which
+ * is why it could not be rendered: `completed` is a SUCCESS and must never surface as
+ * a hard failure, while `cancelled` and `expired` are genuine (different) endings.
+ * The renderer branches on `reason`; `envelope` is what it shows if it shows anything.
+ */
+export type StreamGoneReason = 'cancelled' | 'completed' | 'errored' | 'expired' | 'unknown'
+
+/**
+ * Optional, additive registry capability. Once a session is evicted the registry keeps
+ * nothing, so today every eviction is indistinguishable — `lastOutcome` is the tombstone
+ * lookup that makes the three cases separable. Duck-typed on purpose: this route is
+ * correct (degrading to `unknown`) against a registry that does not implement it.
+ */
+interface RunOutcomeLookup {
+  lastOutcome?: (streamId: string) => StreamGoneReason | undefined
+}
+
+const STREAM_GONE_ENVELOPES: Record<StreamGoneReason, () => ChatErrorEnvelope> = {
+  // Ended on purpose. Retry is the honest affordance.
+  cancelled: () => buildChatErrorEnvelope('cancelled', { status: 410 }),
+  // SUCCESS that outlived its linger window. Not a failure: reload and it is all there.
+  completed: () =>
+    buildChatErrorEnvelope('run_expired', {
+      status: 410,
+      userMessage: 'This reply finished while you were away. Reload the conversation to see it.',
+      recoverability: 'user_action',
+    }),
+  // The run failed and already delivered its own error frame; the saved copy has it.
+  errored: () =>
+    buildChatErrorEnvelope('run_expired', {
+      status: 410,
+      userMessage: 'This reply ended while you were away. Reload the conversation to see what happened.',
+    }),
+  // Still running when it was reaped for being abandoned — genuinely cut off.
+  expired: () => buildChatErrorEnvelope('stream_interrupted', { status: 410 }),
+  // No tombstone: it either finished or expired, and `run_expired` says exactly that.
+  unknown: () => buildChatErrorEnvelope('run_expired', { status: 410 }),
+}
+
+/** 410 for `GET /api/streams/:streamId`: `gone` is kept for existing clients. */
+function sendStreamGone(res: Response, registry: RunSessionRegistry, streamId: string | null): void {
+  const lookup = registry as unknown as RunOutcomeLookup
+  const reason: StreamGoneReason =
+    (streamId && typeof lookup.lastOutcome === 'function' ? lookup.lastOutcome(streamId) : undefined) ?? 'unknown'
+  const envelope = STREAM_GONE_ENVELOPES[reason]?.() ?? STREAM_GONE_ENVELOPES.unknown()
+  envelope.detail = `No live run for that streamId (${reason})`
+  res.status(410).json({ error: 'No live run for that streamId', gone: true, reason, envelope })
 }
 
 export function registerChatRoutes(app: Express, deps: RegisterChatRoutesDeps): void {
@@ -264,45 +405,68 @@ export function registerChatRoutes(app: Express, deps: RegisterChatRoutesDeps): 
   // broker key), so this is a flat route.
   app.post('/api/resume', (req, res) => {
     if (!decisionBroker) {
-      res.status(501).json({ error: 'Decision broker not configured' })
+      // The user answered a permission/clarify prompt and there is nowhere to deliver
+      // it — retrying can never work on this server, so this is fatal, not retryable.
+      sendJsonError(res, 501, 'Decision broker not configured', 'decision_not_delivered', { recoverability: 'fatal' })
       return
     }
     const body = req.body ?? {}
     const streamId = body.streamId ?? body.stream_id
     const toolCallId = body.toolCallId ?? body.tool_call_id
     if (!streamId || !toolCallId) {
-      res.status(400).json({ error: 'streamId and toolCallId are required' })
+      sendJsonError(res, 400, 'streamId and toolCallId are required', 'decision_not_delivered')
       return
     }
     let decision: Decision
     if (typeof body.decision === 'string') {
+      const allowedDecisions = new Set(['allow_once', 'allow_always', 'deny', 'switch_to_execute'])
+      if (!allowedDecisions.has(body.decision)) {
+        sendJsonError(res, 400, 'Invalid decision value', 'decision_not_delivered')
+        return
+      }
       decision = body.decision as Decision // permission or operation-mode-upgrade decision
     } else if (body.answers !== undefined || body.cancelled !== undefined) {
       decision = { answers: body.answers, cancelled: body.cancelled } // plan_md clarify
     } else if (body.result !== undefined || body.error !== undefined) {
       decision = { result: body.result, error: body.error } // tool bridge (future)
     } else {
-      res.status(400).json({ error: 'decision, answers/cancelled, or result/error is required' })
+      sendJsonError(res, 400, 'decision, answers/cancelled, or result/error is required', 'decision_not_delivered')
       return
     }
     const matched = decisionBroker.resolve(String(streamId), String(toolCallId), decision)
-    if (matched) res.status(200).json({ success: true })
-    else res.status(409).json({ success: false, error: 'No pending decision for that stream/toolCall' })
+    if (matched) {
+      res.status(200).json({ success: true })
+    } else {
+      // 409: the run already moved on (resolved, aborted, or reaped). Resending the same
+      // answer cannot help, so point at a reload rather than a retry.
+      sendJsonError(
+        res,
+        409,
+        'No pending decision for that stream/toolCall',
+        'decision_not_delivered',
+        { action: { kind: 'reload_conversation', label: 'Reload conversation' } },
+        { success: false }
+      )
+    }
   })
 
   // Detach/reattach (gateway.resumableRuns). Reconnect to an in-flight run by streamId
   // and replay every buffered event after ?fromSeq. Any parked permission_required /
   // clarify_required event is in that buffer, so it re-surfaces on replay for free.
-  // 410 => the run is gone (client should reload persisted messages).
+  // 410 => the run is gone (client should reload persisted messages). The body carries
+  // a `reason` discriminator + an envelope, because "gone" covers a SUCCESS that simply
+  // outlived its linger window as well as a cancel and an expiry — see sendStreamGone.
   app.get('/api/streams/:streamId', (req, res) => {
     if (!runSessions || !resumableRuns) {
-      res.status(501).json({ error: 'Resumable runs are not enabled' })
+      // Reattach is unavailable on this server: the stream really is cut off and the
+      // only recovery is to reload the persisted copy.
+      sendJsonError(res, 501, 'Resumable runs are not enabled', 'stream_interrupted')
       return
     }
     const streamIdParam = Array.isArray(req.params.streamId) ? req.params.streamId[0] : req.params.streamId
     const session = streamIdParam ? runSessions.get(String(streamIdParam)) : undefined
     if (!session) {
-      res.status(410).json({ error: 'No live run for that streamId', gone: true })
+      sendStreamGone(res, runSessions, streamIdParam ? String(streamIdParam) : null)
       return
     }
     const fromSeqRaw = req.query.fromSeq
@@ -320,7 +484,15 @@ export function registerChatRoutes(app: Express, deps: RegisterChatRoutesDeps): 
     const result = session.attach(subscriber, fromSeq)
     if (result.status === 'truncated') {
       // The client's cursor predates the retained buffer — it must reload from storage.
-      writeSseEvent(res, { type: 'error', error: 'stream_buffer_truncated' })
+      // `error` keeps the machine token for logs; the envelope is the user-facing form.
+      writeSseEvent(res, {
+        type: 'error',
+        error: 'stream_buffer_truncated',
+        envelope: buildChatErrorEnvelope('history_truncated', {
+          action: { kind: 'reload_conversation', label: 'Reload conversation' },
+          detail: 'stream_buffer_truncated',
+        }),
+      } as HeadlessStreamEvent)
       stopHeartbeat()
       res.end()
     } else if (result.status === 'replayed-terminal') {
@@ -334,17 +506,23 @@ export function registerChatRoutes(app: Express, deps: RegisterChatRoutesDeps): 
   // detaches). Aborting the run signal also unblocks any paused permission/clarify wait.
   app.post('/api/streams/:streamId/abort', (req, res) => {
     if (!runSessions || !resumableRuns) {
-      res.status(501).json({ error: 'Resumable runs are not enabled' })
+      // The user pressed Stop and this server cannot honour it.
+      sendJsonError(res, 501, 'Resumable runs are not enabled', 'stop_not_confirmed', { recoverability: 'fatal' }, { success: false })
       return
     }
     const streamIdParam = Array.isArray(req.params.streamId) ? req.params.streamId[0] : req.params.streamId
     const cancelled = streamIdParam ? runSessions.cancel(String(streamIdParam)) : false
-    res.status(cancelled ? 200 : 404).json({ success: cancelled })
+    if (cancelled) {
+      res.status(200).json({ success: true })
+      return
+    }
+    // No session for that id: it already ended, or it is running somewhere we cannot see.
+    sendJsonError(res, 404, 'No live run for that streamId', 'stop_not_confirmed', {}, { success: false })
   })
 
   app.post('/api/conversations/:id/compact', async (req, res) => {
     if (!compactionService) {
-      res.status(501).json({ error: 'Compaction service is not configured' })
+      sendJsonError(res, 501, 'Compaction service is not configured', 'compaction_failed', { recoverability: 'fatal' })
       return
     }
 
@@ -355,15 +533,15 @@ export function registerChatRoutes(app: Express, deps: RegisterChatRoutesDeps): 
       const messages = Array.isArray(body.messages) ? body.messages : []
 
       if (!conversationIdParam) {
-        res.status(400).json({ error: 'conversation id is required' })
+        sendJsonError(res, 400, 'conversation id is required', 'server_rejected_request')
         return
       }
       if (!parentMessageId) {
-        res.status(400).json({ error: 'parentMessageId is required' })
+        sendJsonError(res, 400, 'parentMessageId is required', 'server_rejected_request')
         return
       }
       if (messages.length < 2) {
-        res.status(400).json({ error: 'At least two source messages are required' })
+        sendJsonError(res, 400, 'At least two source messages are required', 'server_rejected_request')
         return
       }
 
@@ -381,9 +559,13 @@ export function registerChatRoutes(app: Express, deps: RegisterChatRoutesDeps): 
 
       res.status(201).json({ success: true, message: result.message })
     } catch (error) {
+      // Raw text goes to `detail` only; the classifier owns what the user reads.
       const message = error instanceof Error ? error.message : String(error)
       const status = message.includes('not found') ? 404 : 500
-      res.status(status).json({ error: message })
+      const envelope = classifyChatError(error, { phase: 'compaction' })
+      envelope.status = status
+      if (!envelope.detail) envelope.detail = message
+      res.status(status).json({ error: message, envelope })
     }
   })
 

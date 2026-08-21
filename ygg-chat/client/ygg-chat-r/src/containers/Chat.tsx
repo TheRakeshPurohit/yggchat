@@ -16,15 +16,19 @@ import {
   ReasoningConfig,
 } from '../../../../shared/types'
 import {
+  buildChatErrorEnvelope,
+  type ChatErrorActionKind,
+  type ChatErrorCode,
+  type ChatErrorEnvelope,
+} from '../../../../shared/chatErrors'
+import {
   ActionPopover,
   Button,
   ChatMessage,
   DeleteConfirmModal,
-  FreeGenerationsModal,
   Heimdall,
   ParallelChatPane,
   type ParallelChatPaneTarget,
-  InputTextArea,
   ModelSelectControl,
   PlanClarificationPanel,
   ReasoningLevelControl,
@@ -35,6 +39,13 @@ import {
   ToolJobsModal,
   ToolPermissionDialog,
 } from '../components'
+import { ChatErrorBubble } from '../components/ChatErrorBubble/ChatErrorBubble'
+import {
+  ChatInputController,
+  type ChatInputControllerHandle,
+  type ChatInputUpdater,
+  type ComposerSlashCommandResult,
+} from '../components/ChatPane/ChatInputController'
 import { useHtmlIframeRegistry } from '../components/HtmlIframeRegistry/HtmlIframeRegistry'
 import { contentSpringTransition, softTransition } from '../components/motion'
 import { ContextUsageSparkline } from '../components/ContextUsageSparkline/ContextUsageSparkline'
@@ -108,7 +119,20 @@ import {
   updateConversationTitle,
   updateMessage,
 } from '../features/chats'
-import type { ContentBlock, ImageDraftTarget, StreamUndoSummary, ToolCall } from '../features/chats/chatTypes'
+import type {
+  ChatErrorRecord,
+  ContentBlock,
+  ImageDraftTarget,
+  StreamUndoSummary,
+  ToolCall,
+} from '../features/chats/chatTypes'
+import { selectChatErrorsForConversation } from '../features/chats/chatSelectors'
+import { readServerLoopRejection } from '../features/chats/chatActions'
+import {
+  buildChatErrorRecord,
+  classifyLocalChatError,
+  type LocalChatErrorPhase,
+} from '../features/chats/localChatErrors'
 import type { PlanClarificationAnswer } from '../features/chats/planToolTypes'
 import {
   estimateContentBlocksForContext,
@@ -171,6 +195,7 @@ import {
   loadProviderSettings,
   PROVIDER_SETTINGS_CHANGE_EVENT,
   ProviderSettings,
+  resolveProviderContextLength,
 } from '../helpers/providerSettingsStorage'
 import { isOrchestratorEnabled, toggleOrchestratorEnabled } from '../helpers/subagentToolSettings'
 import {
@@ -248,6 +273,14 @@ type VirtualRenderRow =
       kind: 'generation_loader'
       key: 'generation-loader'
     }
+  // Tier 2 of the error surface: a failure with no assistant message to live on
+  // (pre-persist server failures, renderer-local transport failures). Rendered as a
+  // real row so a failed turn always leaves something visible in the transcript.
+  | {
+      kind: 'chat_error'
+      key: string
+      record: ChatErrorRecord
+    }
 
 type BenchAction = 'on' | 'off' | 'status' | 'export' | 'reset'
 type ThemeDemoAction = 'on' | 'off'
@@ -285,37 +318,6 @@ type BenchStats = {
   avg: number
   p50: number
   p95: number
-}
-
-type ChatInputUpdater = string | ((prev: string) => string)
-
-type ChatInputControllerHandle = {
-  getValue: () => string
-  setValue: (next: ChatInputUpdater) => void
-  clear: () => void
-  focus: () => void
-}
-
-type ComposerSlashCommandResult = {
-  handled: boolean
-  clearInput?: boolean
-}
-
-type ChatInputControllerProps = {
-  conversationId: ConversationId | null
-  initialValue: string
-  slashCommands?: string[]
-  onSlashCommandSelect?: (command: string) => ComposerSlashCommandResult | void
-  onHasTextChange: (hasText: boolean) => void
-  onSubmit: () => void
-  onBlurPersist: (content: string) => void
-  onAddCurrentIdeContext?: () => boolean
-  onClearIdeContexts?: () => void
-  selectedIdeContextItems?: Array<{ id: string; label: string }>
-  fallbackFileSearchRoot?: string | null
-  filterSelectedMentionFiles?: boolean
-  imageDraftTarget?: ImageDraftTarget
-  fontSizeOffset?: number
 }
 
 type AddedIdeContext = {
@@ -762,6 +764,19 @@ const getResponsesOutputAssistantTexts = (block: ContentBlock): string[] => {
   return extractAssistantTextsFromResponsesOutputItems(blockRecord.items)
 }
 
+/**
+ * Identity of a failure as the user perceives it, used to tell "the same failure drawn twice"
+ * from "two failures that happen to be similar".
+ *
+ * An `ErrorBlock` carries no record/stream id, so the envelope IS the only shared handle
+ * between tier 1 (persisted block) and tier 2 (`ChatErrorRecord`). Code + the exact user-facing
+ * string + the technical detail is a tight enough triple: two distinct failures that agree on
+ * all three are indistinguishable on screen anyway, so collapsing them is still one bubble per
+ * visible failure.
+ */
+const chatErrorIdentityKey = (envelope: ChatErrorEnvelope): string =>
+  `${envelope.code}\u0000${envelope.userMessage ?? ''}\u0000${envelope.detail ?? ''}`
+
 const isProcessContentBlock = (block: ContentBlock): boolean => {
   if (
     block.type === 'thinking' ||
@@ -851,142 +866,6 @@ const parseMessageDataForRender = (msg: Message): ParsedMessageData => {
   return { toolCalls, contentBlocks }
 }
 
-const ChatInputController = React.memo(
-  React.forwardRef<ChatInputControllerHandle, ChatInputControllerProps>(
-    (
-      {
-        conversationId,
-        initialValue,
-        slashCommands,
-        onSlashCommandSelect,
-        onHasTextChange,
-        onSubmit,
-        onBlurPersist,
-        onAddCurrentIdeContext,
-        onClearIdeContexts,
-        selectedIdeContextItems,
-        fallbackFileSearchRoot,
-        filterSelectedMentionFiles = true,
-        imageDraftTarget = { kind: 'composer' },
-        fontSizeOffset = 0,
-      },
-      ref
-    ) => {
-      const [value, setValueState] = useState(initialValue)
-      const valueRef = useRef(initialValue)
-      const wrapperRef = useRef<HTMLDivElement | null>(null)
-      const lastHasTextRef = useRef(initialValue.trim().length > 0)
-
-      const publishHasText = useCallback(
-        (nextValue: string) => {
-          const hasText = nextValue.trim().length > 0
-          if (hasText !== lastHasTextRef.current) {
-            lastHasTextRef.current = hasText
-            onHasTextChange(hasText)
-          }
-        },
-        [onHasTextChange]
-      )
-
-      const setValue = useCallback(
-        (next: ChatInputUpdater) => {
-          const prevValue = valueRef.current
-          const nextValue = typeof next === 'function' ? next(prevValue) : next
-          valueRef.current = nextValue
-          setValueState(nextValue)
-          publishHasText(nextValue)
-        },
-        [publishHasText]
-      )
-
-      const clear = useCallback(() => {
-        setValue('')
-      }, [setValue])
-
-      const focus = useCallback(() => {
-        const textarea = wrapperRef.current?.querySelector('textarea')
-        if (!textarea) return
-        try {
-          textarea.focus({ preventScroll: true })
-        } catch {
-          textarea.focus()
-        }
-      }, [])
-
-      useEffect(() => {
-        valueRef.current = initialValue
-        setValueState(initialValue)
-        const hasText = initialValue.trim().length > 0
-        lastHasTextRef.current = hasText
-        onHasTextChange(hasText)
-      }, [conversationId, initialValue, onHasTextChange])
-
-      React.useImperativeHandle(
-        ref,
-        () => ({
-          getValue: () => valueRef.current,
-          setValue,
-          clear,
-          focus,
-        }),
-        [clear, focus, setValue]
-      )
-
-      const handleChange = useCallback(
-        (nextValue: string) => {
-          valueRef.current = nextValue
-          setValueState(nextValue)
-          publishHasText(nextValue)
-        },
-        [publishHasText]
-      )
-
-      const handleKeyDown = useCallback(
-        (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-          if (event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault()
-            onSubmit()
-          }
-        },
-        [onSubmit]
-      )
-
-      const handleBlur = useCallback(() => {
-        onBlurPersist(valueRef.current)
-      }, [onBlurPersist])
-
-      return (
-        <div ref={wrapperRef}>
-          <InputTextArea
-            value={value}
-            onChange={handleChange}
-            onKeyDown={handleKeyDown}
-            onBlur={handleBlur}
-            placeholder='Type your message...'
-            state='default'
-            width='w-full'
-            minRows={1}
-            autoFocus={true}
-            showCharCount={false}
-            slashCommands={slashCommands}
-            onSlashCommandSelect={onSlashCommandSelect}
-            onAddCurrentIdeContext={onAddCurrentIdeContext}
-            onClearIdeContexts={onClearIdeContexts}
-            selectedIdeContextItems={selectedIdeContextItems}
-            fallbackFileSearchRoot={fallbackFileSearchRoot}
-            filterSelectedMentionFiles={filterSelectedMentionFiles}
-            enableImageAttachments={true}
-            imageDraftTarget={imageDraftTarget}
-            fontSizeOffset={fontSizeOffset}
-            className='!border-0 !focus:border-0 !outline-none !shadow-none focus:!ring-0'
-          />
-        </div>
-      )
-    }
-  )
-)
-
-ChatInputController.displayName = 'ChatInputController'
 
 function Chat() {
   const dispatch = useAppDispatch()
@@ -1109,7 +988,86 @@ function Chat() {
   // const canSendFromRedux = useAppSelector(selectCanSend)
   const sendingState = useAppSelector(selectSendingState)
   const currentConversationId = useAppSelector(selectCurrentConversationId)
+  // Undismissed tier-2 failures for this conversation. Memoized + stable-empty, so a
+  // conversation with no errors never produces a new array reference.
+  const chatErrorRecords = useAppSelector(state => selectChatErrorsForConversation(state, currentConversationId))
   const snapshotConversationId = useAppSelector(state => state.chat.conversation.snapshotConversationId)
+
+  /**
+   * The one place a renderer-local rejection becomes something the user can see.
+   *
+   * Every `.unwrap()` catch in this container used to terminate in `console.error`, which is
+   * invisible; several of them additionally cleared the optimistic message, so the user's own
+   * typed text vanished with no explanation at all. Route them here instead: the raw
+   * `Error.message` goes to `envelope.detail` (behind the Details disclosure) and the user reads
+   * only `envelope.userMessage`.
+   */
+  const recordLocalChatError = useCallback(
+    (
+      error: unknown,
+      ctx: {
+        phase?: LocalChatErrorPhase
+        code?: ChatErrorCode
+        conversationId?: ConversationId | null
+        parentMessageId?: MessageId | null
+        streamId?: string | null
+      } = {}
+    ): ChatErrorEnvelope | null => {
+      const conversationId = ctx.conversationId ?? currentConversationId
+      if (conversationId == null) return null
+
+      // The server-loop thunks classify and surface their own failures before rejecting.
+      // Re-recording here produced the SECOND bubble users saw: this catch received
+      // `envelope.userMessage` (already humanised prose), `classifyLocalChatError` could not
+      // match it, and it fell back to `internal_error` — a generic "Try again" beside the
+      // real, specific explanation. Trust the carried classification and add nothing.
+      const rejection = readServerLoopRejection(error)
+      if (rejection) return rejection.envelope
+
+      const envelope = classifyLocalChatError(error, {
+        phase: ctx.phase,
+        code: ctx.code,
+        streamId: ctx.streamId ?? null,
+      })
+      // A user pressing Stop is not a failure to explain. Classify it (callers branch on the
+      // code) but never put a bubble on screen for something the user just asked for.
+      if (envelope.code === 'cancelled') return envelope
+      dispatch(
+        chatSliceActions.chatErrorRecorded(
+          buildChatErrorRecord(envelope, {
+            conversationId,
+            parentMessageId: ctx.parentMessageId ?? null,
+            streamId: ctx.streamId ?? null,
+          })
+        )
+      )
+      return envelope
+    },
+    [currentConversationId, dispatch]
+  )
+
+  /**
+   * Put a user's own typed text back in the composer after a send failed.
+   *
+   * The optimistic-message rows are cleared on rejection, which is correct (the message was
+   * never persisted) but on its own it means the text the user typed is simply gone. Returning
+   * it to the composer is the difference between "that failed, press send again" and "the app
+   * ate my paragraph". Never clobbers text the user has already started typing since.
+   */
+  const restoreFailedSendText = useCallback(
+    (text: string | null | undefined) => {
+      const restored = text ?? ''
+      if (!restored.trim()) return
+      updateLocalInput(previous => {
+        const existing = previous ?? ''
+        if (!existing.trim()) return restored
+        if (existing.includes(restored.trim())) return existing
+        return `${restored}\n\n${existing}`
+      })
+      setHasLocalInput(true)
+    },
+    [updateLocalInput]
+  )
   const streamUndoRoot = useAppSelector(selectStreamUndoRoot)
   const compactingConversationId = useAppSelector(state => state.chat.composition.compactingConversationId)
   // Current view stream - automatically selects the relevant stream based on currentPath
@@ -1188,12 +1146,25 @@ function Chat() {
 
   const conversationMessages = useAppSelector(selectConversationMessages)
   const displayMessages = useAppSelector(selectDisplayMessages)
-  const toolCallPermissionRequest = useAppSelector(state => state.chat.toolCallPermissionRequest)
-  const operationModeUpgradeRequest = useAppSelector(state => state.chat.operationModeUpgradeRequest)
-  const planClarificationRequest = useAppSelector(state => state.chat.planClarificationRequest)
+  const toolCallPermissionRequest = useAppSelector(state =>
+    streamState.id
+      ? (state.chat.toolPermissionRequestsByStream[streamState.id] ?? null)
+      : state.chat.toolCallPermissionRequest
+  )
+  const operationModeUpgradeRequest = useAppSelector(state =>
+    streamState.id
+      ? (state.chat.operationModeUpgradeRequestsByStream[streamState.id] ?? null)
+      : state.chat.operationModeUpgradeRequest
+  )
+  const planClarificationRequest = useAppSelector(state =>
+    streamState.id
+      ? (state.chat.planClarificationRequestsByStream[streamState.id] ?? null)
+      : state.chat.planClarificationRequest
+  )
   const toolAutoApprove = useAppSelector(state => state.chat.toolAutoApprove)
-  const showFreeTierModal = useAppSelector(state => state.chat.freeTier.showLimitModal)
-  // const freeGenerationsRemaining = useAppSelector(state => state.chat.freeTier.freeGenerationsRemaining)
+  // D3: free-tier exhaustion is a chat bubble, not a blocking modal. `sseProjection` records the
+  // `free_tier_exhausted` bubble directly on `generation_limit_reached` and never raises
+  // `freeTier.showLimitModal`, so the flag is dead and the modal is not rendered from here.
 
   // React Query for message fetching - MOVED BELOW after projectConversations is available
   // to enable passing storage_mode from cached conversations
@@ -2536,6 +2507,10 @@ function Chat() {
   const hasFinalTextStreaming = Boolean(streamState.buffer?.trim())
   const hasProcessStreamingContent =
     Boolean(streamState.thinkingBuffer) || streamState.toolCalls.length > 0 || streamState.events.length > 0
+  // R4: `streamState.error` deliberately does NOT keep the live row alive. The failure is drawn
+  // by the message list and nowhere else — tier 1 when the server persisted a row carrying the
+  // ErrorBlock, tier 2 (`chat_error`) when it could not. A stream that died before its first
+  // token therefore renders no live row at all rather than an empty shell plus a second bubble.
   const hasStreamingMessageContent = hasFinalTextStreaming || hasProcessStreamingContent
 
   const shouldPreserveProcessStreamRow = streamState.status === 'waiting_for_tool' || hasRunningToolJobForCurrentBranch
@@ -2578,6 +2553,25 @@ function Chat() {
   // but automatic stream-follow must never target sentinel padding.
   const bottomSentinelHeight = bottomSentinelBaseHeight
 
+  // R2: every failure already visible as a persisted ErrorBlock on a rendered message row
+  // (tier 1). Anything in here must not also be drawn as a `chat_error` row (tier 2).
+  const persistedErrorIdentityKeys = useMemo(() => {
+    const keys = new Set<string>()
+
+    for (const row of messageRenderRows) {
+      const rowMessages = row.kind === 'message' ? [row.message] : row.messages
+      for (const rowMessage of rowMessages) {
+        const parsed = parsedMessageDataById.get(rowMessage.id)
+        if (!Array.isArray(parsed?.contentBlocks)) continue
+        for (const block of parsed.contentBlocks) {
+          if (block.type === 'error') keys.add(chatErrorIdentityKey(block.envelope))
+        }
+      }
+    }
+
+    return keys
+  }, [messageRenderRows, parsedMessageDataById])
+
   const virtualRows = useMemo<VirtualRenderRow[]>(() => {
     const rows: VirtualRenderRow[] = messageRenderRows.map(row => ({
       kind: 'message_row',
@@ -2618,6 +2612,22 @@ function Chat() {
       })
     }
 
+    // Failures last, below whatever partial output survived (D1: partial text is never
+    // discarded — the error is a separate row beneath it).
+    for (const record of chatErrorRecords) {
+      // R2 (belt and braces): the projection already refuses to create a record when the server
+      // reports `persistedErrorMessageId`, but records written before that landed — or by any
+      // path that never saw the id — must still not stack a second bubble on top of an
+      // ErrorBlock the transcript is already showing.
+      if (persistedErrorIdentityKeys.has(chatErrorIdentityKey(record.envelope))) continue
+
+      rows.push({
+        kind: 'chat_error',
+        key: `chat-error-${record.id}`,
+        record,
+      })
+    }
+
     return rows
   }, [
     messageRenderRows,
@@ -2627,6 +2637,8 @@ function Chat() {
     optimisticBranchMessage,
     showStreamingMessageInVirtualList,
     showGenerationLoaderInVirtualList,
+    chatErrorRecords,
+    persistedErrorIdentityKeys,
   ])
 
   const getUndoSummariesForMessage = useCallback(
@@ -3452,6 +3464,16 @@ function Chat() {
     }
   })
   const [isResizing, setIsResizing] = useState(false)
+  const [parallelSplitPct, setParallelSplitPct] = useState<number>(() => {
+    try {
+      const stored = typeof window !== 'undefined' ? window.localStorage.getItem('chat:parallelSplitPct') : null
+      const parsed = stored ? Number.parseFloat(stored) : Number.NaN
+      return Number.isFinite(parsed) ? Math.min(80, Math.max(20, parsed)) : 50
+    } catch {
+      return 50
+    }
+  })
+  const [isParallelResizing, setIsParallelResizing] = useState(false)
   // Session-only secondary transcript. It intentionally resets with this route container.
   const [parallelPane, setParallelPane] = useState<ParallelChatPaneTarget | null>(null)
   const [activeChatPane, setActiveChatPane] = useState<'primary' | 'parallel'>('primary')
@@ -3889,7 +3911,52 @@ function Chat() {
       document.body.style.userSelect = prevUserSelect
       document.body.style.cursor = prevCursor
     }
-  }, [isResizing])
+  }, [isResizing, parallelPane])
+
+  useEffect(() => {
+    if (!isParallelResizing || !parallelPane || isMobile) return
+
+    const clamp = (value: number) => Math.max(20, Math.min(80, value))
+    const handleMove = (clientX: number) => {
+      const container = containerRef.current
+      if (!container) return
+      const rect = container.getBoundingClientRect()
+      const chatWorkspaceWidth = heimdallVisible ? rect.width * (leftWidthPct / 100) : rect.width
+      if (chatWorkspaceWidth <= 0) return
+      const nextSplit = clamp(((clientX - rect.left) / chatWorkspaceWidth) * 100)
+      setParallelSplitPct(nextSplit)
+      try {
+        window.localStorage.setItem('chat:parallelSplitPct', nextSplit.toFixed(2))
+      } catch {}
+    }
+
+    const stopResizing = () => setIsParallelResizing(false)
+    const onMouseMove = (event: MouseEvent) => handleMove(event.clientX)
+    const onTouchMove = (event: TouchEvent) => {
+      if (event.touches[0]) handleMove(event.touches[0].clientX)
+    }
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', stopResizing)
+    window.addEventListener('touchmove', onTouchMove, { passive: false })
+    window.addEventListener('touchend', stopResizing)
+    window.addEventListener('blur', stopResizing)
+
+    const previousUserSelect = document.body.style.userSelect
+    const previousCursor = document.body.style.cursor
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
+
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', stopResizing)
+      window.removeEventListener('touchmove', onTouchMove)
+      window.removeEventListener('touchend', stopResizing)
+      window.removeEventListener('blur', stopResizing)
+      document.body.style.userSelect = previousUserSelect
+      document.body.style.cursor = previousCursor
+    }
+  }, [heimdallVisible, isMobile, isParallelResizing, leftWidthPct, parallelPane])
 
   // Sync system prompt and context from current conversation
   // Read directly from React Query projectConversations to avoid Redux sync race conditions
@@ -4841,6 +4908,93 @@ function Chat() {
     return (hasLocalInput || isRetrigger) && isNotSending && hasModel
   }, [hasLocalInput, isCurrentConversationCompacting, streamState.active, selectedModel, displayMessages])
 
+  /**
+   * Re-run generation from the last user message on the current branch.
+   *
+   * Extracted from `handleSend` so the error bubble's `retry` action drives the exact same
+   * path a manual retrigger does — a second implementation would drift the moment either
+   * changes. Returns false when there is nothing to retrigger.
+   */
+  const retriggerLastUserMessage = useCallback(
+    (repeatCount: number): boolean => {
+      if (!currentConversationId) return false
+
+      const lastUserMessage = displayMessages[displayMessages.length - 1]
+
+      // Safety check: ensure lastUserMessage exists before accessing properties
+      if (!lastUserMessage || lastUserMessage.role !== 'user') {
+        console.error('Cannot retrigger: No last user message found in displayMessages')
+        return false
+      }
+
+      const parent: MessageId | null = lastUserMessage.parent_id || null
+      const contentToRetrigger = lastUserMessage.content
+      const { content: retriggerContent, pendingCwdValue } = withPendingCwdAnnouncement(
+        currentConversationId,
+        contentToRetrigger
+      )
+
+      // Dispatch sendMessage with retrigger flag
+      const streamId = generateStreamId('primary')
+      setPendingViewStreamId(streamId)
+
+      dispatch(
+        sendMessage({
+          conversationId: currentConversationId,
+          input: { content: retriggerContent },
+          parent,
+          repeatNum: repeatCount,
+          think: think,
+          retrigger: true,
+          imageConfig: isImageGenerationModel ? imageConfig : undefined,
+          reasoningConfig: think ? reasoningConfig : undefined,
+          serviceTier: openAIServiceTier,
+          cwd: ccCwd || undefined,
+          operationMode,
+          streamId,
+        })
+      )
+        .unwrap()
+        .then(result => {
+          clearPendingCwdAnnouncement(currentConversationId, pendingCwdValue)
+          if (!result?.userMessage) {
+            console.warn('Server did not confirm user message')
+          }
+          // ✅ No refetch needed - messages already added to Redux via SSE stream
+          // Stream sends: user_message event + complete event with full message data
+          // Redux already updated via messageAdded() + messageBranchCreated() dispatches
+        })
+        .catch(error => {
+          // A retrigger that dies here produced no stream and therefore no server-side error
+          // frame. Without a record the button would simply do nothing, forever.
+          console.error('Failed to retrigger generation:', error)
+          recordLocalChatError(error, {
+            phase: 'open',
+            conversationId: currentConversationId,
+            parentMessageId: parent,
+            streamId,
+          })
+        })
+
+      return true
+    },
+    [
+      ccCwd,
+      clearPendingCwdAnnouncement,
+      currentConversationId,
+      dispatch,
+      displayMessages,
+      imageConfig,
+      isImageGenerationModel,
+      openAIServiceTier,
+      operationMode,
+      reasoningConfig,
+      recordLocalChatError,
+      think,
+      withPendingCwdAnnouncement,
+    ]
+  )
+
   const handleSend = useCallback(
     (value: number) => {
       const localInputValue = getLocalInput()
@@ -4869,55 +5023,7 @@ function Chat() {
           !hasLocalInput && displayMessages.length > 0 && displayMessages[displayMessages.length - 1]?.role === 'user'
 
         if (isRetrigger) {
-          // Retrigger: Use the last user message's content and parent
-          const lastUserMessage = displayMessages[displayMessages.length - 1]
-
-          // Safety check: ensure lastUserMessage exists before accessing properties
-          if (!lastUserMessage) {
-            console.error('Cannot retrigger: No last user message found in displayMessages')
-            return
-          }
-
-          const parent: MessageId | null = lastUserMessage.parent_id || null
-          const contentToRetrigger = lastUserMessage.content
-          const { content: retriggerContent, pendingCwdValue } = withPendingCwdAnnouncement(
-            currentConversationId,
-            contentToRetrigger
-          )
-
-          // Dispatch sendMessage with retrigger flag
-          const streamId = generateStreamId('primary')
-          setPendingViewStreamId(streamId)
-
-          dispatch(
-            sendMessage({
-              conversationId: currentConversationId,
-              input: { content: retriggerContent },
-              parent,
-              repeatNum: value,
-              think: think,
-              retrigger: true,
-              imageConfig: isImageGenerationModel ? imageConfig : undefined,
-              reasoningConfig: think ? reasoningConfig : undefined,
-              serviceTier: openAIServiceTier,
-              cwd: ccCwd || undefined,
-              operationMode,
-              streamId,
-            })
-          )
-            .unwrap()
-            .then(result => {
-              clearPendingCwdAnnouncement(currentConversationId, pendingCwdValue)
-              if (!result?.userMessage) {
-                console.warn('Server did not confirm user message')
-              }
-              // ✅ No refetch needed - messages already added to Redux via SSE stream
-              // Stream sends: user_message event + complete event with full message data
-              // Redux already updated via messageAdded() + messageBranchCreated() dispatches
-            })
-            .catch(error => {
-              console.error('Failed to retrigger generation:', error)
-            })
+          retriggerLastUserMessage(value)
         } else {
             // Normal send flow
             // Process file mentions with actual content before sending
@@ -5015,6 +5121,18 @@ function Chat() {
                   // Note: Success case is handled in chatActions when user_message chunk arrives
                   dispatch(chatSliceActions.optimisticMessageCleared())
                   console.error('Failed to send message:', error)
+                  // Clearing the optimistic row is right (nothing was persisted) but on its own
+                  // it deletes the user's writing. Record a classified bubble so the
+                  // disappearance has a stated cause, then give the RAW typed text back to the
+                  // composer — not `contentToSend`, which has file mentions and IDE context
+                  // expanded into it. A deliberate cancel is exempt: the user meant that.
+                  const envelope = recordLocalChatError(error, {
+                    phase: 'open',
+                    conversationId: currentConversationId,
+                    parentMessageId: parentForSend,
+                    streamId,
+                  })
+                  if (envelope?.code !== 'cancelled') restoreFailedSendText(localInputValue)
                 })
             }
 
@@ -5049,7 +5167,8 @@ function Chat() {
               })
               const totalContextTokens = resolvedContext.effectiveTokens
               const usdValue = (currentUser?.cached_current_credits ?? 0) / 100
-              const totalContextLimit = selectedModel?.contextLength || 128_000
+              const totalContextLimit =
+                resolveProviderContextLength(providers.currentProvider, selectedModel?.contextLength, providerSettings) || 128_000
               const promptCostPer1K = selectedModel?.promptCost ?? 0
               const completionCostPer1K = selectedModel?.completionCost ?? 0
 
@@ -5173,6 +5292,9 @@ function Chat() {
       clearPendingCwdAnnouncement,
       runComposerCommand,
       composerImageDraftDataUrls,
+      retriggerLastUserMessage,
+      recordLocalChatError,
+      restoreFailedSendText,
     ]
   )
 
@@ -5186,6 +5308,126 @@ function Chat() {
       })
     )
   }, [streamState.id, streamState.streamingMessageId, dispatch])
+
+  // The error bubble owns exactly one button. This is where its `kind` becomes a real recovery.
+  // Deliberately routed through the handlers that already exist in this container rather than
+  // reimplemented, so retry means the same thing here as it does from the composer.
+  const [pendingChatErrorActionId, setPendingChatErrorActionId] = useState<string | null>(null)
+
+  const dismissChatError = useCallback(
+    (record: ChatErrorRecord) => {
+      dispatch(chatSliceActions.chatErrorDismissed({ conversationId: record.conversationId, id: record.id }))
+    },
+    [dispatch]
+  )
+
+  const handleChatErrorAction = useCallback(
+    (record: ChatErrorRecord, kind: ChatErrorActionKind) => {
+      switch (kind) {
+        case 'retry': {
+          // Same path as pressing send on an empty composer after a user turn.
+          const started = retriggerLastUserMessage(multiReplyCount)
+          // Only clear the bubble once a new attempt is actually under way; otherwise the
+          // explanation would vanish and leave the failure invisible again.
+          if (started) dismissChatError(record)
+          return
+        }
+        case 'sign_in': {
+          // D2: an expired session never force-redirects. The user chose to go here.
+          dismissChatError(record)
+          navigate('/login?required=cloud')
+          return
+        }
+        case 'upgrade': {
+          dismissChatError(record)
+          navigate('/payment')
+          return
+        }
+        case 'switch_mode': {
+          // The only mode switch an error can ask for: the run needed write access.
+          dispatch(chatSliceActions.operationModeSet('execute'))
+          dismissChatError(record)
+          return
+        }
+        case 'compact': {
+          setPendingChatErrorActionId(record.id)
+          void handleManualCompactifyCommand().finally(() => {
+            setPendingChatErrorActionId(null)
+            dismissChatError(record)
+          })
+          return
+        }
+        case 'reload_conversation': {
+          setPendingChatErrorActionId(record.id)
+          void Promise.resolve(refreshConversationSnapshot()).finally(() => {
+            setPendingChatErrorActionId(null)
+            dismissChatError(record)
+          })
+          return
+        }
+        case 'reconnect_provider': {
+          // Provider credentials (API keys, OAuth reconnects) live on the full `/settings`
+          // route (containers/Settings.tsx), NOT the in-chat SettingsPane — so this
+          // navigates rather than opening the pane. `provider_signin_required` is the code
+          // that asks for it: the user has to actually re-enter something.
+          dismissChatError(record)
+          navigate('/settings')
+          return
+        }
+        case 'open_settings': {
+          // Everything else that says "check a setting" (MCP servers, hooks) is reachable
+          // from the pane without losing the conversation.
+          setSettingsOpen(true)
+          return
+        }
+        default: {
+          // Exhaustiveness guard: a new ChatErrorActionKind must be wired here, not silently
+          // rendered as a dead button.
+          const unhandled: never = kind
+          console.warn('[Chat] Unhandled chat error action', unhandled)
+          return
+        }
+      }
+    },
+    [
+      dismissChatError,
+      dispatch,
+      handleManualCompactifyCommand,
+      multiReplyCount,
+      navigate,
+      refreshConversationSnapshot,
+      retriggerLastUserMessage,
+      setSettingsOpen,
+    ]
+  )
+
+  /**
+   * The tier-1 bridge: a button on a PERSISTED `ErrorBlock` (transcript content, the only
+   * error surface that survives a reload) routed into the same switch tier-2 uses.
+   *
+   * A persisted block has no `ChatErrorRecord`, so we synthesise one. Its id is deliberately
+   * not in `errorNotices`, which makes the `dismissChatError` calls inside the switch harmless
+   * no-ops — correct, because transcript content is not dismissible.
+   */
+  const handlePersistedChatErrorAction = useCallback(
+    (kind: ChatErrorActionKind, messageId: MessageId, envelope: ChatErrorEnvelope) => {
+      if (currentConversationId == null) return
+      handleChatErrorAction(
+        {
+          id: `persisted-error-${String(messageId)}`,
+          conversationId: currentConversationId,
+          envelope: buildChatErrorEnvelope(envelope.code, envelope),
+          parentMessageId: messageId,
+          streamId: null,
+          lineageId: null,
+          createdAt: 0,
+          dismissed: false,
+        },
+        kind
+      )
+    },
+    [currentConversationId, handleChatErrorAction]
+  )
 
   const submitMessageAsBranch = useCallback(
     (id: string, newContent: string, _newContentBlocks?: any) => {
@@ -5256,6 +5498,16 @@ function Chat() {
           // Clear optimistic branch message on error
           dispatch(chatSliceActions.optimisticBranchMessageCleared())
           console.error('Failed to branch message:', error)
+          // The optimistic row was the only copy of the user's edit — dropping it silently
+          // destroyed their writing. State why the row vanished, then hand the RAW edited text
+          // back to the composer, which is the only place left that can hold it.
+          const envelope = recordLocalChatError(error, {
+            phase: 'open',
+            conversationId: currentConversationId,
+            parentMessageId: originalMessage.parent_id ?? null,
+            streamId,
+          })
+          if (envelope?.code !== 'cancelled') restoreFailedSendText(newContent)
         })
     },
     [
@@ -5273,6 +5525,8 @@ function Chat() {
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
       getBranchImageDraftDataUrls,
+      recordLocalChatError,
+      restoreFailedSendText,
     ]
   )
 
@@ -5291,9 +5545,16 @@ function Chat() {
         })
         .catch(error => {
           console.error('Failed to update message:', error)
+          // The editor closes on submit, so a rejected save silently reverted the message to its
+          // old text with no indication the edit was lost. Say so.
+          recordLocalChatError(error, {
+            phase: 'open',
+            conversationId: currentConversationId,
+            parentMessageId: parseId(id),
+          })
         })
     },
-    [currentConversationId, dispatch, refreshConversationSnapshot]
+    [currentConversationId, dispatch, refreshConversationSnapshot, recordLocalChatError]
   )
 
   const handleMessageBranch = useCallback(
@@ -5368,6 +5629,16 @@ function Chat() {
         .catch(error => {
           dispatch(chatSliceActions.optimisticMessageCleared())
           console.error('Failed to send explain-selection message:', error)
+          // Same regression as the main send path: the optimistic row is the only copy of what
+          // the user asked, so clearing it alone erases the question. Explain the failure and
+          // give the raw selection text back.
+          const envelope = recordLocalChatError(error, {
+            phase: 'open',
+            conversationId: currentConversationId,
+            parentMessageId: parsedId,
+            streamId,
+          })
+          if (envelope?.code !== 'cancelled') restoreFailedSendText(newContent)
         })
     },
     [
@@ -5386,6 +5657,8 @@ function Chat() {
       operationMode,
       withPendingCwdAnnouncement,
       clearPendingCwdAnnouncement,
+      recordLocalChatError,
+      restoreFailedSendText,
     ]
   )
 
@@ -6131,7 +6404,8 @@ function Chat() {
     const usdValue = current_credits / 100 // Convert credits to USD
 
     // Model context limit.
-    const totalContextLimit = selectedModel?.contextLength || 128_000
+    const totalContextLimit =
+      resolveProviderContextLength(providers.currentProvider, selectedModel?.contextLength, providerSettings) || 128_000
 
     // Cost is per 1K tokens: cost = (tokens / 1000) * costPer1K
     // So: tokens = (usd * 1000) / costPer1K
@@ -6153,7 +6427,14 @@ function Chat() {
     const totalBudget = Math.max(0, Math.min(totalContextLimit, creditInputLimit, creditOutputLimit))
 
     return { totalBudget, totalContextLimit }
-  }, [selectedModel?.promptCost, selectedModel?.completionCost, selectedModel?.contextLength, current_credits])
+  }, [
+    selectedModel?.promptCost,
+    selectedModel?.completionCost,
+    selectedModel?.contextLength,
+    providers.currentProvider,
+    providerSettings.openAiChatGptMaxContextTokens,
+    current_credits,
+  ])
 
   // Calculate progress percentages.
   const totalContextProgress =
@@ -6209,9 +6490,20 @@ function Chat() {
       className='flex h-full overflow-hidden bg-transparent dark:bg-transparent'
     >
       <div
-        className={`relative flex flex-col ${heimdallVisible && !isMobile ? 'flex-none' : 'flex-1'} rounded-xl mb-2 min-w-0 bg-transparent sm:min-w-[240px] md:min-w-[280px] overflow-hidden`}
+        data-chat-pane-surface='true'
+        data-chat-pane-kind='primary'
+        data-chat-pane-active={activeChatPane === 'primary' ? 'true' : 'false'}
+        onMouseDown={() => setActiveChatPane('primary')}
+        onFocusCapture={() => setActiveChatPane('primary')}
+        className={`relative flex flex-col ${(heimdallVisible || parallelPane) && !isMobile ? 'flex-none' : 'flex-1'} rounded-xl mb-2 min-w-0 bg-transparent sm:min-w-[240px] md:min-w-[280px] overflow-hidden`}
         style={{
-          width: isMobile ? '100%' : heimdallVisible ? `${parallelPane ? Math.max(25, leftWidthPct - 20) : leftWidthPct}%` : 'auto',
+          width: isMobile
+            ? '100%'
+            : parallelPane
+              ? `calc(${((heimdallVisible ? leftWidthPct : 100) * parallelSplitPct) / 100}% - 6px)`
+              : heimdallVisible
+                ? `${leftWidthPct}%`
+                : 'auto',
           backgroundColor: chatSurfaceBackgroundColor,
         }}
       >
@@ -6435,6 +6727,7 @@ function Chat() {
                                 userTurnElapsedLabel={userTurnElapsedLabelByMessageId.get(String(message.id))}
                                 onOpenToolHtmlModal={openToolHtmlModal}
                                 onOpenSubagentTranscript={openSubagentTranscript}
+                                onChatErrorAction={handlePersistedChatErrorAction}
                               />
                             </VirtualizedRowContainer>
                           )
@@ -6468,6 +6761,7 @@ function Chat() {
                                 userTurnElapsedLabel={userTurnElapsedLabelByMessageId.get(String(message.id))}
                                 onOpenToolHtmlModal={openToolHtmlModal}
                                 onOpenSubagentTranscript={openSubagentTranscript}
+                                onChatErrorAction={handlePersistedChatErrorAction}
                               />
                             </VirtualizedRowContainer>
                           )
@@ -6475,6 +6769,10 @@ function Chat() {
 
                         if (renderRow.kind === 'streaming_message') {
                           if (!hasStreamingMessageContent) return null
+
+                          // R4: no error bubble here. A failed stream is drawn by the message
+                          // list only — see the `chat_error` row below (tier 2) or the persisted
+                          // ErrorBlock on a real assistant row (tier 1).
 
                           // Process-only phase (thinking/tools, no final text yet). Once final text
                           // begins, this row leaves virtualRows and the live tail renders out of flow
@@ -6505,7 +6803,30 @@ function Chat() {
                                 className=''
                                 onOpenToolHtmlModal={openToolHtmlModal}
                                 onOpenSubagentTranscript={openSubagentTranscript}
+                                onChatErrorAction={handlePersistedChatErrorAction}
                               />
+                            </VirtualizedRowContainer>
+                          )
+                        }
+
+                        if (renderRow.kind === 'chat_error') {
+                          const record = renderRow.record
+                          return (
+                            <VirtualizedRowContainer
+                              key={renderRow.key}
+                              id={`message-chat-error-${record.id}`}
+                              index={virtualRow.index}
+                              start={virtualRow.start}
+                              measureElement={virtualizer.measureElement}
+                            >
+                              <div className='px-2 pt-2'>
+                                <ChatErrorBubble
+                                  envelope={record.envelope}
+                                  actionPending={pendingChatErrorActionId === record.id}
+                                  onAction={kind => handleChatErrorAction(record, kind)}
+                                  onDismiss={() => dismissChatError(record)}
+                                />
+                              </div>
                             </VirtualizedRowContainer>
                           )
                         }
@@ -6613,6 +6934,7 @@ function Chat() {
                                           isDarkMode={isDarkMode}
                                           onOpenToolHtmlModal={openToolHtmlModal}
                                           onOpenSubagentTranscript={openSubagentTranscript}
+                                          onChatErrorAction={handlePersistedChatErrorAction}
                                         />
                                       )
                                     })}
@@ -6660,6 +6982,7 @@ function Chat() {
                                           isDarkMode={isDarkMode}
                                           onOpenToolHtmlModal={openToolHtmlModal}
                                           onOpenSubagentTranscript={openSubagentTranscript}
+                                          onChatErrorAction={handlePersistedChatErrorAction}
                                         />
                                       )
                                     })()}
@@ -6735,6 +7058,7 @@ function Chat() {
                               onExplainFromSelection={handleExplainFromSelection}
                               onOpenToolHtmlModal={openToolHtmlModal}
                               onOpenSubagentTranscript={openSubagentTranscript}
+                              onChatErrorAction={handlePersistedChatErrorAction}
                               onEditingStateChange={handleMessageEditingStateChange}
                             />
                           </VirtualizedRowContainer>
@@ -6772,6 +7096,7 @@ function Chat() {
                     className=''
                     onOpenToolHtmlModal={openToolHtmlModal}
                     onOpenSubagentTranscript={openSubagentTranscript}
+                    onChatErrorAction={handlePersistedChatErrorAction}
                   />
                 </div>
                 <div
@@ -6795,6 +7120,7 @@ function Chat() {
         {/* Input area: controls row + textarea (absolutely positioned overlay) */}
         <div
           ref={inputAreaRef}
+          data-chat-pane-composer='true'
           className={`absolute ${isBranchEditing ? 'z-100' : 'z-10'} bottom-0 left-0 right-0 mx-auto mb-2 px-2 sm:px-0 md:px-4 lg:px-4 2xl:px-4  ${!heimdallVisible ? 'max-w-full sm:max-w-xl md:max-w-2xl lg:max-w-3xl xl:max-w-3xl 2xl:max-w-4xl 3xl:max-w-6xl' : 'max-w-full sm:max-w-xl md:max-w-2xl lg:max-w-3xl xl:max-w-4xl 2xl:max-w-4xl'}`}
           style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}
         >
@@ -6842,23 +7168,33 @@ function Chat() {
                 <ToolPermissionDialog
                   toolCall={operationModeUpgradeRequest.toolCall}
                   variant='operation-mode-upgrade'
-                  onGrant={() => dispatch(respondToOperationModeUpgrade(true))}
-                  onDeny={() => dispatch(respondToOperationModeUpgrade(false))}
+                  onGrant={() =>
+                    dispatch(respondToOperationModeUpgrade({ approved: true, streamId: operationModeUpgradeRequest.streamId }))
+                  }
+                  onDeny={() =>
+                    dispatch(respondToOperationModeUpgrade({ approved: false, streamId: operationModeUpgradeRequest.streamId }))
+                  }
                 />
               )}
               {!operationModeUpgradeRequest && toolCallPermissionRequest && (
                 <ToolPermissionDialog
                   toolCall={toolCallPermissionRequest.toolCall}
-                  onGrant={() => dispatch(respondToToolPermission(true))}
-                  onDeny={() => dispatch(respondToToolPermission(false))}
-                  onAllowAll={() => dispatch(respondToToolPermissionAndEnableAll())}
+                  onGrant={() =>
+                    dispatch(respondToToolPermission({ allowed: true, streamId: toolCallPermissionRequest.streamId }))
+                  }
+                  onDeny={() =>
+                    dispatch(respondToToolPermission({ allowed: false, streamId: toolCallPermissionRequest.streamId }))
+                  }
+                  onAllowAll={() => dispatch(respondToToolPermissionAndEnableAll(toolCallPermissionRequest.streamId))}
                 />
               )}
               {planClarificationRequest && (
                 <PlanClarificationPanel
                   request={planClarificationRequest}
-                  onSubmit={(answers: PlanClarificationAnswer[]) => dispatch(respondToPlanClarification(answers))}
-                  onCancel={() => dispatch(cancelPlanClarification())}
+                  onSubmit={(answers: PlanClarificationAnswer[]) =>
+                    dispatch(respondToPlanClarification({ answers, streamId: planClarificationRequest.streamId }))
+                  }
+                  onCancel={() => dispatch(cancelPlanClarification(planClarificationRequest.streamId))}
                 />
               )}
               {/* Todo List / Modified Files Display */}
@@ -6870,11 +7206,11 @@ function Chat() {
                 >
                   {hasLatestTodoList && latestTodoList && (
                     <div
-                      className={`${composerSummaryPanelClassName} rounded-[16px] bg-neutral-100/80 px-2 py-0.5 dark:bg-neutral-800/50`}
+                      className={`${composerSummaryPanelClassName} rounded-[16px] bg-neutral-100/80 px-2 py-1 dark:bg-neutral-800/50`}
                     >
-                      <div className='flex items-center justify-between gap-2'>
-                        <span className='flex min-w-0 items-center gap-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-400'>
-                          <i className='bx bx-list-check shrink-0 text-2xl'></i>
+                      <div className='flex items-center justify-between gap-3'>
+                        <span className='min-w-0 flex items-center gap-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-400'>
+                          <i className='bx bx-list-check shrink-0 text-base'></i>
                           <span className='truncate text-[12px]'>Todo list</span>
                           {effectiveTodoListCollapsed && (
                             <span className='ml-1 shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500'>
@@ -6891,22 +7227,28 @@ function Chat() {
                                 : ''}
                           </span>
                           <button
+                            type='button'
                             onClick={() => toggleTodoListCollapsed()}
-                            className='mt-1 rounded-lg px-2 py-0.5 transition-colors hover:bg-neutral-200 dark:hover:bg-neutral-700'
+                            className='rounded-md px-1 py-0.5 text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'
                             title={effectiveTodoListCollapsed ? 'Expand todo list' : 'Collapse todo list'}
                           >
                             <i
-                              className={`bx ${effectiveTodoListCollapsed ? 'bx-chevron-down' : 'bx-chevron-up'} text-sm text-neutral-500`}
+                              className={`bx ${effectiveTodoListCollapsed ? 'bx-chevron-down' : 'bx-chevron-up'} translate-y-px text-sm transition-transform duration-300 ease-in-out`}
                             ></i>
                           </button>
                         </div>
                       </div>
-                      {!effectiveTodoListCollapsed && (
-                        <ul className='mt-1.5 max-h-40 space-y-1 overflow-y-auto pb-2 thin-scrollbar'>
+                      <div
+                        className={`overflow-hidden transition-[max-height,opacity,margin] duration-300 ease-in-out ${
+                          effectiveTodoListCollapsed ? 'mt-0 max-h-0 opacity-0' : 'mt-1.5 max-h-44 opacity-100'
+                        }`}
+                        aria-hidden={effectiveTodoListCollapsed}
+                      >
+                        <ul className='max-h-40 space-y-1 overflow-y-auto pr-1 thin-scrollbar'>
                           {latestTodoList.items.map((item, idx) => (
                             <li
                               key={`todo-item-${idx}`}
-                              className={`flex min-w-0 items-center gap-2 text-xs ${
+                              className={`flex min-w-0 items-center gap-2 px-1 py-1 text-xs ${
                                 item.done
                                   ? 'text-neutral-500 dark:text-neutral-400'
                                   : 'text-neutral-800 dark:text-neutral-200'
@@ -6925,7 +7267,7 @@ function Chat() {
                             </li>
                           ))}
                         </ul>
-                      )}
+                      </div>
                     </div>
                   )}
                   {hasBranchFileMutations && (
@@ -7698,11 +8040,67 @@ function Chat() {
           </div>
         </div>
 
-      {/* SEPARATOR - Hidden on mobile */}
+      {parallelPane && !isMobile && (
+        <div
+          className='group relative z-20 mb-2 flex w-3 shrink-0 cursor-col-resize select-none items-stretch justify-center'
+          role='separator'
+          aria-label='Resize original and parallel chat panes'
+          aria-orientation='vertical'
+          aria-valuemin={20}
+          aria-valuemax={80}
+          aria-valuenow={Math.round(parallelSplitPct)}
+          tabIndex={0}
+          onDoubleClick={() => {
+            setParallelSplitPct(50)
+            try {
+              window.localStorage.setItem('chat:parallelSplitPct', '50')
+            } catch {}
+          }}
+          onKeyDown={event => {
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+            event.preventDefault()
+            const direction = event.key === 'ArrowLeft' ? -1 : 1
+            setParallelSplitPct(previous => {
+              const next = Math.max(20, Math.min(80, previous + direction * 2))
+              try {
+                window.localStorage.setItem('chat:parallelSplitPct', next.toFixed(2))
+              } catch {}
+              return next
+            })
+          }}
+          onMouseDown={() => setIsParallelResizing(true)}
+          onTouchStart={event => {
+            event.preventDefault()
+            setIsParallelResizing(true)
+          }}
+          title='Drag to resize chat panes · Double-click to reset'
+        >
+          <div
+            className={`my-3 w-px rounded-full transition-[width,background-color] duration-150 ${
+              isParallelResizing
+                ? 'w-0.5 bg-blue-500 dark:bg-orange-400'
+                : 'bg-neutral-300 group-hover:w-0.5 group-hover:bg-blue-400 dark:bg-neutral-700 dark:group-hover:bg-orange-400'
+            }`}
+          />
+        </div>
+      )}
+
       {parallelPane && !isMobile && (
         <ParallelChatPane
           target={parallelPane}
           active={activeChatPane === 'parallel'}
+          width={`calc(${((heimdallVisible ? leftWidthPct : 100) * (100 - parallelSplitPct)) / 100}% - 6px)`}
+          title={currentConversation?.title ? `${currentConversation.title} · Parallel` : 'Parallel branch'}
+          fontSizeOffset={fontSizeOffset}
+          groupToolReasoningRuns={groupToolReasoningRuns}
+          truncateToolOutput={truncateToolOutput}
+          onOpenToolHtmlModal={openToolHtmlModal}
+          onOpenSubagentTranscript={openSubagentTranscript}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onChatErrorAction={handleChatErrorAction}
+          onEditMessage={handleMessageEdit}
+          onDeleteMessage={handleRequestDelete}
+          onAddToNote={handleAddToNote}
           onActivate={() => setActiveChatPane('parallel')}
           onClose={() => {
             setParallelPane(null)
@@ -7726,12 +8124,18 @@ function Chat() {
         />
       )}
 
-      {isResizing && !isMobile && (
+      {(isResizing || isParallelResizing) && !isMobile && (
         <div
           className='fixed inset-0 z-[2000] cursor-col-resize select-none bg-transparent'
           aria-hidden='true'
-          onMouseUp={() => setIsResizing(false)}
-          onTouchEnd={() => setIsResizing(false)}
+          onMouseUp={() => {
+            setIsResizing(false)
+            setIsParallelResizing(false)
+          }}
+          onTouchEnd={() => {
+            setIsResizing(false)
+            setIsParallelResizing(false)
+          }}
         />
       )}
 
@@ -7882,11 +8286,9 @@ function Chat() {
         <div className='fixed inset-0 z-[99998] bg-transparent' onClick={handleCloseExpandedPreview} />
       )}
 
-      {/* Free Tier Limit Modal */}
-      <FreeGenerationsModal
-        isOpen={showFreeTierModal}
-        onClose={() => dispatch(chatSliceActions.freeTierLimitModalHidden())}
-      />
+      {/* D3: the free-tier limit modal is intentionally NOT rendered here any more. Exhaustion
+          arrives as a `free_tier_exhausted` chat bubble recorded by `sseProjection`, so a failed
+          send never blocks the app. */}
       <ToolJobsModal isOpen={jobsModalOpen} onClose={() => setJobsModalOpen(false)} />
       <SubagentTranscriptModal
         toolCallId={subagentTranscriptToolCallId}
@@ -8028,116 +8430,6 @@ function Chat() {
           </div>
         </div>
       )}
-      {/* <div className='pointer-events-none fixed bottom-4 right-4 z-[1400] flex max-w-[360px] flex-col items-end gap-2'>
-        <button
-          type='button'
-          onClick={() => setStreamDebugPanelOpen(prev => !prev)}
-          className='pointer-events-auto rounded-full border border-black/10 bg-white/90 px-3 py-1.5 text-[11px] font-semibold text-neutral-700 shadow-lg backdrop-blur transition hover:scale-[1.02] dark:border-white/10 dark:bg-neutral-900/90 dark:text-neutral-200'
-          title='Toggle stream debug panel'
-        >
-          {streamDebugPanelOpen ? 'Hide stream debug' : `Stream debug (${streamingRoot.activeIds.length} active)`}
-        </button>
-
-        {streamDebugPanelOpen && (
-          <div className='pointer-events-auto w-[340px] max-h-[46vh] overflow-hidden rounded-xl border border-black/10 bg-white/90 p-3 text-[11px] shadow-2xl backdrop-blur dark:border-white/10 dark:bg-neutral-950/90 dark:text-neutral-100'>
-            <div className='flex items-center justify-between gap-2'>
-              <div className='text-[12px] font-semibold tracking-tight'>Stream / branch debug</div>
-              <div className='rounded-full bg-black/5 px-2 py-0.5 font-mono text-[10px] dark:bg-white/10'>
-                {streamingRoot.activeIds.length} active
-              </div>
-            </div>
-
-            <div className='mt-2 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[10px] leading-4'>
-              <div>conv: {formatStreamDebugId(currentConversationId)}</div>
-              <div>path tip: {formatStreamDebugId(selectedPath[selectedPath.length - 1])}</div>
-              <div>global sending: {String(sendingState.sending)}</div>
-              <div>global streaming: {String(sendingState.streaming)}</div>
-              <div>compacting: {String(sendingState.compacting)}</div>
-              <div>matches path: {matchingSelectedPathStreamCount}</div>
-              <div>view stream: {formatStreamDebugId(currentViewStream?.id)}</div>
-              <div>primary: {formatStreamDebugId(streamingRoot.primaryStreamId)}</div>
-              <div>view active: {String(streamState.active)}</div>
-              <div>view events: {streamState.events.length}</div>
-              <div>view buf: {streamState.buffer.length}</div>
-              <div>view think: {streamState.thinkingBuffer.length}</div>
-            </div>
-
-            <div className='mt-2 rounded-lg bg-black/5 p-2 font-mono text-[10px] leading-4 break-all dark:bg-white/5'>
-              <div className='mb-1 text-[9px] uppercase tracking-wider text-neutral-500 dark:text-neutral-400'>
-                selectedPath
-              </div>
-              <div>{selectedPathDebugLabel}</div>
-            </div>
-
-            <div className='mt-3 max-h-[28vh] space-y-2 overflow-y-auto pr-1'>
-              {streamDebugRows.length === 0 ? (
-                <div className='rounded-lg border border-dashed border-black/10 px-3 py-2 text-[10px] text-neutral-500 dark:border-white/10 dark:text-neutral-400'>
-                  No streams in Redux.
-                </div>
-              ) : (
-                streamDebugRows.map(stream => (
-                  <div
-                    key={stream.id}
-                    className={`rounded-lg border p-2 font-mono text-[10px] leading-4 ${
-                      stream.isCurrentView
-                        ? 'border-blue-500/50 bg-blue-500/10'
-                        : stream.active
-                          ? 'border-emerald-500/30 bg-emerald-500/5'
-                          : 'border-black/10 bg-black/5 dark:border-white/10 dark:bg-white/5'
-                    }`}
-                  >
-                    <div className='flex flex-wrap items-center gap-1.5'>
-                      <span className='font-semibold'>{formatStreamDebugId(stream.id)}</span>
-                      <span className='rounded bg-black/10 px-1.5 py-0.5 dark:bg-white/10'>{stream.streamType}</span>
-                      {stream.active && (
-                        <span className='rounded bg-emerald-500/20 px-1.5 py-0.5 text-emerald-700 dark:text-emerald-300'>
-                          active
-                        </span>
-                      )}
-                      {stream.finished && <span className='rounded bg-neutral-500/20 px-1.5 py-0.5'>finished</span>}
-                      {stream.isPrimary && (
-                        <span className='rounded bg-violet-500/20 px-1.5 py-0.5 text-violet-700 dark:text-violet-300'>
-                          primary
-                        </span>
-                      )}
-                      {stream.isCurrentView && (
-                        <span className='rounded bg-blue-500/20 px-1.5 py-0.5 text-blue-700 dark:text-blue-300'>
-                          currentView
-                        </span>
-                      )}
-                      {stream.rootInSelectedPath && (
-                        <span className='rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-700 dark:text-amber-300'>
-                          root∈path
-                        </span>
-                      )}
-                    </div>
-
-                    <div className='mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5'>
-                      <div>conv: {formatStreamDebugId(stream.conversationId)}</div>
-                      <div>root: {formatStreamDebugId(stream.rootMessageId)}</div>
-                      <div>origin: {formatStreamDebugId(stream.originMessageId)}</div>
-                      <div>parentStream: {formatStreamDebugId(stream.parentStreamId)}</div>
-                      <div>msg: {formatStreamDebugId(stream.messageId)}</div>
-                      <div>streamMsg: {formatStreamDebugId(stream.streamingMessageId)}</div>
-                      <div>last: {stream.lastEventLabel}</div>
-                      <div>buf: {stream.bufferLength}</div>
-                      <div>think: {stream.thinkingLength}</div>
-                      <div>events: {stream.eventCount}</div>
-                      <div>tools: {stream.toolCallCount}</div>
-                    </div>
-
-                    {stream.error && (
-                      <div className='mt-1 rounded bg-red-500/10 px-1.5 py-1 text-red-700 dark:text-red-300'>
-                        err: {stream.error}
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        )}
-      </div> */}
     </motion.div>
   )
 }

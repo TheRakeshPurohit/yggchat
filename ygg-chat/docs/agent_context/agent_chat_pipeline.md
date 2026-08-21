@@ -41,8 +41,10 @@ Use this when changing:
   reader or resubscribes by `streamId`; Stop cancels via `POST /api/streams/:id/abort`.
   Explicit `false` on both settings restores the legacy disconnect-abort path.
   See `agent_headless_server.md` §Detach/Reattach and `agent_chat_streaming_state.md`.
-- `systemPrompt` is deliberately **omitted** from the request body — the server assembles
-  it (`buildHeadlessSystemPrompt`) from operation mode + project/conversation prompts.
+- Supplemental `systemPrompt` is deliberately **omitted** from the request body. The
+  renderer forwards its selected Plan/Agent/subagent baselines plus Plan verbosity, and
+  the server assembles the final prompt (`buildHeadlessSystemPrompt`) with project and
+  conversation prompts. Missing baseline fields fall back to the bundled defaults.
 
 ## Key Files
 
@@ -114,7 +116,8 @@ All 3 thunks share the same shape:
      `parentId`/`messageId`, `operationMode` + `includeOperationModePrompt`,
      `toolAutoApprove` (verbatim — undefined survives, only explicit `false` pauses),
      `hooksEnabled: isElectronMode`, `tools` (an explicit `[]` is authoritative → no tools),
-     `attachmentsBase64` (turn-1 only), `streamId`. `systemPrompt` is omitted.
+     `attachmentsBase64` (turn-1 only), `streamId`, renderer-selected operation-mode
+     baselines, and Plan verbosity. Supplemental `systemPrompt` remains omitted.
 2. **HTTP → loop**: `chatRoutes.ts runSseOrchestrator` opens the SSE stream and, by
    default, attaches it to a `RunSession` whose `AbortController` outlives the socket.
    `res.on('close')` only detaches. Explicit `gateway.resumableRuns=false` uses the
@@ -172,7 +175,7 @@ The server loop pauses **mid-turn**, per tool call, to ask the renderer for a de
 - **`POST /api/resume`** (`chatRoutes.ts:146`, plain JSON): requires `streamId` + `toolCallId`;
   `decision` string → permission (`allow_once|allow_always|deny`); `answers`/`cancelled` →
   clarify; matched → 200, else **409** (stale click). `deny` → throw
-  `'Tool execution denied by user'`; `allow_always` → `broker.setAutoApproveAll(streamId)`.
+  `'Tool execution denied by user'`; `allow_always` atomically enables the stream and resolves all permission waiters already parked for that stream, including parallel `multi_call` workers.
 - **Renderer resolvers** (`chatActions.ts`): `respondToToolPermission` (`:2880`),
   `respondToToolPermissionAndEnableAll` (`:2915`), `respondToPlanClarification` (`:2892`),
   `cancelPlanClarification` (`:2904`) — all POST `/api/resume` via `postDecisionResume`

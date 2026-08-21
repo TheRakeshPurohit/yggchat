@@ -6,6 +6,13 @@ import {
   safeEstimateTokenCount,
 } from './contextTokenEstimate'
 import { ConversationId, MessageId } from '../../../../../shared/types'
+import { normalizeChatErrorEnvelope, type ChatErrorEnvelope } from '../../../../../shared/chatErrors'
+import {
+  attachLocalChatErrorCode,
+  buildChatErrorRecord,
+  classifyLocalChatError,
+  getLocalAttachedChatErrorCode,
+} from './localChatErrors'
 import { isCommunityMode } from '../../config/runtimeMode'
 import { localMirror as dualSync } from '../../lib/localMirror'
 import type { RootState } from '../../store/store'
@@ -30,6 +37,7 @@ import {
   BranchMessagePayload,
   EditMessagePayload,
   ImageDraft,
+  type LineageId,
   Message,
   Model,
   SendMessagePayload,
@@ -46,13 +54,25 @@ import {
 } from './compactionContext'
 // OpenAI OAuth is handled internally by OpenAIChatGPT module
 import { loadAutoCompactionEnabled } from '../../helpers/chatUiSettingsStorage'
+import { getAgentModePrompt, getActiveChatModePrompt, getSubagentModePrompt } from '../../helpers/operationModePromptStorage'
+import { loadPlanModeResponseSettings } from '../../helpers/planModeResponseSettingsStorage'
 import { getSubagentReasoningEffort } from '../../helpers/subagentToolSettings'
 import { loadLongTermMemoryContextEnabled } from '../../helpers/longTermMemorySettingsStorage'
-import { DEFAULT_COMPACTION_SYSTEM_PROMPT, loadProviderSettings } from '../../helpers/providerSettingsStorage'
+import {
+  DEFAULT_COMPACTION_SYSTEM_PROMPT,
+  loadProviderSettings,
+  resolveProviderContextLength,
+} from '../../helpers/providerSettingsStorage'
 import { updateToolEnabledState } from '../../helpers/toolSettingsStorage'
 import { generateStreamId, STREAM_PRUNE_DELAY } from './streamHelpers'
 import { createStreamingRun, finishStreamingRun } from './streamRunTracking'
-import { runServerChatLoop, runServerReattach, postStreamAbort } from './mainChatClient'
+import {
+  runServerChatLoop,
+  runServerReattach,
+  postStreamAbort,
+  getChatStreamErrorEnvelope,
+  getPersistedErrorMessageId,
+} from './mainChatClient'
 import {
   addInflightStream,
   removeInflightStream,
@@ -74,6 +94,7 @@ import {
 } from './toolDefinitions'
 import { type ChatHookProjectContext } from './chatHookClient'
 import { type PlanClarificationAnswer } from './planToolTypes'
+import { applyStreamProjectionPolicy } from './sseProjection'
 import { abortSubagentControllers } from './subagentClient'
 import {
   fetchConversationUndoSummaries,
@@ -166,17 +187,25 @@ const refreshHeimdallTreeFromState = (getState: () => RootState, dispatch: (acti
 }
 
 /**
- * Build the compaction/context fields for the server-owned loop request from the renderer's
- * settings. Pre-fix these were dropped, so the server always fell back to its defaults:
- * auto-compaction ran even when the user disabled it, and the trigger used a per-model
- * default window instead of the SELECTED model's context length. Sourced from the same
- * settings the manual compactBranch path uses (loadAutoCompactionEnabled + providerSettings).
- * contextLength comes from the selected model's cache entry. buildServerLoopRequest forwards
- * each field only-when-set, so a caller that can't resolve one keeps the server default.
+ * Renderer-local operation-mode settings are not visible to the Electron main process.
+ * Send the selected Plan, Agent, and subagent baselines separately so the server can
+ * assemble the final prompt without duplicating bundled defaults.
+ */
+const buildOperationModePromptRequestParams = (operationMode: 'plan' | 'execute') => ({
+  operationModePrompt:
+    operationMode === 'plan' ? getActiveChatModePrompt().prompt : getAgentModePrompt().prompt,
+  agentModePrompt: getAgentModePrompt().prompt,
+  subagentModePrompt: getSubagentModePrompt().prompt,
+  planModeVerbosity: loadPlanModeResponseSettings().verbosity,
+})
+
+/**
+ * Build compaction/context fields from the renderer settings for the server-owned loop.
  */
 const buildCompactionRequestParams = (
   modelsData: { models?: Model[]; default?: Model; selected?: Model } | undefined,
-  modelName: string | undefined
+  modelName: string | undefined,
+  providerName: string
 ): {
   autoCompactionEnabled: boolean
   contextLength: number | undefined
@@ -189,7 +218,7 @@ const buildCompactionRequestParams = (
     modelsData?.models?.find(m => m.name === modelName) || modelsData?.selected || modelsData?.default || null
   return {
     autoCompactionEnabled: loadAutoCompactionEnabled(),
-    contextLength: model?.contextLength,
+    contextLength: resolveProviderContextLength(providerName, model?.contextLength, settings),
     compactionProvider: settings.compactionProvider,
     compactionModelName: settings.compactionModel,
     compactionSystemPrompt: settings.compactionSystemPrompt,
@@ -434,7 +463,18 @@ const prepareLocalAttachmentsForModel = async (
     }))
   } catch (err) {
     console.error(`[${contextLabel}] Failed to prepare local attachments:`, err)
-    throw new Error('Failed to save attached image locally before sending the message')
+    // LOCAL-01: the cause used to be logged and then DISCARDED — the throw replaced it
+    // with generic prose that every downstream classifier then had to re-guess from.
+    // Classify the real cause once, keep its raw text in `detail`, and carry the
+    // envelope on the throw so `handleServerLoopFailure` records it verbatim.
+    const envelope = classifyLocalChatError(err, { phase: 'preflight' })
+    envelope.detail = `[${contextLabel}] ${envelope.detail ?? rawErrorText(err)}`
+    const failure = attachLocalChatErrorCode(
+      new Error(`Failed to prepare local attachments (${contextLabel})`),
+      envelope.code
+    )
+    ;(failure as Error & { envelope: ChatErrorEnvelope }).envelope = envelope
+    throw failure
   }
 }
 
@@ -849,6 +889,236 @@ const abortGenerationControllers = (streamId?: string | null) => {
   generationAbortControllersByStream.clear()
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Chat error plumbing — ONE path from "a server-loop thunk threw" to a bubble.
+//
+// IRON RULE: `envelope.userMessage` is the only string a user ever reads. Every
+// raw `Error.message` in here goes to `envelope.detail`, behind a disclosure —
+// these throws include genuine programming errors and internal loop vocabulary.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * R3 — a user-initiated Stop is not a failure and must never reach the error path.
+ *
+ * `name === 'AbortError'` alone is too narrow now. Two other shapes mean the same thing:
+ *   - a throw tagged `chatErrorCode === 'cancelled'` by whichever layer classified it
+ *     (`attachLocalChatErrorCode`, or the server-side `attachChatErrorCode`, both of which
+ *     survive a structured clone as a plain own property);
+ *   - the terminal SSE `error` frame the orchestrator now emits on abort with
+ *     `envelope.code === 'cancelled'` — added so a reconnecting client stops hanging, NOT
+ *     so pressing Stop paints a durable red bubble.
+ * Missing either would turn a normal outcome into a persisted failure.
+ */
+const isUserAbort = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') return false
+  if ((error as { name?: unknown }).name === 'AbortError') return true
+  if (getLocalAttachedChatErrorCode(error) === 'cancelled') return true
+  return getChatStreamErrorEnvelope(error)?.code === 'cancelled'
+}
+
+/**
+ * Prefer an envelope the throw already carries. `mainChatClient` attaches the
+ * server's classified envelope to the errors it raises for a non-ok open POST and
+ * for a terminal SSE `error` frame; the server classified those with far more
+ * context (provider slug, reset time, status) than any renderer heuristic has.
+ * Only when there is none do we fall back to the renderer-local classifier.
+ */
+const envelopeCarriedOnError = (error: unknown): ChatErrorEnvelope | undefined => {
+  const carried = getChatStreamErrorEnvelope(error)
+  if (!carried) return undefined
+  // Normalized (not trusted verbatim) so a persisted/older envelope missing prose still
+  // renders, and the raw message backfills `detail` when the throw did not set it.
+  return normalizeChatErrorEnvelope(carried, error instanceof Error ? error.message : undefined)
+}
+
+/** Raw technical text for the run record / `detail`. Never rendered inline. */
+const rawErrorText = (error: unknown): string =>
+  error instanceof Error ? error.message : typeof error === 'string' ? error : String(error)
+
+interface ServerLoopFailureParams {
+  error: unknown
+  dispatch: (action: any) => unknown
+  conversationId: ConversationId
+  streamId: string
+  parentMessageId?: MessageId | null
+  lineageId?: LineageId | null
+}
+
+interface ServerLoopFailureResult {
+  /** True when this was a user Stop, not a failure. The caller rejects and does nothing else. */
+  aborted: boolean
+  envelope: ChatErrorEnvelope | null
+  /** Safe-to-surface text for `rejectWithValue`. */
+  message: string
+  /** True when a tier-2 `ChatErrorRecord` was added here. False when tier 1 already owns it. */
+  recorded: boolean
+}
+
+/**
+ * What the three server-loop thunks reject with.
+ *
+ * NOT a bare string. A `.unwrap()` catch used to receive `envelope.userMessage` — already
+ * humanised prose — and re-run it through `classifyLocalChatError`, which cannot match
+ * prose and so fell back to `internal_error`. The result was a second, generic
+ * "Something went wrong … / Try again" bubble beside the real explanation. Rejecting with
+ * the classification (and the fact that it is already recorded) removes both the guessing
+ * and the duplicate.
+ */
+export interface ServerLoopRejection {
+  message: string
+  envelope: ChatErrorEnvelope | null
+  /** The failure is ALREADY on screen. A catch must not surface it again. */
+  surfaced: boolean
+  aborted: boolean
+}
+
+/** Read a `ServerLoopRejection` off whatever `.unwrap()` threw. */
+export const readServerLoopRejection = (value: unknown): ServerLoopRejection | null => {
+  if (!value || typeof value !== 'object') return null
+  const bag = value as Partial<ServerLoopRejection>
+  if (typeof bag.message !== 'string' || typeof bag.surfaced !== 'boolean') return null
+  return {
+    message: bag.message,
+    envelope: bag.envelope ?? null,
+    surfaced: bag.surfaced,
+    aborted: bag.aborted === true,
+  }
+}
+
+/**
+ * The single terminal-failure path for the three server-loop thunks (send / edit /
+ * branch). Previously this was three byte-identical catch blocks.
+ *
+ * Ordering here is load-bearing:
+ *   1. `sendingCompleted` FIRST, then the error chunk. `streamChunkReceived` gates
+ *      every chunk on `stream.active`, with an explicit exemption for `error`
+ *      precisely because this pair runs in that order. Swapping them would leave
+ *      the stream active with an error already applied.
+ *   2. `chatErrorRecorded` last, into `errorNotices` — which lives OUTSIDE
+ *      `streaming.byId` so it survives the stream slot being pruned. That is what
+ *      makes it safe to prune an errored slot at all (see the caller's streamPruned).
+ */
+const handleServerLoopFailure = ({
+  error,
+  dispatch,
+  conversationId,
+  streamId,
+  parentMessageId,
+  lineageId,
+}: ServerLoopFailureParams): ServerLoopFailureResult => {
+  // The spinner must stop whichever way this ended — Stop included.
+  dispatch(chatSliceActions.sendingCompleted({ streamId }))
+
+  if (isUserAbort(error)) {
+    // A Stop is not a failure: no error chunk, no notice, no `error` run status.
+    // `abortGeneration` owns the aborted lifecycle for this stream.
+    return { aborted: true, envelope: null, message: 'Message cancelled', recorded: false }
+  }
+
+  const envelope = envelopeCarriedOnError(error) ?? classifyLocalChatError(error, { phase: 'stream', streamId })
+  const detail = rawErrorText(error)
+
+  void finishStreamingRun(streamId, {
+    status: 'error',
+    // Branch on the classified code. The old `message.includes('context compaction')`
+    // test matched NONE of the strings the compaction paths actually raise
+    // ('Invalid branch compaction summary returned', 'Failed to compact branch', …),
+    // so this end reason was unreachable.
+    endReason: envelope.code === 'compaction_failed' ? 'context_compaction_failed' : 'error',
+    error: detail,
+  })
+
+  dispatch(
+    chatSliceActions.streamChunkReceived({
+      streamId,
+      chunk: { type: 'error', error: detail, errorEnvelope: envelope, terminal: true },
+    })
+  )
+  // R2 — ONE BUBBLE PER FAILURE. When the server persisted this failure as an ErrorBlock
+  // row (tier 1), that row IS the bubble and it is durable. Recording here as well put the
+  // same failure on screen twice: once as transcript content, once floating below it.
+  const persistedErrorMessageId = getPersistedErrorMessageId(error)
+  if (!persistedErrorMessageId) {
+    dispatch(
+      chatSliceActions.chatErrorRecorded(
+        buildChatErrorRecord(envelope, {
+          conversationId,
+          parentMessageId: parentMessageId ?? null,
+          streamId,
+          lineageId: lineageId ?? null,
+        })
+      )
+    )
+  }
+
+  return { aborted: false, envelope, message: envelope.userMessage, recorded: !persistedErrorMessageId }
+}
+
+/**
+ * Record a renderer-local failure that has no stream slot to live on (a Stop that
+ * could not be confirmed, a reattach that gave up, a decision POST that never
+ * landed). Classification only — no stream lifecycle is touched.
+ */
+const recordLocalChatError = (
+  dispatch: (action: any) => unknown,
+  error: unknown,
+  ctx: {
+    conversationId: ConversationId
+    phase?: 'open' | 'stream' | 'reattach' | 'resume' | 'abort' | 'preflight'
+    status?: number
+    streamId?: string | null
+    parentMessageId?: MessageId | null
+    lineageId?: LineageId | null
+    envelope?: ChatErrorEnvelope
+  }
+): ChatErrorEnvelope => {
+  const envelope =
+    ctx.envelope ??
+    classifyLocalChatError(error, { phase: ctx.phase, status: ctx.status, streamId: ctx.streamId })
+  dispatch(
+    chatSliceActions.chatErrorRecorded(
+      buildChatErrorRecord(envelope, {
+        conversationId: ctx.conversationId,
+        parentMessageId: ctx.parentMessageId ?? null,
+        streamId: ctx.streamId ?? null,
+        lineageId: ctx.lineageId ?? null,
+      })
+    )
+  )
+  return envelope
+}
+
+/**
+ * `postStreamAbort` returns `{ok, status?, envelope?}` and `runServerReattach` gained an
+ * `envelope` result field (mainChatClient, agent H). Both are read structurally here so
+ * this file stays compilable against either revision of that module and never crashes on
+ * a shape it did not expect.
+ */
+interface StreamAbortOutcome {
+  ok: boolean
+  status?: number
+  envelope?: ChatErrorEnvelope
+}
+
+const normalizeStreamAbortResult = (value: unknown): StreamAbortOutcome => {
+  if (typeof value === 'boolean') return { ok: value }
+  if (value && typeof value === 'object') {
+    const bag = value as { ok?: unknown; status?: unknown; envelope?: unknown }
+    return {
+      ok: bag.ok === true,
+      status: typeof bag.status === 'number' ? bag.status : undefined,
+      envelope:
+        bag.envelope && typeof bag.envelope === 'object' ? normalizeChatErrorEnvelope(bag.envelope) : undefined,
+    }
+  }
+  return { ok: false }
+}
+
+/** The envelope a failed (re)attach carries, if any. Absent === the read was clean. */
+const reattachEnvelopeOf = (result: unknown): ChatErrorEnvelope | undefined => {
+  const carried = (result as { envelope?: unknown } | null | undefined)?.envelope
+  return carried && typeof carried === 'object' ? normalizeChatErrorEnvelope(carried) : undefined
+}
 
 // Model operations have been fully migrated to React Query
 // See useModels, useRecentModels, useRefreshModels, and useSelectModel in hooks/useQueries.ts
@@ -1188,15 +1458,26 @@ export const sendMessage = createAsyncThunk<
       streamId: providedStreamId,
       lineageId: providedLineageId,
       branchPath: providedBranchPath,
+      streamType: requestedStreamType,
+      updatePath: requestedUpdatePath,
+      includeGlobalComposerContext: requestedGlobalComposerContext,
     },
     { dispatch, getState, extra, rejectWithValue, signal }
   ) => {
     const { auth } = extra
 
-    // Generate or use provided stream ID
-    const streamId = providedStreamId ?? generateStreamId('primary')
+    // Primary ownership remains the default for existing callers. Parallel panes opt
+    // into branch ownership and keep their terminal completion off the global path.
+    const streamType = requestedStreamType ?? 'primary'
+    const updatePath = requestedUpdatePath ?? true
+    const includeGlobalComposerContext = requestedGlobalComposerContext ?? true
+    const streamId = providedStreamId ?? generateStreamId(streamType)
+    const projectionDispatch = (action: unknown) =>
+      dispatch(applyStreamProjectionPolicy(action as any, { streamId, streamType, updatePath }) as any)
     const preSendState = getState() as RootState
-    const preSendDrafts = getDraftsForTarget(preSendState, { kind: 'composer' })
+    const preSendDrafts = includeGlobalComposerContext
+      ? getDraftsForTarget(preSendState, { kind: 'composer' })
+      : []
     const preSendAttachmentsBase64 = preSendDrafts.length
       ? preSendDrafts.map(d => ({
         dataUrl: d.dataUrl,
@@ -1208,46 +1489,57 @@ export const sendMessage = createAsyncThunk<
         sha256: d.sha256,
       }))
       : null
-    const preSendSelectedFilesForChat = preSendState.ideContext.selectedFilesForChat || []
+    const preSendSelectedFilesForChat = includeGlobalComposerContext
+      ? preSendState.ideContext.selectedFilesForChat || []
+      : []
 
-    dispatch(
-      chatSliceActions.sendingStarted({
-        streamId,
-        streamType: 'primary',
-        conversationId,
-        lineage: {
-          lineageId: providedLineageId === undefined
-            ? preSendState.chat.conversation.currentLineageId ?? undefined
-            : providedLineageId ?? undefined,
-          rootMessageId: parent,
-        },
-      })
-    )
-    void createStreamingRun({
-      streamId,
-      conversationId,
-      parentMessageId: parent ?? null,
-      streamType: 'primary',
-      operation: 'send',
-      source: 'renderer',
-      lineage: { rootMessageId: parent },
-    })
-    // Detach/reattach: mark this run in-flight so a reload can re-attach to it. Cleared
-    // in the finally below on normal end; a reload kills the thunk first, leaving the
-    // marker for mount-time resume (resumeInFlightStreams).
-    if (isResumableRunsEnabled()) {
-      addInflightStream({
-        streamId,
-        conversationId: String(conversationId),
-        streamType: 'primary',
-        parentMessageId: parent ?? null,
-      })
-    }
+    const sendLineageId =
+      (providedLineageId === undefined ? preSendState.chat.conversation.currentLineageId : providedLineageId) ?? null
 
     let controller: AbortController | undefined
     let unregisterGenerationAbortController = () => {}
 
     try {
+      // STUCK-SPINNER FIX: this setup used to run OUTSIDE the try. A throw in this
+      // window (a reducer throw, a localStorage quota/serialization failure in
+      // addInflightStream) skipped the catch AND the finally entirely, so nothing
+      // dispatched `sendingCompleted`, nothing emitted an error chunk, and the
+      // in-flight marker was never removed: a spinner that spun forever with
+      // `composition.sending` stuck true and an orphaned localStorage marker that a
+      // later mount would try to re-attach to. It is inside the try now.
+      dispatch(
+        chatSliceActions.sendingStarted({
+          streamId,
+          streamType,
+          conversationId,
+          lineage: {
+            lineageId: sendLineageId ?? undefined,
+            rootMessageId: parent,
+          },
+        })
+      )
+      void createStreamingRun({
+        streamId,
+        conversationId,
+        parentMessageId: parent ?? null,
+        streamType,
+        operation: 'send',
+        source: 'renderer',
+        lineage: { rootMessageId: parent },
+      })
+      // Detach/reattach: mark this run in-flight so a reload can re-attach to it. Cleared
+      // in the finally below on normal end; a reload kills the thunk first, leaving the
+      // marker for mount-time resume (resumeInFlightStreams).
+      if (isResumableRunsEnabled()) {
+        addInflightStream({
+          streamId,
+          conversationId: String(conversationId),
+          streamType,
+          parentMessageId: parent ?? null,
+          updatePath,
+        })
+      }
+
       controller = new AbortController()
       signal.addEventListener('abort', () => controller?.abort())
       unregisterGenerationAbortController = registerGenerationAbortController(streamId, controller)
@@ -1326,6 +1618,7 @@ export const sendMessage = createAsyncThunk<
           userId: auth.userId,
           parentId: parent ?? null,
           operationMode: operationModeAtSend,
+          ...buildOperationModePromptRequestParams(operationModeAtSend),
           think,
           reasoningConfig,
           subagentReasoningEffort: getSubagentReasoningEffort(),
@@ -1352,7 +1645,7 @@ export const sendMessage = createAsyncThunk<
           accountId: chatgptServerAuth?.accountId,
           // Auto-compaction / context settings (previously dropped => server used defaults,
           // ignoring the user's disable toggle and the selected model's real context window).
-          ...buildCompactionRequestParams(modelsData, modelName),
+          ...buildCompactionRequestParams(modelsData, modelName, providerSlug),
         })
         const result = await runServerChatLoop(
           {
@@ -1364,7 +1657,7 @@ export const sendMessage = createAsyncThunk<
             signal: controller.signal,
           },
           {
-            dispatch,
+            dispatch: projectionDispatch,
             getState,
             onMessagePersisted: () => refreshHeimdallTreeFromState(getState, dispatch),
             onSeq: (seq, event) => {
@@ -1399,34 +1692,44 @@ export const sendMessage = createAsyncThunk<
         // NOTE: streamCompleted is dispatched by the projection on the terminal 'complete'
         // event, so the shim must NOT re-dispatch it here (avoid double-finalize).
         dispatch(chatSliceActions.sendingCompleted({ streamId }))
+        // A successful send to this parent makes any error bubble still anchored there
+        // stale — the failure it described has been superseded by a real reply.
+        // No `parent != null` guard: an unanchored failure (nothing was persisted, or this
+        // is the conversation's first turn) is exactly the kind a success disproves.
+        dispatch(chatSliceActions.chatErrorsClearedForParent({ conversationId, parentMessageId: parent ?? null }))
         setTimeout(() => dispatch(chatSliceActions.streamPruned({ streamId })), STREAM_PRUNE_DELAY)
         return { messageId: result.messageId, userMessage: result.userMessage, streamId }
       }
 
       // Phase 6: the renderer is a pure thin client — there is no client-owned
       // fallback loop. Web mode is not a target; the server-owned loop requires the
-      // local Electron server.
-      throw new Error('The server-owned chat loop requires Electron.')
+      // local Electron server. Tagged so the catch below records `unsupported_runtime`
+      // instead of letting a fatal build/runtime mismatch vanish into a rejected thunk.
+      throw attachLocalChatErrorCode(
+        new Error('The server-owned chat loop requires Electron.'),
+        'unsupported_runtime'
+      )
     } catch (error) {
-      dispatch(chatSliceActions.sendingCompleted({ streamId }))
-
-      if (error instanceof Error && error.name === 'AbortError') {
-        return rejectWithValue('Message cancelled')
-      }
-
-      const message = error instanceof Error ? error.message : 'Failed to send message'
-      void finishStreamingRun(streamId, {
-        status: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
-        endReason:
-          error instanceof Error && error.name === 'AbortError'
-            ? 'aborted'
-            : error instanceof Error && error.message.includes('context compaction')
-              ? 'context_compaction_failed'
-              : 'error',
-        error: message,
+      const failure = handleServerLoopFailure({
+        error,
+        dispatch,
+        conversationId,
+        streamId,
+        parentMessageId: parent ?? null,
+        lineageId: sendLineageId,
       })
-      dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'error', error: message } }))
-      return rejectWithValue(message)
+      // Prune the errored slot too — it used to be scheduled only on the success return,
+      // so every failed run leaked its `streaming.byId` entry for the life of the tab.
+      // Safe now: the durable record lives in `errorNotices`, which streamPruned may not touch.
+      setTimeout(() => dispatch(chatSliceActions.streamPruned({ streamId })), STREAM_PRUNE_DELAY)
+      // Reject with the CLASSIFICATION, not prose. `surfaced` tells a `.unwrap()` catch the
+      // bubble is already on screen (tier 1 row or tier 2 record), so it must not add another.
+      return rejectWithValue({
+        message: failure.message,
+        envelope: failure.envelope,
+        surfaced: !failure.aborted,
+        aborted: failure.aborted,
+      } satisfies ServerLoopRejection)
     } finally {
       unregisterGenerationAbortController()
       // Terminal for THIS session (completed / errored / cancelled). Only a reload —
@@ -1614,42 +1917,45 @@ export const editMessageWithBranching = createAsyncThunk<
     const originalMessage = currentMessages.find(m => m.id === originalMessageId)
     const parentMessageId = originalMessage?.parent_id
 
-    dispatch(
-      chatSliceActions.sendingStarted({
-        streamId,
-        streamType: 'branch',
-        conversationId,
-        lineage: {
-          lineageId: providedLineageId === undefined
-            ? preSendState.chat.conversation.currentLineageId ?? undefined
-            : providedLineageId ?? undefined,
-          originMessageId: originalMessageId,
-          rootMessageId: parentMessageId, // Parent where new branch attaches
-        },
-      })
-    )
-    void createStreamingRun({
-      streamId,
-      conversationId,
-      parentMessageId: parentMessageId ?? null,
-      streamType: 'branch',
-      operation: 'edit-branch',
-      source: 'renderer',
-      lineage: { originMessageId: originalMessageId, rootMessageId: parentMessageId },
-    })
-    if (isResumableRunsEnabled()) {
-      addInflightStream({
-        streamId,
-        conversationId: String(conversationId),
-        streamType: 'branch',
-        parentMessageId: parentMessageId ?? null,
-      })
-    }
+    const editLineageId =
+      (providedLineageId === undefined ? preSendState.chat.conversation.currentLineageId : providedLineageId) ?? null
 
     let controller: AbortController | undefined
     let unregisterGenerationAbortController = () => {}
 
     try {
+      // STUCK-SPINNER FIX: see sendMessage. This setup used to run outside the try, so a
+      // throw here bypassed catch AND finally and hung the spinner permanently.
+      dispatch(
+        chatSliceActions.sendingStarted({
+          streamId,
+          streamType: 'branch',
+          conversationId,
+          lineage: {
+            lineageId: editLineageId ?? undefined,
+            originMessageId: originalMessageId,
+            rootMessageId: parentMessageId, // Parent where new branch attaches
+          },
+        })
+      )
+      void createStreamingRun({
+        streamId,
+        conversationId,
+        parentMessageId: parentMessageId ?? null,
+        streamType: 'branch',
+        operation: 'edit-branch',
+        source: 'renderer',
+        lineage: { originMessageId: originalMessageId, rootMessageId: parentMessageId },
+      })
+      if (isResumableRunsEnabled()) {
+        addInflightStream({
+          streamId,
+          conversationId: String(conversationId),
+          streamType: 'branch',
+          parentMessageId: parentMessageId ?? null,
+        })
+      }
+
       controller = new AbortController()
       signal.addEventListener('abort', () => controller?.abort())
       unregisterGenerationAbortController = registerGenerationAbortController(streamId, controller)
@@ -1751,7 +2057,10 @@ export const editMessageWithBranching = createAsyncThunk<
       }
 
       if (!modelName) {
-        throw new Error('No model selected')
+        // LOCAL-02: this used to reject with the bare string 'No model selected', which
+        // reached no bubble at all. Tagged so the catch records a real classified error
+        // whose action ("Choose a model") is the actual fix.
+        throw attachLocalChatErrorCode(new Error('No model selected'), 'model_not_found')
       }
 
       const resolvedModel =
@@ -1759,7 +2068,7 @@ export const editMessageWithBranching = createAsyncThunk<
         modelsData?.selected ||
         modelsData?.default ||
         null
-      const branchContextLimit = resolvedModel?.contextLength || 128_000
+      const branchContextLimit = resolveProviderContextLength(providerSlug, resolvedModel?.contextLength) || 128_000
 
       let promptAndContextTokens = 0
       promptAndContextTokens += safeEstimateTokenCount(selectedProject?.system_prompt)
@@ -1860,7 +2169,15 @@ export const editMessageWithBranching = createAsyncThunk<
           activeParentId = compactedMessage.id
         } catch (error) {
           console.error('[AutoCompaction][branch] compaction failed. Branch send aborted:', error)
-          throw error instanceof Error ? error : new Error(String(error))
+          // Tag the real cause. The old catch guessed at this with
+          // `message.includes('context compaction')`, which matched none of the strings
+          // this path actually raises ('Invalid branch compaction summary returned',
+          // 'Failed to compact branch', a rejected `compactBranch` payload), so the
+          // compaction end reason and its "Compact conversation" action were unreachable.
+          throw attachLocalChatErrorCode(
+            error instanceof Error ? error : new Error(String(error)),
+            'compaction_failed'
+          )
         }
       }
 
@@ -1893,6 +2210,7 @@ export const editMessageWithBranching = createAsyncThunk<
           messageId: String(originalMessageId),
           parentId: parentMessageId ?? null,
           operationMode: operationModeAtSend,
+          ...buildOperationModePromptRequestParams(operationModeAtSend),
           think,
           subagentReasoningEffort: getSubagentReasoningEffort(),
           rootPath: effectiveToolRootPath,
@@ -1917,7 +2235,7 @@ export const editMessageWithBranching = createAsyncThunk<
           accountId: chatgptServerAuth?.accountId,
           // Auto-compaction / context settings (previously dropped => server used defaults,
           // ignoring the user's disable toggle and the selected model's real context window).
-          ...buildCompactionRequestParams(modelsData, modelName),
+          ...buildCompactionRequestParams(modelsData, modelName, providerSlug),
         })
         const result = await runServerChatLoop(
           {
@@ -1962,34 +2280,40 @@ export const editMessageWithBranching = createAsyncThunk<
             .catch(error => console.warn('[serverLoop] Failed to mark final message', error))
         }
         dispatch(chatSliceActions.sendingCompleted({ streamId }))
+        // A successful edit-branch supersedes any error bubble anchored at this parent.
+        dispatch(
+          chatSliceActions.chatErrorsClearedForParent({ conversationId, parentMessageId: parentMessageId ?? null })
+        )
         setTimeout(() => dispatch(chatSliceActions.streamPruned({ streamId })), STREAM_PRUNE_DELAY)
         return { messageId: result.messageId, userMessage: result.userMessage, originalMessageId, streamId }
       }
 
       // Phase 6: the renderer is a pure thin client — there is no client-owned
       // fallback loop. Web mode is not a target; the server-owned loop requires the
-      // local Electron server.
-      throw new Error('The server-owned chat loop requires Electron.')
+      // local Electron server. Tagged so the catch records `unsupported_runtime`.
+      throw attachLocalChatErrorCode(
+        new Error('The server-owned chat loop requires Electron.'),
+        'unsupported_runtime'
+      )
     } catch (error) {
-      dispatch(chatSliceActions.sendingCompleted({ streamId }))
-
-      if (error instanceof Error && error.name === 'AbortError') {
-        return rejectWithValue('Message cancelled')
-      }
-
-      const message = error instanceof Error ? error.message : 'Failed to edit message'
-      void finishStreamingRun(streamId, {
-        status: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
-        endReason:
-          error instanceof Error && error.name === 'AbortError'
-            ? 'aborted'
-            : error instanceof Error && error.message.includes('context compaction')
-              ? 'context_compaction_failed'
-              : 'error',
-        error: message,
+      const failure = handleServerLoopFailure({
+        error,
+        dispatch,
+        conversationId,
+        streamId,
+        parentMessageId: parentMessageId ?? null,
+        lineageId: editLineageId,
       })
-      dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'error', error: message } }))
-      return rejectWithValue(message)
+      // Errored slots used to leak: streamPruned was scheduled only on the success return.
+      setTimeout(() => dispatch(chatSliceActions.streamPruned({ streamId })), STREAM_PRUNE_DELAY)
+      // Reject with the CLASSIFICATION, not prose. `surfaced` tells a `.unwrap()` catch the
+      // bubble is already on screen (tier 1 row or tier 2 record), so it must not add another.
+      return rejectWithValue({
+        message: failure.message,
+        envelope: failure.envelope,
+        surfaced: !failure.aborted,
+        aborted: failure.aborted,
+      } satisfies ServerLoopRejection)
     } finally {
       unregisterGenerationAbortController()
       if (!retainInflightMarkerOnReaderClose.delete(streamId)) removeInflightStream(streamId)
@@ -2038,41 +2362,44 @@ export const sendMessageToBranch = createAsyncThunk<
       : null
     const preSendSelectedFilesForChat = preSendState.ideContext.selectedFilesForChat || []
 
-    dispatch(
-      chatSliceActions.sendingStarted({
-        streamId,
-        streamType: 'branch',
-        conversationId,
-        lineage: {
-          lineageId: providedLineageId === undefined
-            ? preSendState.chat.conversation.currentLineageId ?? undefined
-            : providedLineageId ?? undefined,
-          rootMessageId: parentId,
-        },
-      })
-    )
-    void createStreamingRun({
-      streamId,
-      conversationId,
-      parentMessageId: parentId ?? null,
-      streamType: 'branch',
-      operation: 'branch',
-      source: 'renderer',
-      lineage: { rootMessageId: parentId },
-    })
-    if (isResumableRunsEnabled()) {
-      addInflightStream({
-        streamId,
-        conversationId: String(conversationId),
-        streamType: 'branch',
-        parentMessageId: parentId ?? null,
-      })
-    }
+    const branchLineageId =
+      (providedLineageId === undefined ? preSendState.chat.conversation.currentLineageId : providedLineageId) ?? null
 
     let controller: AbortController | undefined
     let unregisterGenerationAbortController = () => {}
 
     try {
+      // STUCK-SPINNER FIX: see sendMessage. This setup used to run outside the try, so a
+      // throw here bypassed catch AND finally and hung the spinner permanently.
+      dispatch(
+        chatSliceActions.sendingStarted({
+          streamId,
+          streamType: 'branch',
+          conversationId,
+          lineage: {
+            lineageId: branchLineageId ?? undefined,
+            rootMessageId: parentId,
+          },
+        })
+      )
+      void createStreamingRun({
+        streamId,
+        conversationId,
+        parentMessageId: parentId ?? null,
+        streamType: 'branch',
+        operation: 'branch',
+        source: 'renderer',
+        lineage: { rootMessageId: parentId },
+      })
+      if (isResumableRunsEnabled()) {
+        addInflightStream({
+          streamId,
+          conversationId: String(conversationId),
+          streamType: 'branch',
+          parentMessageId: parentId ?? null,
+        })
+      }
+
       controller = new AbortController()
       signal.addEventListener('abort', () => controller?.abort())
       unregisterGenerationAbortController = registerGenerationAbortController(streamId, controller)
@@ -2133,6 +2460,7 @@ export const sendMessageToBranch = createAsyncThunk<
           messageId: String(parentId),
           parentId: parentId ?? null,
           operationMode: operationModeAtSend,
+          ...buildOperationModePromptRequestParams(operationModeAtSend),
           think,
           subagentReasoningEffort: getSubagentReasoningEffort(),
           rootPath: effectiveToolRootPath,
@@ -2157,7 +2485,7 @@ export const sendMessageToBranch = createAsyncThunk<
           accountId: chatgptServerAuth?.accountId,
           // Auto-compaction / context settings (previously dropped => server used defaults,
           // ignoring the user's disable toggle and the selected model's real context window).
-          ...buildCompactionRequestParams(modelsData, modelName),
+          ...buildCompactionRequestParams(modelsData, modelName, providerSlug),
         })
         const result = await runServerChatLoop(
           {
@@ -2202,34 +2530,38 @@ export const sendMessageToBranch = createAsyncThunk<
             .catch(error => console.warn('[serverLoop] Failed to mark final message', error))
         }
         dispatch(chatSliceActions.sendingCompleted({ streamId }))
+        // A successful branch send supersedes any error bubble anchored at this parent.
+        dispatch(chatSliceActions.chatErrorsClearedForParent({ conversationId, parentMessageId: parentId ?? null }))
         setTimeout(() => dispatch(chatSliceActions.streamPruned({ streamId })), STREAM_PRUNE_DELAY)
         return { messageId: result.messageId, userMessage: result.userMessage, streamId }
       }
 
       // Phase 6: the renderer is a pure thin client — there is no client-owned
       // fallback loop. Web mode is not a target; the server-owned loop requires the
-      // local Electron server.
-      throw new Error('The server-owned chat loop requires Electron.')
+      // local Electron server. Tagged so the catch records `unsupported_runtime`.
+      throw attachLocalChatErrorCode(
+        new Error('The server-owned chat loop requires Electron.'),
+        'unsupported_runtime'
+      )
     } catch (error) {
-      dispatch(chatSliceActions.sendingCompleted({ streamId }))
-
-      if (error instanceof Error && error.name === 'AbortError') {
-        return rejectWithValue('Message cancelled')
-      }
-
-      const message = error instanceof Error ? error.message : 'Failed to send message'
-      void finishStreamingRun(streamId, {
-        status: error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'error',
-        endReason:
-          error instanceof Error && error.name === 'AbortError'
-            ? 'aborted'
-            : error instanceof Error && error.message.includes('context compaction')
-              ? 'context_compaction_failed'
-              : 'error',
-        error: message,
+      const failure = handleServerLoopFailure({
+        error,
+        dispatch,
+        conversationId,
+        streamId,
+        parentMessageId: parentId ?? null,
+        lineageId: branchLineageId,
       })
-      dispatch(chatSliceActions.streamChunkReceived({ streamId, chunk: { type: 'error', error: message } }))
-      return rejectWithValue(message)
+      // Errored slots used to leak: streamPruned was scheduled only on the success return.
+      setTimeout(() => dispatch(chatSliceActions.streamPruned({ streamId })), STREAM_PRUNE_DELAY)
+      // Reject with the CLASSIFICATION, not prose. `surfaced` tells a `.unwrap()` catch the
+      // bubble is already on screen (tier 1 row or tier 2 record), so it must not add another.
+      return rejectWithValue({
+        message: failure.message,
+        envelope: failure.envelope,
+        surfaced: !failure.aborted,
+        aborted: failure.aborted,
+      } satisfies ServerLoopRejection)
     } finally {
       unregisterGenerationAbortController()
       if (!retainInflightMarkerOnReaderClose.delete(streamId)) removeInflightStream(streamId)
@@ -2787,7 +3119,7 @@ export const abortGeneration = createAsyncThunk<
   void,
   { streamId?: string | null; messageId?: MessageId | null },
   { state: RootState }
->('chat/abortGeneration', async ({ streamId }, { dispatch }) => {
+>('chat/abortGeneration', async ({ streamId }, { dispatch, getState }) => {
   abortSubagentControllers(streamId)
 
   // Under resumable runs a bare socket close only DETACHES (the run keeps going), so an
@@ -2799,10 +3131,32 @@ export const abortGeneration = createAsyncThunk<
 
   try {
     if (isResumableRunsEnabled()) {
-      const results = await Promise.all(streamIds.map(async id => ({ id, ok: await postStreamAbort(id) })))
+      const results = await Promise.all(
+        streamIds.map(async id => ({ id, ...normalizeStreamAbortResult(await postStreamAbort(id)) }))
+      )
       serverAbortSucceeded = results.every(result => result.ok)
       for (const result of results) {
-        if (!result.ok && hasGenerationReader(result.id)) retainInflightMarkerOnReaderClose.add(result.id)
+        if (result.ok) continue
+        if (hasGenerationReader(result.id)) retainInflightMarkerOnReaderClose.add(result.id)
+        // A Stop we could not confirm is the one failure the UI most actively lied about:
+        // the spinner collapses immediately, so the run looks stopped while it may still
+        // be burning tokens server-side. Record it. When the abort response carried a
+        // classified envelope we use it verbatim; otherwise phase 'abort' yields
+        // `stop_not_confirmed` for everything except the two statuses that mean something
+        // definite on any transport (410 gone, 401/403 signed out).
+        const rec = records.find(entry => entry.streamId === result.id)
+        const conversationId =
+          (rec?.conversationId as ConversationId | undefined) ??
+          getState().chat.conversation.currentConversationId
+        if (conversationId == null) continue
+        recordLocalChatError(dispatch, null, {
+          conversationId,
+          phase: 'abort',
+          status: result.status,
+          streamId: result.id,
+          parentMessageId: (rec?.parentMessageId as MessageId | null | undefined) ?? null,
+          envelope: result.envelope,
+        })
       }
     }
   } finally {
@@ -2842,15 +3196,18 @@ export const resumeInFlightStreams = createAsyncThunk<
 
     const controller = new AbortController()
     const unregister = registerGenerationAbortController(rec.streamId, controller)
-    dispatch(
-      chatSliceActions.sendingStarted({
-        streamId: rec.streamId,
-        streamType: rec.streamType,
-        conversationId: rec.conversationId,
-        lineage: { rootMessageId: rec.parentMessageId ?? undefined },
-      })
-    )
     try {
+      // Inside the try for the same reason as the send/edit/branch setup: a throw here
+      // would otherwise skip the finally that dispatches `sendingCompleted`, leaving a
+      // rebuilt-but-never-cleared spinner on every subsequent mount.
+      dispatch(
+        chatSliceActions.sendingStarted({
+          streamId: rec.streamId,
+          streamType: rec.streamType,
+          conversationId: rec.conversationId,
+          lineage: { rootMessageId: rec.parentMessageId ?? undefined },
+        })
+      )
       const result = await runServerReattach(
         {
           streamId: rec.streamId,
@@ -2860,7 +3217,14 @@ export const resumeInFlightStreams = createAsyncThunk<
           signal: controller.signal,
         },
         {
-          dispatch,
+          dispatch: action =>
+            dispatch(
+              applyStreamProjectionPolicy(action as any, {
+                streamId: rec.streamId,
+                streamType: rec.streamType,
+                updatePath: rec.updatePath ?? rec.streamType !== 'branch',
+              }) as any
+            ),
           getState,
           onMessagePersisted: () => refreshHeimdallTreeFromState(getState, dispatch),
           onSeq: (seq, event) => {
@@ -2873,10 +3237,37 @@ export const resumeInFlightStreams = createAsyncThunk<
           },
         }
       )
+      // `gone` and `failed` are no longer the same value. `envelope` is present ONLY when
+      // there is something to say: `run_expired` for a 410 (this reply never finished in
+      // front of the user and the server no longer has it), or the classified reason a
+      // reattach/replay failed — including a terminal error frame, which nothing on this
+      // path throws, so the envelope is the only way it is ever surfaced. Absent means
+      // "healthy, still running" and stays silent.
+      const reattachFailure = reattachEnvelopeOf(result)
+      if (reattachFailure) {
+        recordLocalChatError(dispatch, null, {
+          conversationId: rec.conversationId as ConversationId,
+          phase: 'reattach',
+          streamId: rec.streamId,
+          parentMessageId: (rec.parentMessageId as MessageId | null | undefined) ?? null,
+          envelope: reattachFailure,
+        })
+      }
       if (result.gone) dispatch(chatSliceActions.streamingAborted({ streamId: rec.streamId }))
       if (result.gone || result.terminal) removeInflightStream(rec.streamId)
-    } catch {
-      // Retain the marker after transient failures so a later route mount can retry.
+    } catch (error) {
+      // This was a literally empty `catch {}`: after a reload, an unrecoverable run
+      // produced zero signal anywhere — no bubble, no log — while the marker was
+      // silently retained. Classify and record it; phase 'reattach' resolves to
+      // `stream_interrupted` unless the failure was something more definite (offline,
+      // signed out, run expired). The marker is still retained so a later mount retries.
+      console.warn('[resumeInFlightStreams] reattach failed', rec.streamId, error)
+      recordLocalChatError(dispatch, error, {
+        conversationId: rec.conversationId as ConversationId,
+        phase: 'reattach',
+        streamId: rec.streamId,
+        parentMessageId: (rec.parentMessageId as MessageId | null | undefined) ?? null,
+      })
     } finally {
       dispatch(chatSliceActions.sendingCompleted({ streamId: rec.streamId }))
       unregister()
@@ -3118,90 +3509,216 @@ export const insertBulkMessages = createAsyncThunk<
 //   }
 // )
 
+interface DecisionResumeOutcome {
+  ok: boolean
+  status?: number
+  envelope?: ChatErrorEnvelope
+}
+
 /**
- * POST a decision to the server-owned loop's /api/resume (Phase 2). Errors
- * (404/409 = no pending / already resolved, or network) are swallowed so a
- * stale click never crashes the UI.
+ * POST a decision to the server-owned loop's /api/resume (Phase 2).
+ *
+ * This used to `await fetch(...)` and ignore the Response entirely, so a 400 / 409 /
+ * 501 was indistinguishable from success and a network rejection became a
+ * `console.warn`. Every caller then closed its dialog unconditionally — the run stayed
+ * parked forever waiting for an answer that never arrived, while the UI told the user
+ * their answer had been accepted. That was the worst gap in the chat error surface.
+ *
+ * A 409 remains a failure because the broker uses the same result for an absent waiter
+ * and a decision-kind mismatch. The renderer cannot prove the run is unparked, so it
+ * must preserve the prompt and surface the server's reload action.
  */
 const postDecisionResume = async (
   body: { streamId: string; toolCallId: string } & Record<string, unknown>
-): Promise<void> => {
+): Promise<DecisionResumeOutcome> => {
+  let status: number | undefined
   try {
     const url = await buildLocalApiUrl('/resume')
-    await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    status = res.status
+    if (res.ok) return { ok: true, status }
+
+    // A 409 is not proof that no run is parked: DecisionBroker also returns it for a
+    // wrong decision kind. Preserve the prompt and surface the server's recovery action
+    // instead of silently claiming the answer was delivered.
+    // The route replies with a fully classified `envelope` (chatRoutes.sendJsonError).
+    // Prefer it — it knows things this side cannot, e.g. that a 501 broker-not-configured
+    // is fatal rather than retryable.
+    const payload = await res.json().catch(() => null)
+    const carried = payload && typeof payload === 'object' ? (payload as { envelope?: unknown }).envelope : null
+    const envelope =
+      carried && typeof carried === 'object'
+        ? normalizeChatErrorEnvelope(carried)
+        : classifyLocalChatError(new Error(`Decision POST rejected (HTTP ${res.status})`), {
+            phase: 'resume',
+            status,
+          })
+    console.warn('[serverLoop] /resume rejected', { status: res.status, code: envelope.code })
+    return { ok: false, status, envelope }
   } catch (error) {
     console.warn('[serverLoop] /resume failed', error)
+    return { ok: false, status, envelope: classifyLocalChatError(error, { phase: 'resume', status }) }
   }
 }
 
-export const respondToToolPermission = createAsyncThunk<void, boolean, { state: RootState; extra: ThunkExtraArgument }>(
+/**
+ * Record a decision that never reached the server, and say whether the dialog that
+ * produced it should now close. Always dispatches the record BEFORE the caller's
+ * dialog-closing action, so the bubble exists by the time the dialog disappears.
+ *
+ * DIALOG POLICY (deliberate): the dialog is the ONLY affordance that can answer a
+ * parked run — once it closes, nothing in the UI can deliver that decision, and the
+ * `retry` action on the bubble cannot either (the request body is gone with the
+ * dialog state). So we keep it open when clicking again could plausibly work, and
+ * close it when it provably cannot:
+ *   - transport failure, no status at all (offline, local server down) → KEEP OPEN.
+ *     The user fixes the network and clicks again; the run is still parked.
+ *   - 5xx → KEEP OPEN. Server-side transience; the pending decision is still there.
+ *   - 409 → KEEP OPEN. It can mean an existing waiter rejected the decision kind, so
+ *     closing could strand a live run. The recovery bubble offers a reload action.
+ *   - other 4xx → CLOSE. The server gave a definitive verdict on this exact body, and
+ *     clicking again sends identical bytes to the identical verdict.
+ *   - `recoverability: 'fatal'` (the 501 "decision broker not configured") → CLOSE.
+ *     Retrying can never work on this server, and trapping the user in an
+ *     undismissable modal would be strictly worse than the bubble we just recorded.
+ * In every one of those cases the durable bubble in `errorNotices` carries the honest
+ * explanation and the right action ("Reload conversation").
+ */
+const settleDecisionResume = (
+  dispatch: (action: any) => unknown,
+  state: RootState,
+  streamId: string,
+  outcome: DecisionResumeOutcome
+): { closeDialog: boolean } => {
+  if (outcome.ok) return { closeDialog: true }
+
+  const stream = state.chat.streaming.byId?.[streamId]
+  const conversationId = state.chat.conversation.currentConversationId
+  if (conversationId != null) {
+    recordLocalChatError(dispatch, null, {
+      conversationId,
+      phase: 'resume',
+      status: outcome.status,
+      streamId,
+      parentMessageId: stream?.lineage?.rootMessageId ?? null,
+      lineageId: stream?.lineage?.lineageId ?? null,
+      envelope: outcome.envelope,
+    })
+  }
+
+  if (outcome.envelope?.recoverability === 'fatal') return { closeDialog: true }
+  if (outcome.status === 409) return { closeDialog: false }
+  if (typeof outcome.status === 'number' && outcome.status < 500) return { closeDialog: true }
+  return { closeDialog: false }
+}
+
+export const respondToToolPermission = createAsyncThunk<
+  void,
+  { allowed: boolean; streamId?: string },
+  { state: RootState; extra: ThunkExtraArgument }
+>(
   'chat/respondToToolPermission',
-  async (allowed, { dispatch, getState }) => {
-    const req = getState().chat.toolCallPermissionRequest
+  async ({ allowed, streamId }, { dispatch, getState }) => {
+    const chat = getState().chat
+    const req = streamId ? (chat.toolPermissionRequestsByStream[streamId] ?? null) : chat.toolCallPermissionRequest
     if (req?.streamId && req?.toolCallId) {
       // Server-owned loop: resolve the paused decision over /resume.
-      await postDecisionResume({ streamId: req.streamId, toolCallId: req.toolCallId, decision: allowed ? 'allow_once' : 'deny' })
+      const outcome = await postDecisionResume({
+        streamId: req.streamId,
+        toolCallId: req.toolCallId,
+        decision: allowed ? 'allow_once' : 'deny',
+      })
+      // Records the failure first; keeps the dialog open when another click could work.
+      if (!settleDecisionResume(dispatch, getState(), req.streamId, outcome).closeDialog) return
     }
-    dispatch(chatSliceActions.toolPermissionResponded())
+    if (req?.streamId) dispatch(chatSliceActions.toolPermissionRespondedForStream(req.streamId))
+    else dispatch(chatSliceActions.toolPermissionResponded())
   }
 )
 
 export const respondToOperationModeUpgrade = createAsyncThunk<
   void,
-  boolean,
+  { approved: boolean; streamId?: string },
   { state: RootState; extra: ThunkExtraArgument }
->('chat/respondToOperationModeUpgrade', async (approved, { dispatch, getState }) => {
-  const req = getState().chat.operationModeUpgradeRequest
-  if (approved) dispatch(chatSliceActions.operationModeSet('execute'))
+>('chat/respondToOperationModeUpgrade', async ({ approved, streamId }, { dispatch, getState }) => {
+  const chat = getState().chat
+  const req = streamId ? (chat.operationModeUpgradeRequestsByStream[streamId] ?? null) : chat.operationModeUpgradeRequest
   if (req?.streamId && req?.toolCallId) {
-    await postDecisionResume({
+    const outcome = await postDecisionResume({
       streamId: req.streamId,
       toolCallId: req.toolCallId,
       decision: approved ? 'switch_to_execute' : 'deny',
     })
+    if (!settleDecisionResume(dispatch, getState(), req.streamId, outcome).closeDialog) return
   }
-  dispatch(chatSliceActions.operationModeUpgradeResponded())
+  if (approved) dispatch(chatSliceActions.operationModeSet('execute'))
+  if (req?.streamId) dispatch(chatSliceActions.operationModeUpgradeRespondedForStream(req.streamId))
+  else dispatch(chatSliceActions.operationModeUpgradeResponded())
 })
 
 export const respondToPlanClarification = createAsyncThunk<
   void,
-  PlanClarificationAnswer[],
+  { answers: PlanClarificationAnswer[]; streamId?: string },
   { state: RootState; extra: ThunkExtraArgument }
->('chat/respondToPlanClarification', async (answers, { dispatch, getState }) => {
-  const req = getState().chat.planClarificationRequest
+>('chat/respondToPlanClarification', async ({ answers, streamId }, { dispatch, getState }) => {
+  const chat = getState().chat
+  const req = streamId ? (chat.planClarificationRequestsByStream[streamId] ?? null) : chat.planClarificationRequest
   if (req?.streamId && req?.toolCallId) {
-    await postDecisionResume({ streamId: req.streamId, toolCallId: req.toolCallId, answers })
+    const outcome = await postDecisionResume({ streamId: req.streamId, toolCallId: req.toolCallId, answers })
+    // Keeping this dialog open on a transient failure also preserves the typed answers,
+    // which are otherwise destroyed by planClarificationResponded.
+    if (!settleDecisionResume(dispatch, getState(), req.streamId, outcome).closeDialog) return
   }
-  dispatch(chatSliceActions.planClarificationResponded())
+  if (req?.streamId) dispatch(chatSliceActions.planClarificationRespondedForStream(req.streamId))
+  else dispatch(chatSliceActions.planClarificationResponded())
 })
 
-export const cancelPlanClarification = createAsyncThunk<void, void, { state: RootState; extra: ThunkExtraArgument }>(
+export const cancelPlanClarification = createAsyncThunk<
+  void,
+  string | undefined,
+  { state: RootState; extra: ThunkExtraArgument }
+>(
   'chat/cancelPlanClarification',
-  async (_, { dispatch, getState }) => {
-    const req = getState().chat.planClarificationRequest
+  async (streamId, { dispatch, getState }) => {
+    const chat = getState().chat
+    const req = streamId ? (chat.planClarificationRequestsByStream[streamId] ?? null) : chat.planClarificationRequest
     if (req?.streamId && req?.toolCallId) {
-      await postDecisionResume({ streamId: req.streamId, toolCallId: req.toolCallId, cancelled: true })
+      const outcome = await postDecisionResume({ streamId: req.streamId, toolCallId: req.toolCallId, cancelled: true })
+      if (!settleDecisionResume(dispatch, getState(), req.streamId, outcome).closeDialog) return
     }
-    dispatch(chatSliceActions.planClarificationResponded())
+    if (req?.streamId) dispatch(chatSliceActions.planClarificationRespondedForStream(req.streamId))
+    else dispatch(chatSliceActions.planClarificationResponded())
   }
 )
 
 export const respondToToolPermissionAndEnableAll = createAsyncThunk<
   void,
-  void,
+  string | undefined,
   { state: RootState; extra: ThunkExtraArgument }
->('chat/respondToToolPermissionAndEnableAll', async (_, { dispatch, getState }) => {
-  // Enable auto-approve mode for all future tools; the server path relies on the
-  // allow_always decision forwarded below.
+>('chat/respondToToolPermissionAndEnableAll', async (streamId, { dispatch, getState }) => {
+  const chat = getState().chat
+  const req = streamId ? (chat.toolPermissionRequestsByStream[streamId] ?? null) : chat.toolCallPermissionRequest
+  if (!req?.streamId || !req?.toolCallId) return
+
+  const outcome = await postDecisionResume({
+    streamId: req.streamId,
+    toolCallId: req.toolCallId,
+    decision: 'allow_always',
+  })
+  if (!settleDecisionResume(dispatch, getState(), req.streamId, outcome).closeDialog) return
+
+  // Change the renderer default only after the server atomically promoted the current
+  // stream and released its pending permission waiters. A failed resume must not make
+  // unrelated future branches appear auto-approved while this run remains parked.
   dispatch(chatSliceActions.toolAutoApproveEnabled())
 
-  const req = getState().chat.toolCallPermissionRequest
-  if (req?.streamId && req?.toolCallId) {
-    await postDecisionResume({ streamId: req.streamId, toolCallId: req.toolCallId, decision: 'allow_always' })
-  }
-
-  // Clear the permission dialog
-  dispatch(chatSliceActions.toolPermissionResponded())
+  // Clear only the branch/run prompt that was answered.
+  if (req?.streamId) dispatch(chatSliceActions.toolPermissionRespondedForStream(req.streamId))
+  else dispatch(chatSliceActions.toolPermissionResponded())
 })
 
 /**
