@@ -1,3 +1,14 @@
+---
+paths:
+  - "client/ygg-chat-r/src/features/chats/chatActions.ts"
+  - "client/ygg-chat-r/src/features/chats/buildServerLoopRequest.ts"
+  - "client/ygg-chat-r/src/features/chats/mainChatClient.ts"
+  - "client/ygg-chat-r/src/features/chats/sseProjection.ts"
+  - "client/ygg-chat-r/server/headlessServer/routes/chatRoutes.ts"
+  - "client/ygg-chat-r/server/headlessServer/services/chatOrchestrator.ts"
+  - "client/ygg-chat-r/server/headlessServer/services/toolLoopService.ts"
+---
+
 # Agent Context: Chat Pipeline
 
 Last reviewed: 2026-08-01
@@ -64,7 +75,7 @@ Use this when changing:
   projection reuses the existing vocabulary).
 - `chatSelectors.ts`, `chatTypes.ts` — branch/view selectors and types.
 
-### Server chat engine (`client/ygg-chat-r/electron/headlessServer/`)
+### Server chat engine (`client/ygg-chat-r/server/headlessServer/`)
 - `index.ts` — `registerHeadlessServerRoutes` (`:237`) wires the shared graph: one
   process-wide `DecisionBroker` (`:246`), the base `ToolExecutor`
   `executeToolViaOrchestrator` (`:173`), and `ChatOrchestrator` (built at `:311` with
@@ -144,9 +155,16 @@ All 3 thunks share the same shape:
      `ProviderErrorAssistantResponse` → `finish('error', 'provider_error')` +
      `complete { providerError: true }`; abort → `finish('aborted')`, no error frame.
      **finally:** `decisionBroker.rejectAllForStream(trackedStreamId)`.
-4. **`ToolLoopService.run`** (`toolLoopService.ts:626`): the multi-turn loop. Per tool call
+4. **`ToolLoopService.run`** (`toolLoopService.ts`): the multi-turn loop. Per tool call
    it invokes the pausing executor; per turn it folds hook context into the system prompt,
    evaluates in-loop compaction at the quiescent boundary, and honors the abort signal.
+   Provider-turn timeout is **activity-based**: the 180-second default is rearmed by each
+   provider stream event, so a response may run longer while bytes keep arriving. A real
+   idle timeout aborts only that provider attempt, fences late events, and persists any
+   text/reasoning/tool state already emitted as an ordinary assistant row before the
+   classified error row. Explicit Stop/cancel also preserves non-empty streamed output
+   without adding an error row. Once visible output exists, that attempt is not retried,
+   avoiding a duplicate regenerated answer in the append-only live stream.
 5. **Renderer projection**: `runServerChatLoop` hands every SSE event to
    `projectServerEvent`, which returns ordered actions dispatched onto the unchanged
    reducers. Terminal `complete` emits `streamCompleted`; the thunk then adds
@@ -219,11 +237,10 @@ Both paths run through `CompactionService`:
   `compactBranch`, re-anchors the stream to the `__auto_compaction_summary__` system marker,
   resets `history = [summaryMessage]` and emits `completed`. Failure → `failed` + throw
   (`endReason: context_compaction_failed`).
-- **Manual button**: `POST /api/conversations/:id/compact` (`chatRoutes.ts:174`) →
-  `compactionService.compactBranch` (`:559`) → persists a `role:'system'`,
-  `note:'__auto_compaction_summary__'` message. The renderer's standalone `compactBranch`
-  thunk (`chatActions.ts:832`) still drives this button client-side (the ONE surviving
-  renderer-side generation path); in-loop auto-compaction moved server-side.
+- **Manual button / renderer prechecks**: the renderer `compactBranch` thunk POSTs
+  `/api/conversations/:id/compact` and projects only the returned persisted row.
+  `compactionService.compactBranch` persists a `role:'system'`,
+  `note:'__auto_compaction_summary__'` message before returning its server-assigned ID.
 
 ## Provider routing, message sinks, cloud gateway
 

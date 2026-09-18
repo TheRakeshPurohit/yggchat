@@ -25,6 +25,7 @@ interface ChatMessageRoleTheme {
 
 interface HeimdallNodeTheme {
   fill: ThemeColorPair
+  visibleFill: ThemeColorPair
   stroke: ThemeColorPair
   visibleStroke: ThemeColorPair
 }
@@ -66,6 +67,16 @@ export interface CustomChatTheme {
     settingsCustomThemesPrimaryButtonText: ThemeColorPair
     chatInputAreaBorder: ThemeColorPair
     chatProgressBarFill: ThemeColorPair
+    contextCardBg: ThemeColorPair
+    contextCardHoverBg: ThemeColorPair
+    contextCardTitleText: ThemeColorPair
+    contextCardMetaText: ThemeColorPair
+    contextCardPathText: ThemeColorPair
+    contextCardMutedText: ThemeColorPair
+    contextCardBadgeBg: ThemeColorPair
+    contextCardBadgeText: ThemeColorPair
+    contextCardCodeBg: ThemeColorPair
+    contextCardCodeText: ThemeColorPair
     actionPopoverBorder: ThemeColorPair
     sendButtonAnimationColor: ThemeColorPair
     streamingAnimationColor: ThemeColorPair
@@ -368,6 +379,46 @@ export const createDefaultCustomChatTheme = (): CustomChatTheme => ({
     chatProgressBarFill: {
       light: '#3b82f6',
       dark: '#60a5fa',
+    },
+    contextCardBg: {
+      light: '#ede9fe',
+      dark: 'rgba(139, 92, 246, 0.15)',
+    },
+    contextCardHoverBg: {
+      light: 'rgba(229, 229, 229, 0.8)',
+      dark: '#262626',
+    },
+    contextCardTitleText: {
+      light: '#7c3aed',
+      dark: '#c4b5fd',
+    },
+    contextCardMetaText: {
+      light: '#7c3aed',
+      dark: '#c4b5fd',
+    },
+    contextCardPathText: {
+      light: '#44403c',
+      dark: '#e7e5e4',
+    },
+    contextCardMutedText: {
+      light: '#737373',
+      dark: '#a3a3a3',
+    },
+    contextCardBadgeBg: {
+      light: 'rgba(229, 229, 229, 0.8)',
+      dark: '#262626',
+    },
+    contextCardBadgeText: {
+      light: '#7c3aed',
+      dark: '#c4b5fd',
+    },
+    contextCardCodeBg: {
+      light: 'rgba(229, 229, 229, 0.7)',
+      dark: '#262626',
+    },
+    contextCardCodeText: {
+      light: '#525252',
+      dark: '#d4d4d8',
     },
     actionPopoverBorder: {
       light: '#dbeafe',
@@ -855,16 +906,19 @@ export const createDefaultCustomChatTheme = (): CustomChatTheme => ({
     heimdallNodes: {
       user: {
         fill: { light: '#f5f5f5', dark: '#171717' },
+        visibleFill: { light: '#dbeafe', dark: 'rgba(249, 115, 22, 0.2)' },
         stroke: { light: '#d4d4d4', dark: '#262626' },
         visibleStroke: { light: '#34d399', dark: '#f97316' },
       },
       assistant: {
         fill: { light: '#f1f5f9', dark: '#171717' },
+        visibleFill: { light: '#dbeafe', dark: 'rgba(249, 115, 22, 0.2)' },
         stroke: { light: '#e5e5e5', dark: '#262626' },
         visibleStroke: { light: '#34d399', dark: '#f97316' },
       },
       ex_agent: {
         fill: { light: '#f8fafc', dark: '#0a0a0a' },
+        visibleFill: { light: '#dbeafe', dark: 'rgba(249, 115, 22, 0.2)' },
         stroke: { light: '#ea580c', dark: '#ea580c' },
         visibleStroke: { light: '#34d399', dark: '#ea580c' },
       },
@@ -882,6 +936,20 @@ export const sanitizeCustomTheme = (value: unknown): CustomChatTheme => {
   const rawColors = isRecord(value.colors) ? value.colors : {}
   const rawRoleThemes = isRecord(rawColors.messageRoles) ? rawColors.messageRoles : {}
   const rawNodeThemes = isRecord(rawColors.heimdallNodes) ? rawColors.heimdallNodes : {}
+  // Loaded-context card colours: a saved theme written before these keys existed
+  // derives them from its own palette, so the card matches the theme without edits.
+  const contextCardFallbacks = {
+    contextCardBg: readColorPair(rawColors.settingsCustomThemesAccentBg, defaults.colors.settingsCustomThemesAccentBg),
+    contextCardHoverBg: readColorPair(rawColors.settingsCustomThemesBadgeBg, defaults.colors.settingsCustomThemesBadgeBg),
+    contextCardTitleText: readColorPair(rawColors.settingsCustomThemesAccentText, defaults.colors.settingsCustomThemesAccentText),
+    contextCardMetaText: readColorPair(rawColors.settingsCustomThemesAccentText, defaults.colors.settingsCustomThemesAccentText),
+    contextCardPathText: readColorPair(rawColors.settingsCustomThemesTitleText, defaults.colors.settingsCustomThemesTitleText),
+    contextCardMutedText: readColorPair(rawColors.settingsCustomThemesBodyText, defaults.colors.settingsCustomThemesBodyText),
+    contextCardBadgeBg: readColorPair(rawColors.settingsCustomThemesBadgeBg, defaults.colors.settingsCustomThemesBadgeBg),
+    contextCardBadgeText: readColorPair(rawColors.settingsCustomThemesAccentText, defaults.colors.settingsCustomThemesAccentText),
+    contextCardCodeBg: readColorPair(rawColors.settingsCustomThemesCodeBg, defaults.colors.settingsCustomThemesCodeBg),
+    contextCardCodeText: readColorPair(rawColors.settingsCustomThemesCodeText, defaults.colors.settingsCustomThemesCodeText),
+  }
 
   const messageRoles = MESSAGE_ROLE_KEYS.reduce(
     (acc, role) => {
@@ -906,6 +974,7 @@ export const sanitizeCustomTheme = (value: unknown): CustomChatTheme => {
 
       acc[sender] = {
         fill: readColorPair(rawNodeTheme.fill, fallback.fill),
+        visibleFill: readColorPair(rawNodeTheme.visibleFill, fallback.visibleFill),
         stroke: readColorPair(rawNodeTheme.stroke, fallback.stroke),
         visibleStroke: readColorPair(rawNodeTheme.visibleStroke, fallback.visibleStroke),
       }
@@ -1027,6 +1096,16 @@ export const sanitizeCustomTheme = (value: unknown): CustomChatTheme => {
       ),
       chatInputAreaBorder: readColorPair(rawColors.chatInputAreaBorder, defaults.colors.chatInputAreaBorder),
       chatProgressBarFill: readColorPair(rawColors.chatProgressBarFill, defaults.colors.chatProgressBarFill),
+      contextCardBg: readColorPair(rawColors.contextCardBg, contextCardFallbacks.contextCardBg),
+      contextCardHoverBg: readColorPair(rawColors.contextCardHoverBg, contextCardFallbacks.contextCardHoverBg),
+      contextCardTitleText: readColorPair(rawColors.contextCardTitleText, contextCardFallbacks.contextCardTitleText),
+      contextCardMetaText: readColorPair(rawColors.contextCardMetaText, contextCardFallbacks.contextCardMetaText),
+      contextCardPathText: readColorPair(rawColors.contextCardPathText, contextCardFallbacks.contextCardPathText),
+      contextCardMutedText: readColorPair(rawColors.contextCardMutedText, contextCardFallbacks.contextCardMutedText),
+      contextCardBadgeBg: readColorPair(rawColors.contextCardBadgeBg, contextCardFallbacks.contextCardBadgeBg),
+      contextCardBadgeText: readColorPair(rawColors.contextCardBadgeText, contextCardFallbacks.contextCardBadgeText),
+      contextCardCodeBg: readColorPair(rawColors.contextCardCodeBg, contextCardFallbacks.contextCardCodeBg),
+      contextCardCodeText: readColorPair(rawColors.contextCardCodeText, contextCardFallbacks.contextCardCodeText),
       actionPopoverBorder: readColorPair(rawColors.actionPopoverBorder, defaults.colors.actionPopoverBorder),
       sendButtonAnimationColor: readColorPair(
         rawColors.sendButtonAnimationColor,

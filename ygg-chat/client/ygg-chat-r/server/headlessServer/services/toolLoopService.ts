@@ -1,17 +1,28 @@
+import { getAuthManager } from '../../auth/runtime.js'
 import type { HeadlessStreamEvent } from '../../../../../shared/headlessApi.js'
 import { MessageRepo } from '../persistence/messageRepo.js'
 import { ToolInvocationRepo } from '../persistence/toolInvocationRepo.js'
 import { TreeMessageSink, type MessageSink } from './messageSink.js'
-import type {
-  ProviderGenerateInput,
-  ProviderGenerateOutput,
-  ProviderPartialOutput,
-  ProviderToolCall,
-  ProviderToolDefinition,
+import {
+  attachPartialOutput,
+  type ProviderGenerateInput,
+  type ProviderGenerateOutput,
+  type ProviderPartialOutput,
+  type ProviderToolCall,
+  type ProviderToolDefinition,
 } from '../providers/openRouterProvider.js'
 import { ProviderRouter, normalizeProviderRoute } from './providerRouter.js'
 import { persistWithFallback, type ToolResultPersistencePolicy } from './toolResultPersistenceService.js'
 import { sanitizeToolResultContentForModel } from '../providers/toolResultSanitizer.js'
+import type { ContextDirectorySettings } from '../../../../../shared/contextDirectories.js'
+import {
+  LABEL_HOOK_CONTEXT,
+  collectLoadedContextPaths,
+  foldContextInjectionsForModel,
+  renderInjectionEntries,
+  toContextInjectionBlock,
+  type ContextInjectionEntry,
+} from '../../../../../shared/contextInjection.js'
 import {
   attachChatErrorCode,
   classifyChatError,
@@ -42,6 +53,7 @@ export interface ToolExecutionContext {
   subagentReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh'
   /** Renderer-selected baseline inherited by server-owned child subagents. */
   subagentSystemPrompt?: string | null
+  authSessions?: { app: string; codex: string }
   timeoutMs?: number
   signal?: AbortSignal
   /** Policy-aware executor used by composite tools for each nested call. */
@@ -49,6 +61,8 @@ export interface ToolExecutionContext {
   /** Durable execution identity of the currently executing parent tool. */
   parentToolInvocationId?: string | null
   lineageId?: string | null
+  /** In-repo config directory setting of the parent chat (docs §11.4); subagents inherit it. */
+  contextDirectories?: ContextDirectorySettings | null
 }
 
 export type ToolExecutor = (toolCall: ProviderToolCall, context: ToolExecutionContext) => Promise<any>
@@ -60,6 +74,7 @@ export type ToolLoopCompactor = (input: {
   provider: string
   modelName: string
   userId?: string | null
+  authSessionId?: string
   accessToken?: string | null
   accountId?: string | null
   systemPrompt?: string | null
@@ -119,7 +134,35 @@ export interface ToolLoopHooks {
   foldSystemPrompt(baseSystemPrompt: string | null): string | null
   /** Stop hook: returns true to force one more turn on a would-be natural stop. */
   runStop(params: { assistantMessage: any; streamId: string | null }): Promise<boolean>
+  /** PreCompact hook (`trigger: auto`), fired before an in-loop compaction. Optional. */
+  runPreCompact?(): Promise<void>
+  /** SessionStart hook with `source: compact`, fired after an in-loop compaction. Optional. */
+  runSessionStart?(source: 'startup' | 'compact'): Promise<void>
 }
+
+/**
+ * Per-run auto-loaded context source (docs §11.3 decisions 7 and §2.6). Supplied by
+ * the ChatOrchestrator when the conversation has a root path; absent for
+ * subagents/tests => no lazy loads and no post-compaction re-injection.
+ */
+export interface ToolLoopContextLoader {
+  /** Nested AGENTS.md / CLAUDE.md, path-scoped rules and skills triggered by a tool call. */
+  collectLazyInjections(toolCall: ProviderToolCall, alreadyLoaded: ReadonlySet<string>): Promise<ContextInjectionEntry[]>
+  /** Launch set re-read from disk plus invoked skill bodies, delivered after a compaction summary. */
+  buildPostCompactionInjection(
+    historyBeforeCompaction: ReadonlyArray<unknown>
+  ): Promise<{ text: string; files: string[]; reason: string } | null>
+}
+
+/** Persists a `meta.kind === 'context_injection'` user row and returns the stored message. */
+export type ContextInjectionPersister = (input: { parentId: string; text: string; files: string[]; reason: string }) => any
+
+/**
+ * Where hook `additionalContext` lands (docs §11.5 rule 3). `transcript` (default)
+ * appends it to the tool result / next user turn so the system prompt stays byte-stable
+ * and the provider prefix cache holds. `system_prompt` is the legacy per-iteration fold.
+ */
+export type HookContextPlacement = 'transcript' | 'system_prompt'
 
 export interface ToolLoopRunInput {
   provider: string
@@ -137,6 +180,7 @@ export interface ToolLoopRunInput {
   think?: boolean
   temperature?: number
   userId?: string | null
+  authSessionId?: string
   accessToken?: string | null
   accountId?: string | null
   attachmentsBase64?: any[] | null
@@ -149,6 +193,11 @@ export interface ToolLoopRunInput {
   serviceTier?: 'priority'
   promptCacheRetention?: 'in_memory' | '24h'
   tools?: ProviderToolDefinition[]
+  /**
+   * Optional live tool source. Re-evaluated before each provider turn so tools
+   * discovered by a manager tool become callable in the same ongoing run.
+   */
+  refreshTools?: (currentTools: ProviderToolDefinition[]) => ProviderToolDefinition[]
   streamId?: string | null
   rootPath?: string | null
   operationMode?: 'plan' | 'execute'
@@ -163,6 +212,7 @@ export interface ToolLoopRunInput {
   subagentReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh'
   /** Renderer-selected baseline inherited by server-owned child subagents. */
   subagentSystemPrompt?: string | null
+  authSessions?: { app: string; codex: string }
   autoCompactionEnabled?: boolean
   contextLength?: number
   compactionThresholdPercent?: number
@@ -192,6 +242,14 @@ export interface ToolLoopRunInput {
    * Absent (subagents/tests) => no fold, no Stop hook — behavior is unchanged.
    */
   hooks?: ToolLoopHooks
+  /** Default `transcript`. See HookContextPlacement. */
+  hookContextPlacement?: HookContextPlacement
+  /** Auto-loaded context source for lazy loads and compaction re-injection. */
+  contextLoader?: ToolLoopContextLoader
+  /** Writes the post-compaction context row. Required for re-injection to persist. */
+  persistContextInjection?: ContextInjectionPersister
+  /** Forwarded to every tool call's ToolExecutionContext. */
+  contextDirectories?: ContextDirectorySettings | null
 }
 
 export interface ToolLoopRunResult {
@@ -234,7 +292,7 @@ export class ProviderEmptyResponseError extends Error {
 }
 
 const DEFAULT_MAX_TURNS = 400
-const DEFAULT_PROVIDER_TURN_TIMEOUT_MS = 180_000
+const DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS = 540_000
 const EMPTY_TURN_RETRY_BASE_MS = 600
 const EMPTY_TURN_RETRY_JITTER_MS = 400
 const DEFAULT_MAX_PROVIDER_RETRIES = 2
@@ -260,6 +318,49 @@ function makeAbortError(): Error {
 function stripThinkingWrapper(text: string): string {
   if (!text) return ''
   return text.replace(THINKING_WRAPPER_PATTERN, '').trim()
+}
+
+/** Move accumulated hook context out of the shared buffer as injection entries. */
+function drainHookContextEntries(hooks: ToolLoopHooks | undefined): ContextInjectionEntry[] {
+  if (!hooks || hooks.hookContext.length === 0) return []
+  const drained = hooks.hookContext.splice(0)
+  return drained
+    .map(text => (typeof text === 'string' ? text.trim() : ''))
+    .filter(Boolean)
+    .map(text => ({ path: '', label: LABEL_HOOK_CONTEXT, text, reason: 'hook' as const }))
+}
+
+function parseToolCallArguments(raw: unknown): Record<string, unknown> {
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+}
+
+/** `skill_manager activate` success → the skill body as a `skill` injection entry. */
+function extractSkillActivationEntry(toolCall: ProviderToolCall, result: any): ContextInjectionEntry | null {
+  if (toolCall.name !== 'skill_manager') return null
+  const args = parseToolCallArguments(toolCall.arguments)
+  if (args.action !== 'activate') return null
+  const skill = result && typeof result === 'object' ? (result as any).skill : null
+  if (!skill || typeof skill.instructions !== 'string' || !skill.instructions.trim()) return null
+  const name = typeof skill.name === 'string' ? skill.name : 'skill'
+  return {
+    path: typeof skill.sourcePath === 'string' ? skill.sourcePath : '',
+    label: `skill ${name} instructions`,
+    text: skill.instructions,
+    reason: 'skill',
+  }
+}
+
+function stripSkillInstructionsForModel(result: any): any {
+  const { instructions: _instructions, ...skill } = (result as any).skill
+  return { ...(result as object), skill: { ...skill, instructions: '(delivered below as skill instructions)' } }
 }
 
 function outputHasImageBlock(output: ProviderGenerateOutput): boolean {
@@ -296,54 +397,82 @@ function abortAwareSleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * `label` is part of a string that CAN reach a user: on the OpenAI path
- * `formatProviderErrorForAssistant` folds this message into the persisted assistant
- * text ("Reason: …"), because "timed out" is one of its transient patterns. So the
- * label must stay in plain user vocabulary — it must NOT carry loop internals like
- * "Provider turn 7/400". Turn context already travels structurally on the
- * `tool_loop` frames (turn / maxTurns), where the renderer can use it without
- * splicing it into prose.
- *
- * The word "timed out" is load-bearing twice over: `isTransientProviderError`
- * matches on it to allow an in-loop retry, and the formatter treats it as transient.
+ * Run one provider attempt with an ACTIVITY timeout, not a wall-clock deadline.
+ * Each provider event calls `touch`, so a long response may stream for as long as it
+ * needs. A genuinely idle attempt is fenced before its child signal is aborted; this
+ * prevents a non-cooperative provider from emitting late chunks into a retry/error
+ * path. Parent cancellation remains an AbortError and is never reclassified as a
+ * provider timeout.
  */
-function withTimeoutAndAbort<T>(
-  task: Promise<T>,
+function withIdleTimeoutAndAbort<T>(
+  task: (context: { signal: AbortSignal; touch: () => void; isActive: () => boolean }) => Promise<T>,
   timeoutMs: number,
   label: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  partialOutput?: () => ProviderPartialOutput
 ): Promise<T> {
   const boundedTimeoutMs = Math.max(1_000, timeoutMs)
+  const attemptController = new AbortController()
 
   return new Promise<T>((resolve, reject) => {
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer)
+      timer = null
+      signal?.removeEventListener('abort', onParentAbort)
+    }
+    const settle = (operation: () => void) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      operation()
+    }
+    const onParentAbort = () => {
+      settle(() => {
+        attemptController.abort()
+        reject(attachPartialOutput(makeAbortError(), partialOutput?.()))
+      })
+    }
+    const armIdleTimer = () => {
+      if (settled) return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        const timeoutError = attachPartialOutput(
+          attachChatErrorCode(new Error(`${label} timed out after ${boundedTimeoutMs}ms of inactivity`), 'provider_timeout'),
+          partialOutput?.()
+        )
+        settle(() => {
+          attemptController.abort()
+          reject(timeoutError)
+        })
+      }, boundedTimeoutMs)
+    }
+
     if (signal?.aborted) {
-      reject(makeAbortError())
+      onParentAbort()
       return
     }
-    const timer = setTimeout(() => {
-      cleanup()
-      reject(
-        attachChatErrorCode(new Error(`${label} timed out after ${boundedTimeoutMs}ms`), 'provider_timeout')
-      )
-    }, boundedTimeoutMs)
-    const onAbort = () => {
-      cleanup()
-      reject(makeAbortError())
+
+    signal?.addEventListener('abort', onParentAbort, { once: true })
+    armIdleTimer()
+
+    let taskPromise: Promise<T>
+    try {
+      taskPromise = task({
+        signal: attemptController.signal,
+        touch: armIdleTimer,
+        isActive: () => !settled,
+      })
+    } catch (error) {
+      settle(() => reject(attachPartialOutput(error, partialOutput?.())))
+      return
     }
-    const cleanup = () => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-    task.then(
-      value => {
-        cleanup()
-        resolve(value)
-      },
-      error => {
-        cleanup()
-        reject(error)
-      }
+
+    taskPromise.then(
+      value => settle(() => resolve(value)),
+      error => settle(() => reject(attachPartialOutput(error, partialOutput?.())))
     )
   })
 }
@@ -452,6 +581,7 @@ function toModelToolResultContent(content: string, toolName?: string | null): st
   }
 }
 
+const INCOMPLETE_TOOL_RESULT = 'Tool execution did not complete.'
 const TOOL_DENIED_PATTERN = /\bdenied\b|\bdeclin(?:e|ed|es)\b|\brejected by the user\b|\buser cancell?ed\b|\bnot approved\b/
 const TOOL_POLICY_PATTERN = /\bagent mode\b|\bplan mode\b|\bchat mode\b|\bnot available in\b|\bnot allowed in\b|operation mode/
 const TOOL_TIMEOUT_PATTERN = /\btimed out\b|\btimeout\b|\betimedout\b/
@@ -588,6 +718,10 @@ interface NormalizedPartialOutput {
 
 const MAX_PARTIAL_CAUSE_DEPTH = 5
 
+function hasRenderablePartialOutput(error: unknown): boolean {
+  return readPartialProviderOutput(error) !== null
+}
+
 /**
  * R1(a) -> R1(b): read the text/blocks/reasoning/tool calls a streaming provider had
  * already accumulated when it threw (`error.partialOutput`, set by
@@ -638,7 +772,8 @@ export class ToolLoopService {
   private readonly toolInvocationRepo?: ToolInvocationRepo
   private readonly maxTurns: number
   private readonly persistencePolicy?: Partial<ToolResultPersistencePolicy>
-  private readonly providerTurnTimeoutMs: number
+  /** Compatibility input, now interpreted as time with no provider events. */
+  private readonly providerTurnIdleTimeoutMs: number
   private readonly compactBranch?: ToolLoopCompactor
 
   constructor(deps: ToolLoopServiceDeps) {
@@ -654,7 +789,10 @@ export class ToolLoopService {
     this.toolInvocationRepo = deps.toolInvocationRepo
     this.maxTurns = Math.max(1, deps.maxTurns ?? DEFAULT_MAX_TURNS)
     this.persistencePolicy = deps.persistencePolicy
-    this.providerTurnTimeoutMs = Math.max(5_000, deps.providerTurnTimeoutMs ?? DEFAULT_PROVIDER_TURN_TIMEOUT_MS)
+    this.providerTurnIdleTimeoutMs = Math.max(
+      5_000,
+      deps.providerTurnTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS
+    )
     this.compactBranch = deps.compactBranch
   }
 
@@ -753,9 +891,11 @@ export class ToolLoopService {
       modelName: input.modelName,
       contextLength: resolvedContextLength,
       systemPrompt: params.systemPromptOverride !== undefined ? params.systemPromptOverride : (input.systemPrompt ?? null),
-      history: params.history,
+      // Persisted `context_injection` blocks/rows become model-visible text here and only here.
+      history: foldContextInjectionsForModel(params.history),
       userContent: params.userContent,
       userId: input.userId ?? null,
+      authSessionId: input.authSessionId,
       accessToken: input.accessToken ?? null,
       accountId: input.accountId ?? null,
       tools: params.disableTools ? undefined : input.tools,
@@ -802,41 +942,107 @@ export class ToolLoopService {
     for (let attempt = 1; ; attempt++) {
       let streamedTextDuringTurn = false
       let streamedReasoningDuringTurn = false
+      const streamedPartial: ProviderPartialOutput = {
+        content: '',
+        reasoning: '',
+        contentBlocks: [],
+        toolCalls: [],
+      }
       let output: ProviderGenerateOutput
       try {
-        output = await withTimeoutAndAbort(
-          this.providerRouter.generate(input.provider, providerInput, event => {
-            if (event?.type === 'chunk' && event.part === 'text' && typeof event.delta === 'string' && event.delta.length > 0) {
-              streamedTextDuringTurn = true
-            }
-            if (
-              event?.type === 'chunk' &&
-              event.part === 'reasoning' &&
-              typeof event.delta === 'string' &&
-              event.delta.length > 0
-            ) {
-              streamedReasoningDuringTurn = true
-            }
-            emit(event)
-          }),
-          this.providerTurnTimeoutMs,
-          // NOT `Provider turn ${turn}/${maxTurns}` any more: on the OpenAI path that
-          // label was folded verbatim into the persisted assistant text, which is how
-          // "Provider turn 7/400" reached the screen.
+        output = await withIdleTimeoutAndAbort(
+          ({ signal: attemptSignal, touch, isActive }) =>
+            this.providerRouter.generate(input.provider, { ...providerInput, signal: attemptSignal }, event => {
+              if (!isActive()) return
+              touch()
+
+              if (event?.type === 'chunk' && event.part === 'text' && typeof event.delta === 'string' && event.delta.length > 0) {
+                streamedTextDuringTurn = true
+                streamedPartial.content = `${streamedPartial.content || ''}${event.delta}`
+                streamedPartial.contentBlocks!.push({ type: 'text', content: event.delta })
+              }
+              if (
+                event?.type === 'chunk' &&
+                event.part === 'reasoning' &&
+                typeof event.delta === 'string' &&
+                event.delta.length > 0
+              ) {
+                streamedReasoningDuringTurn = true
+                streamedPartial.reasoning = `${streamedPartial.reasoning || ''}${event.delta}`
+                streamedPartial.contentBlocks!.push({ type: 'thinking', content: event.delta })
+              }
+              if (event?.type === 'chunk' && event.part === 'tool_call') {
+                const toolCall = normalizeToolCall(event.toolCall)
+                if (toolCall && !streamedPartial.toolCalls!.some(call => call.id === toolCall.id)) {
+                  streamedPartial.toolCalls!.push(toolCall)
+                  streamedPartial.contentBlocks!.push({
+                    type: 'tool_use',
+                    id: toolCall.id,
+                    name: toolCall.name,
+                    input: toolCall.arguments,
+                  })
+                }
+              }
+              if (event?.type === 'chunk' && event.part === 'tool_result' && event.toolResult) {
+                streamedPartial.contentBlocks!.push({
+                  type: 'tool_result',
+                  tool_use_id: event.toolResult.tool_use_id,
+                  content: event.toolResult.content,
+                  is_error: Boolean(event.toolResult.is_error),
+                })
+              }
+              if (event?.type === 'chunk' && event.part === 'image' && event.url) {
+                streamedPartial.contentBlocks!.push({
+                  type: 'image',
+                  url: event.url,
+                  mimeType: event.mimeType || 'image/png',
+                })
+              }
+              emit(event)
+            }),
+          this.providerTurnIdleTimeoutMs,
           'The model provider',
-          input.signal
+          input.signal,
+          () => streamedPartial
         )
-      } catch (error) {
-        // Cancellation is not a provider failure; propagate it so the run aborts cleanly.
-        if (input.signal?.aborted || isAbortError(error)) {
+      } catch (caughtError) {
+        let error = caughtError
+        // Some providers use AbortError for a remote/provider-side "aborted" frame.
+        // Only the run's parent signal is authoritative for user cancellation; convert
+        // an independent provider abort into a classified provider failure so the
+        // orchestrator does not silently mark the whole run as user-aborted.
+        if (!input.signal?.aborted && isAbortError(error)) {
+          const providerAbort = attachChatErrorCode(
+            new Error(error instanceof Error ? error.message : 'The model provider aborted the response'),
+            'stream_interrupted',
+            { provider: input.provider }
+          )
+          const partial = readPartialProviderOutput(error)
+          error = partial ? attachPartialOutput(providerAbort, partial) : providerAbort
+        }
+
+        // Preserve content already shown even when the user cancels. Cancellation is
+        // still propagated as AbortError and the orchestrator does not add ErrorBlock.
+        if (input.signal?.aborted) {
+          const partialAssistantMessage = this.persistPartialProviderOutput({
+            input,
+            parentId: params.parentId,
+            error,
+            emit,
+          })
+          if (partialAssistantMessage) params.recordAssistant?.(partialAssistantMessage)
           throw error
         }
 
-        // Transient failure with retries left: back off and try the same turn again.
-        // Deferred persistence — nothing is written until retries are exhausted, and
-        // this attempt's partial output is deliberately dropped: the re-issued turn
-        // regenerates it, so persisting it here would duplicate the answer.
-        if (attempt <= maxProviderRetries && isTransientProviderError(error)) {
+        // Transient failure with retries left and NO visible output: back off and try
+        // the same turn again. Once an attempt has streamed renderable content, retrying
+        // would append a second answer to the live buffer and force us to discard words
+        // the user already saw. Treat that attempt as terminal and persist it below.
+        if (
+          attempt <= maxProviderRetries &&
+          isTransientProviderError(error) &&
+          !hasRenderablePartialOutput(error)
+        ) {
           // Two frames, one per audience. `tool_loop` is the machine-readable record;
           // `notice` is the user-visible one. The LOOP owns the prose for all three
           // silences it can cause (retrying / max_turns_reached / compacting) and
@@ -1006,6 +1212,10 @@ export class ToolLoopService {
   }
 
   async run(input: ToolLoopRunInput, emit: (event: HeadlessStreamEvent) => void): Promise<ToolLoopRunResult> {
+    const route = normalizeProviderRoute(input.provider)
+    const slot = route === 'openrouter' ? 'app' : route === 'openaichatgpt' ? 'codex' : null
+    const authSessions = input.authSessions ?? { app: getAuthManager().snapshot('app').sessionId ?? 'signed-out', codex: getAuthManager().snapshot('codex').sessionId ?? 'signed-out' }
+    input = { ...input, authSessions, ...(slot ? { authSessionId: input.authSessionId ?? authSessions[slot] } : {}) }
     const maxTurns = Math.max(1, Math.min(input.maxTurns ?? this.maxTurns, this.maxTurns))
     const robustness = input.robustness
     let currentParentId = input.assistantParentId
@@ -1037,8 +1247,11 @@ export class ToolLoopService {
       // clear the buffer (parity with the renderer's per-iteration fold+clear,
       // chatActions.ts:3217-3225). `undefined` => no hooks => provider gets
       // input.systemPrompt unchanged.
+      // Docs §11.5: with the default `transcript` placement the system prompt is never
+      // touched — accumulated hook context is drained onto the tool result that follows
+      // (or the next user turn), so the provider prefix cache survives every iteration.
       let turnSystemPromptOverride: string | null | undefined
-      if (input.hooks) {
+      if (input.hooks && (input.hookContextPlacement ?? 'transcript') === 'system_prompt') {
         turnSystemPromptOverride = input.hooks.foldSystemPrompt(input.systemPrompt ?? null)
         input.hooks.hookContext.length = 0
       }
@@ -1049,6 +1262,37 @@ export class ToolLoopService {
         turn,
         maxTurns,
       })
+
+      // A discovery/manager tool can add definitions while this run is active. Refresh
+      // immediately before every provider turn so the next continuation sees them.
+      if (input.refreshTools) {
+        const previousToolNames = new Set((input.tools ?? []).map(tool => tool.name))
+        const refreshedTools = input.refreshTools(input.tools ?? [])
+        input.tools = refreshedTools
+        const addedMcpTools = refreshedTools.filter(
+          tool => tool.name.startsWith('mcp__') && !previousToolNames.has(tool.name)
+        )
+        if (addedMcpTools.length > 0) {
+          const updatedTools = addedMcpTools.map(tool => {
+            const mcpTool = tool as ProviderToolDefinition & {
+              serverName?: string
+              toolName?: string
+              ui?: { resourceUri?: string; visibility?: Array<'model' | 'app'> }
+            }
+            return {
+              name: tool.name,
+              description: tool.description,
+              inputSchema: tool.inputSchema ?? { type: 'object', properties: {} },
+              ...(tool.name.startsWith('mcp__') ? {
+                serverName: mcpTool.serverName ?? tool.name.match(/^mcp__([^_]+)__(.+)$/)?.[1],
+                toolName: mcpTool.toolName ?? tool.name.match(/^mcp__([^_]+)__(.+)$/)?.[2],
+                ...(mcpTool.ui ? { ui: mcpTool.ui } : {}),
+              } : {}),
+            }
+          })
+          emit({ type: 'tools_updated', tools: updatedTools })
+        }
+      }
 
       // Generate the turn, retrying once on an empty response when enabled.
       let output = await this.generateProviderTurn({
@@ -1089,6 +1333,21 @@ export class ToolLoopService {
         ...output,
         toolCalls: assistantToolCalls,
       })
+      // Persist a fallback result with every tool call so an abort or process loss can
+      // never leave a structurally dangling tool_use. This persisted snapshot is not
+      // added to the live model history: successful execution replaces it below using
+      // assistantContentBlocks plus the real results.
+      const persistedAssistantContentBlocks = assistantToolCalls.length > 0
+        ? [
+            ...assistantContentBlocks,
+            ...assistantToolCalls.map(call => ({
+              type: 'tool_result',
+              tool_use_id: call.id,
+              content: INCOMPLETE_TOOL_RESULT,
+              is_error: true,
+            })),
+          ]
+        : assistantContentBlocks
 
       const assistantMessage = this.sink.persistAssistantMessage({
         conversationId: input.conversationId,
@@ -1096,7 +1355,7 @@ export class ToolLoopService {
         content: output.content || '',
         modelName: input.modelName,
         toolCalls: assistantToolCalls,
-        contentBlocks: assistantContentBlocks,
+        contentBlocks: persistedAssistantContentBlocks,
         contextUsage: output.contextUsage,
         thinkingBlock: output.reasoning ?? null,
         // Phase 4: Railway's authoritative message id (when the provider surfaced a
@@ -1106,9 +1365,14 @@ export class ToolLoopService {
       })
 
       lastAssistantMessage = assistantMessage
-      history.push(assistantMessage)
+      // Keep pending fallback results durable but out of active inference context. The
+      // next provider turn is reached only after this row is replaced with real results.
+      const assistantForHistory = assistantToolCalls.length > 0
+        ? { ...assistantMessage, content_blocks: JSON.stringify(assistantContentBlocks) }
+        : assistantMessage
+      history.push(assistantForHistory)
       const assistantHistoryIndex = history.length - 1
-      emit({ type: 'assistant_message_persisted', message: assistantMessage })
+      emit({ type: 'assistant_message_persisted', message: assistantForHistory })
 
       if (!assistantToolCalls.length) {
         // Phase 3 Stop hook (parity with the renderer's shouldContinueFromStopHook,
@@ -1124,7 +1388,9 @@ export class ToolLoopService {
           if (forceContinue) {
             emit({ type: 'tool_loop', status: 'turn_completed', turn, maxTurns, continued: true })
             currentParentId = assistantMessage.id
-            currentUserContent = ''
+            // §11.5 rule 3: Stop-hook output rides on the next user turn.
+            const drained = (input.hookContextPlacement ?? 'transcript') === 'transcript' ? drainHookContextEntries(input.hooks) : []
+            currentUserContent = drained.length > 0 ? renderInjectionEntries(drained) : ''
             stopHookForcedContinue = true
             continue
           }
@@ -1224,6 +1490,8 @@ export class ToolLoopService {
         let modelToolResultContent: any = ''
         let toolError = false
         let toolErrorCode: ChatErrorCode | null = null
+        /** A `skill_manager activate` body, delivered as a context injection instead of a JSON blob. */
+        let skillInjection: ContextInjectionEntry | null = null
         const startedAt = Date.now()
 
         try {
@@ -1300,16 +1568,25 @@ export class ToolLoopService {
             autoApprove: input.toolAutoApprove !== false,
             subagentReasoningEffort: input.subagentReasoningEffort,
             subagentSystemPrompt: input.subagentSystemPrompt ?? null,
+            authSessions: input.authSessions,
             timeoutMs: input.toolTimeoutMs,
             signal: input.signal,
             parentToolInvocationId: invocation?.id ?? null,
             lineageId: input.lineageId ?? null,
             nestedExecutor: executeNested,
+            contextDirectories: input.contextDirectories ?? null,
           })
 
           toolResultContent = toToolResultContent(result)
           modelToolResultContent = getToolResultModelContent(result)
           toolError = false
+
+          // Docs §5.4: a skill body enters the conversation as a message, not as a tool
+          // result blob. The persisted result keeps the full payload for the UI; the copy
+          // replayed to the model carries a short acknowledgement and the body rides on the
+          // `context_injection` block below (reason `skill`, so compaction can re-attach it).
+          skillInjection = extractSkillActivationEntry(toolCall, result)
+          if (skillInjection) modelToolResultContent = stripSkillInstructionsForModel(result)
 
           invocation && this.toolInvocationRepo?.finish(invocation.id, { status: 'completed' })
           emit({
@@ -1365,6 +1642,29 @@ export class ToolLoopService {
           })
         }
 
+        // ── Transcript-tail context (docs §11.5 rules 3 and 4) ──
+        // Hook additionalContext accumulated around this call, the skill body (when this
+        // was `skill_manager activate`), and the lazy loads the touched paths trigger
+        // (nested AGENTS.md / CLAUDE.md, path-scoped rules and skills). Each becomes a
+        // persisted `context_injection` block beside the tool result; the fold in
+        // generateProviderTurn appends their text to the tool result for the model.
+        const injectionEntries: ContextInjectionEntry[] = []
+        if ((input.hookContextPlacement ?? 'transcript') === 'transcript') {
+          injectionEntries.push(...drainHookContextEntries(input.hooks))
+        }
+        if (skillInjection) injectionEntries.push(skillInjection)
+        if (input.contextLoader && !toolError) {
+          try {
+            const alreadyLoaded = collectLoadedContextPaths(history)
+            for (const block of toolResultBlocks) {
+              if (block?.type === 'context_injection' && typeof block.path === 'string' && block.path) alreadyLoaded.add(block.path)
+            }
+            injectionEntries.push(...(await input.contextLoader.collectLazyInjections(toolCall, alreadyLoaded)))
+          } catch (error) {
+            console.warn('[ToolLoop] lazy context load failed', { tool: toolCall.name, error: error instanceof Error ? error.message : String(error) })
+          }
+        }
+
         const toolResultBlock = {
           type: 'tool_result',
           tool_use_id: toolCall.id,
@@ -1380,6 +1680,11 @@ export class ToolLoopService {
         modelToolResultBlocks.push(
           toolError ? { ...toolResultBlock, content: markToolFailureForModel(toolResultContent, toolErrorCode!) } : toolResultBlock
         )
+        for (const entry of injectionEntries) {
+          const block = toContextInjectionBlock(entry, toolCall.id)
+          toolResultBlocks.push(block)
+          modelToolResultBlocks.push(block)
+        }
 
         emit({
           type: 'chunk',
@@ -1405,7 +1710,9 @@ export class ToolLoopService {
       }
 
       if (toolResultBlocks.length > 0) {
-        const existingBlocks = parseJsonArray(assistantMessage.content_blocks)
+        // Build from the provider's original blocks, not the persisted snapshot: that
+        // snapshot contains fallback results which this successful update replaces.
+        const existingBlocks = assistantContentBlocks
         const updatedBlocks = [...existingBlocks, ...toolResultBlocks]
         const anyToolErrors = toolResultBlocks.some(block => block.is_error)
 
@@ -1511,6 +1818,8 @@ export class ToolLoopService {
         }
 
         try {
+          if (input.hooks?.runPreCompact) await input.hooks.runPreCompact()
+          const historyBeforeCompaction = history
           const compacted = await this.compactBranch({
             conversationId: input.conversationId,
             parentMessageId: assistantMessage.id,
@@ -1518,6 +1827,7 @@ export class ToolLoopService {
             provider: input.compactionProvider || input.provider,
             modelName: input.compactionModelName || input.modelName,
             userId: input.userId,
+            authSessionId: authSessions[normalizeProviderRoute(input.compactionProvider || input.provider) === 'openrouter' ? 'app' : 'codex'],
             accessToken: input.accessToken,
             accountId: input.accountId,
             systemPrompt: input.compactionSystemPrompt,
@@ -1538,6 +1848,32 @@ export class ToolLoopService {
             parentMessageId: summaryMessage.id,
             summaryMessage,
           })
+
+          // Docs §2.6 / §5.4 / §11.5 rule 7: the prefix legitimately changed, so rebuild
+          // the tail once — launch set re-read from disk plus invoked skill bodies — as a
+          // persisted context row under the summary. SessionStart(compact) hook output
+          // accumulates and rides on the next tool result.
+          if (input.contextLoader && input.persistContextInjection) {
+            try {
+              const reinjection = await input.contextLoader.buildPostCompactionInjection(historyBeforeCompaction)
+              if (reinjection) {
+                const row = input.persistContextInjection({
+                  parentId: summaryMessage.id,
+                  text: reinjection.text,
+                  files: reinjection.files,
+                  reason: reinjection.reason,
+                })
+                if (row) {
+                  history.push(row)
+                  currentParentId = row.id
+                  emit({ type: 'context_injection_persisted', message: row, lineageId: input.lineageId ?? null })
+                }
+              }
+            } catch (error) {
+              console.warn('[ToolLoop] post-compaction context re-injection failed', error)
+            }
+          }
+          if (input.hooks?.runSessionStart) await input.hooks.runSessionStart('compact')
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           emit({ type: 'context_compaction', status: 'failed', ...eventDetails, error: message })

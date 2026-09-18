@@ -95,9 +95,18 @@ export interface HeadlessMessageRequest {
    * hooks still run, only callback-style hooks degrade.
    */
   localApiBase?: string | null
+  /**
+   * In-repo config directory names to read/write (docs/claude_code_context_loading_rules.md
+   * §11.4). Absent => server env defaults (`YGG_CONTEXT_DIRECTORIES`), then `.ygg` + `.claude`.
+   */
+  contextDirectories?: { readDirs: string[]; writeDir: string } | null
+  /** Renderer auto-memory toggle. Absent => enabled unless the server env disables it. */
+  autoMemoryEnabled?: boolean
 }
 
 export interface HeadlessSubagentStreamRequest {
+  /** Internal server-inherited session reference; not an OAuth credential. */
+  authSessionId?: string
   conversationId: string
   parentMessageId: string
   toolCallId?: string | null
@@ -126,6 +135,12 @@ export interface HeadlessSubagentStreamRequest {
   autoCompactionEnabled?: boolean
   contextLength?: number
   compactionThresholdPercent?: number
+  /** Inherited from the parent chat request (§11.4). */
+  contextDirectories?: { readDirs: string[]; writeDir: string } | null
+  /** `<configDir>/agents/<name>.md` definition applied to this run, when any. */
+  agentType?: string | null
+  /** Graviton tool names removed from the resolved tool set (agent `disallowedTools`). */
+  disallowedTools?: string[]
 }
 
 export type HeadlessSubagentStreamEvent =
@@ -183,7 +198,60 @@ export type HeadlessStreamEvent =
       lineageId?: string | null
     }
   | { type: 'user_message_persisted'; message: any; lineageId?: string | null }
+  /**
+   * A persisted `meta.kind === 'context_injection'` user row written mid-run (the
+   * post-compaction re-injection). Renderers add it to the tree without moving the
+   * stream's branch anchor.
+   */
+  | { type: 'context_injection_persisted'; message: any; lineageId?: string | null }
   | { type: 'provider_routed'; provider: string; modelName: string }
+  | {
+      type: 'hook_activity'
+      event: string
+      messageId: string | null
+      runs: Array<{
+        id: string
+        conversationId: string | null
+        streamId: string | null
+        event: string
+        messageId: string | null
+        label: string
+        configuredCommand: string
+        executedCommand: string | null
+        sourceFile: string
+        scope: 'personal' | 'project' | 'local_override'
+        executionMode: 'sync' | 'async'
+        status: 'scheduled' | 'running' | 'succeeded' | 'skipped' | 'failed' | 'timed_out'
+        outcomeCode: string | null
+        outcomeSummary: string | null
+        cwd: string | null
+        startedAt: string | null
+        completedAt: string | null
+        durationMs: number | null
+        errorSummary: string | null
+        stdoutPreview: string | null
+        stderrPreview: string | null
+        logPath: string | null
+        logFallback: boolean
+        createdAt: string
+        updatedAt: string
+      }>
+      lineageId?: string | null
+    }
+  | {
+      type: 'tools_updated'
+      tools: Array<{
+        name: string
+        description?: string
+        inputSchema: Record<string, any>
+        serverName?: string
+        toolName?: string
+        ui?: {
+          resourceUri?: string
+          visibility?: Array<'model' | 'app'>
+        }
+      }>
+    }
   | {
       type: 'tool_loop'
       status:

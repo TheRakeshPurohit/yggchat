@@ -1,3 +1,15 @@
+---
+paths:
+  - "shared/types.ts"
+  - "client/ygg-chat-r/server/localServer.ts"
+  - "client/ygg-chat-r/server/headlessServer/persistence/messageRepo.ts"
+  - "client/ygg-chat-r/server/headlessServer/persistence/conversationRepo.ts"
+  - "client/ygg-chat-r/server/headlessServer/services/messageSink.ts"
+  - "client/ygg-chat-r/server/headlessServer/services/cloudMirrorService.ts"
+  - "client/ygg-chat-r/src/features/chats/chatTypes.ts"
+  - "client/ygg-chat-r/src/features/chats/sseProjection.ts"
+---
+
 # Agent Context: Message Storage Shape
 
 Last reviewed: 2026-08-01
@@ -242,9 +254,11 @@ Chat message writes for the main loop are **server-owned** (headless server on `
 
 - `insertBulkMessages` sends message clone payloads to `/messages/bulk` (via the gateway → `/api/app/.../messages/bulk`).
 - Heimdall transfer payloads include `source_id` and `parent_source_id` so endpoints can remap selected source relationships to fresh target message IDs.
-- Local/headless bulk endpoints insert structured payloads with `parent_id = newIdBySourceId[parent_source_id]`, preserving the selected branch shape.
+- Local/headless bulk endpoints insert structured payloads transactionally with `parent_id = newIdBySourceId[parent_source_id]`, preserving the selected branch shape without partial target writes.
 - If a selected message's parent is outside the selection, the copied message is inserted as a top-level root (`parent_id = null`).
+- Source sibling order follows `children_ids`; bulk rows receive monotonic timestamps so copied roots and renderer fallbacks retain payload order. The renderer tree builder also honors `children_ids` before its deterministic timestamp/ID fallback.
 - Payloads without clone parent metadata retain the legacy fallback: first copy is top-level and each subsequent copy becomes a child of the previous inserted copy.
+- Destructive Heimdall move requires complete selected subtrees so source cascading deletes cannot remove uncopied descendants.
 
 ### Delete
 
@@ -276,7 +290,8 @@ Assistant/tool turns are written through a `MessageSink` selected per run in `Ch
 - Only the openrouter/Railway path adopts foreign (Railway) message ids; native providers stay local-authoritative. Do not pass `providerMessageId` on native routes.
 - When mutating a conversation other than the currently viewed one, prefer React Query invalidation over dispatching Redux `messagesLoaded`/`heimdallDataLoaded` for the target.
 - Use target conversation storage mode for writes in mixed Electron mode.
-- Preserve notes, content blocks, and tool metadata when copying or cloning messages unless explicitly dropping them.
+- Preserve notes, content blocks, tool linkage, agent fields, and generic `meta` when copying or cloning messages unless explicitly dropping them.
+- Bulk branch copies must be transactional and retain source parent/child and sibling ordering; never flatten a selected forest into one chain.
 
 ## Testing and Validation
 

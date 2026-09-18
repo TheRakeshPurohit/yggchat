@@ -35,6 +35,7 @@ export interface McpOAuthConfig {
   clientSecret?: string
   tokenEndpointAuthMethod?: 'client_secret_post' | 'none'
   clientMode?: 'configured' | 'dynamic'
+  redirectUri?: string
   registeredRedirectUri?: string
   accessToken?: string
   refreshToken?: string
@@ -127,6 +128,11 @@ export interface McpServerStatus {
   pid?: number
 }
 
+export interface McpToolsChangedEvent {
+  serverName: string
+  tools: McpToolDefinition[]
+}
+
 // JSON-RPC message types
 interface JsonRpcRequest {
   jsonrpc: '2.0'
@@ -197,6 +203,50 @@ function resolveStdioFraming(config: Partial<McpServerConfig>): McpStdioFraming 
 
 const MCP_PROTOCOL_VERSION = '2025-11-25'
 const OAUTH_ACCESS_TOKEN_CLOCK_SKEW_MS = 60_000
+const DEFAULT_OAUTH_CALLBACK_PATH = '/mcp/oauth/callback'
+
+export type McpOAuthCallbackBinding = {
+  redirectUri: string
+  hostname: '127.0.0.1' | 'localhost'
+  port: number
+  pathname: string
+}
+
+export function parseMcpOAuthRedirectUri(value: string): McpOAuthCallbackBinding {
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error('"oauth.redirectUri" must be a valid absolute URL')
+  }
+
+  if (parsed.protocol !== 'http:') {
+    throw new Error('"oauth.redirectUri" must use http for a local OAuth callback')
+  }
+  if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost') {
+    throw new Error('"oauth.redirectUri" must use the loopback host 127.0.0.1 or localhost')
+  }
+  if (!parsed.port) {
+    throw new Error('"oauth.redirectUri" must include an explicit port')
+  }
+  const port = Number(parsed.port)
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error('"oauth.redirectUri" port must be between 1 and 65535')
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('"oauth.redirectUri" must not include credentials')
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error('"oauth.redirectUri" must not include a query string or fragment')
+  }
+
+  return {
+    redirectUri: parsed.toString(),
+    hostname: parsed.hostname,
+    port,
+    pathname: parsed.pathname || '/',
+  }
+}
 
 const OAUTH_SECRET_KEYS: Array<keyof McpOAuthSecrets> = ['accessToken', 'refreshToken', 'clientSecret']
 
@@ -249,7 +299,8 @@ class McpClient extends EventEmitter {
   constructor(
     public readonly name: string,
     public readonly config: McpServerConfig,
-    private readonly onOAuthChanged?: (oauth: McpOAuthConfig) => Promise<void>
+    private readonly onOAuthChanged?: (oauth: McpOAuthConfig) => Promise<void>,
+    private readonly onToolsChanged?: (tools: McpToolDefinition[]) => void
   ) {
     super()
     this.transport = resolveTransport(config)
@@ -420,6 +471,7 @@ class McpClient extends EventEmitter {
         serverName: this.name,
         qualifiedName: `mcp__${this.name}__${tool.name}`,
       }))
+      this.onToolsChanged?.(this.tools)
       console.log(`[MCP:${this.name}] Loaded ${this.tools.length} tools`)
     } catch (err) {
       console.log(`[MCP:${this.name}] No tools available:`, err)
@@ -812,7 +864,7 @@ class McpClient extends EventEmitter {
     const codeVerifier = randomBytes(32).toString('base64url')
     const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
 
-    const callbackServer = await this.createOAuthCallbackServer(state)
+    const callbackServer = await this.createOAuthCallbackServer(state, this.oauth?.redirectUri)
 
     try {
       const oauthMeta = await this.discoverOAuthMetadata(input)
@@ -1206,12 +1258,13 @@ class McpClient extends EventEmitter {
     await this.onOAuthChanged?.({ ...this.oauth })
   }
 
-  private async createOAuthCallbackServer(expectedState: string): Promise<{
+  private async createOAuthCallbackServer(expectedState: string, configuredRedirectUri?: string): Promise<{
     redirectUri: string
     waitForCode: (timeoutMs?: number) => Promise<string>
     close: () => Promise<void>
   }> {
-    const callbackPath = '/mcp/oauth/callback'
+    const callbackBinding = configuredRedirectUri ? parseMcpOAuthRedirectUri(configuredRedirectUri) : undefined
+    const callbackPath = callbackBinding?.pathname || DEFAULT_OAUTH_CALLBACK_PATH
     let resolver: ((code: string) => void) | null = null
     let rejecter: ((err: Error) => void) | null = null
 
@@ -1265,7 +1318,7 @@ class McpClient extends EventEmitter {
 
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => {
+      server.listen(callbackBinding?.port || 0, callbackBinding?.hostname || '127.0.0.1', () => {
         server.removeListener('error', reject)
         resolve()
       })
@@ -1279,7 +1332,7 @@ class McpClient extends EventEmitter {
     }
 
     return {
-      redirectUri: `http://127.0.0.1:${port}${callbackPath}`,
+      redirectUri: callbackBinding?.redirectUri || `http://127.0.0.1:${port}${callbackPath}`,
       waitForCode: (timeoutMs = 5 * 60_000) =>
         new Promise<string>((resolve, reject) => {
           const timeout = setTimeout(() => {
@@ -1472,7 +1525,7 @@ interface McpConfigFile {
   mcpServers?: Record<string, Omit<McpServerConfig, 'name'>> // Compatibility with .mcp.json format
 }
 
-class McpManager extends EventEmitter {
+export class McpManager extends EventEmitter {
   private clients: Map<string, McpClient> = new Map()
   private configPath: string = ''
   private initialized = false
@@ -1512,30 +1565,20 @@ class McpManager extends EventEmitter {
     // Ensure config directory exists
     await fs.mkdir(path.dirname(this.configPath), { recursive: true })
 
-    // Load and start servers
-    const configs = await this.loadConfig()
-
-    if (!this.settings.lazyStart) {
-      for (const config of configs) {
-        if (config.enabled && config.autoStart !== false) {
-          try {
-            await this.startServer(config)
-          } catch (err) {
-            console.error(`[McpManager] Failed to start ${config.name}:`, err)
-          }
-        }
-      }
-    } else {
-      console.log('[McpManager] Lazy start enabled: skipping auto-start')
-    }
+    // Load configuration and migrate any legacy secrets, but never connect here.
+    // Connecting an HTTP server performs MCP initialization/capability requests and
+    // may launch interactive OAuth, which must only happen on explicit/model use.
+    await this.loadConfig()
 
     this.initialized = true
-    console.log(`[McpManager] Initialized with ${this.clients.size} connected servers`)
+    console.log('[McpManager] Initialized; servers will connect on first use')
   }
 
   private async loadConfig(): Promise<McpServerConfig[]> {
     const config = await this.loadConfigFile()
-    this.settings = { lazyStart: config.settings?.lazyStart ?? true }
+    // MCP connections are always lazy. Keep reading the legacy setting for config
+    // compatibility, but do not allow it to trigger network/auth work at startup.
+    this.settings = { lazyStart: true }
 
     const rawServers = (config.servers && Object.keys(config.servers).length > 0
       ? config.servers
@@ -1662,14 +1705,11 @@ class McpManager extends EventEmitter {
     }
   }
 
-  async updateSettings(updates: { lazyStart?: boolean }): Promise<{ lazyStart: boolean }> {
+  async updateSettings(_updates: { lazyStart?: boolean }): Promise<{ lazyStart: boolean }> {
     const config = await this.loadConfigFile()
-    const nextSettings = {
-      lazyStart: updates.lazyStart ?? config.settings?.lazyStart ?? true,
-    }
-    config.settings = nextSettings
+    config.settings = { lazyStart: true }
     await fs.writeFile(this.configPath, JSON.stringify(config, null, 2), 'utf-8')
-    this.settings = nextSettings
+    this.settings = { lazyStart: true }
     return this.getSettings()
   }
 
@@ -1700,15 +1740,25 @@ class McpManager extends EventEmitter {
 
     // Create and connect client
     let client: McpClient
-    client = new McpClient(config.name, normalizedConfig, async oauth => {
-      normalizedConfig.oauth = { ...oauth }
-      const configs = await this.loadConfig()
-      const index = configs.findIndex(item => item.name === config.name)
-      if (index !== -1) {
-        configs[index] = { ...configs[index], ...client.config, oauth: { ...oauth }, name: config.name }
-        await this.saveConfig(configs, this.settings)
+    client = new McpClient(
+      config.name,
+      normalizedConfig,
+      async oauth => {
+        normalizedConfig.oauth = { ...oauth }
+        const configs = await this.loadConfig()
+        const index = configs.findIndex(item => item.name === config.name)
+        if (index !== -1) {
+          configs[index] = { ...configs[index], ...client.config, oauth: { ...oauth }, name: config.name }
+          await this.saveConfig(configs, this.settings)
+        }
+      },
+      tools => {
+        this.emit('toolsChanged', {
+          serverName: config.name,
+          tools: tools.map(tool => ({ ...tool })),
+        } satisfies McpToolsChangedEvent)
       }
-    })
+    )
 
     client.on('statusChange', (status) => {
       this.emit('serverStatusChange', { name: config.name, status })
@@ -1758,10 +1808,8 @@ class McpManager extends EventEmitter {
     configs.push(normalizedConfig)
     await this.saveConfig(configs, this.settings)
 
-    // Start if enabled
-    if (!this.settings.lazyStart && normalizedConfig.enabled && normalizedConfig.autoStart !== false) {
-      await this.startServer(normalizedConfig)
-    }
+    // Connections are intentionally deferred until an explicit start or MCP use.
+    // In particular, adding an OAuth-backed server must not open a browser.
   }
 
   async updateServer(name: string, updates: Partial<McpServerConfig>): Promise<void> {
@@ -1795,10 +1843,11 @@ class McpManager extends EventEmitter {
 
     await this.saveConfig(configs, this.settings)
 
-    // Restart if running
+    // Recreate running clients so transport and OAuth edits use the newly saved config.
     const client = this.clients.get(name)
     if (client && client.status === 'connected') {
-      await this.restartServer(name)
+      await this.stopServer(name)
+      await this.startServer(configs[index])
     }
   }
 

@@ -51,6 +51,8 @@ export type BuiltInToolHandler = (
     streamId?: string | null
     parentMessageId?: string | null
     toolCallId?: string | null
+    signal?: AbortSignal
+    deadlineMs?: number
   }
 ) => Promise<ToolResult>
 
@@ -384,7 +386,7 @@ export function registerBuiltInTools(builtInTools: Map<string, BuiltInToolHandle
     return await braveSearch(query, options)
   })
 
-  builtInTools.set('bash', async (args, { rootPath }) => {
+  builtInTools.set('bash', async (args, { rootPath, signal, deadlineMs }) => {
     const { command, description, cwd, env, timeoutMs, maxOutputChars } = args
     if (!command) throw new Error('command is required')
     if (typeof description !== 'string' || !description.trim()) {
@@ -397,10 +399,12 @@ export function registerBuiltInTools(builtInTools: Map<string, BuiltInToolHandle
       env,
       timeoutMs,
       maxOutputChars,
+      signal,
+      deadlineMs,
     })
   })
 
-  builtInTools.set('powershell', async (args, { rootPath }) => {
+  builtInTools.set('powershell', async (args, { rootPath, signal, deadlineMs }) => {
     const { command, description, cwd, env, timeoutMs, maxOutputChars } = args
     if (!command) throw new Error('command is required')
     if (typeof description !== 'string' || !description.trim()) {
@@ -413,6 +417,8 @@ export function registerBuiltInTools(builtInTools: Map<string, BuiltInToolHandle
       env,
       timeoutMs,
       maxOutputChars,
+      signal,
+      deadlineMs,
     })
   })
 
@@ -613,7 +619,7 @@ export function registerBuiltInTools(builtInTools: Map<string, BuiltInToolHandle
     return await executeMcpManagerTool(args)
   })
 
-  builtInTools.set('skill_manager', async args => {
-    return await executeSkillManager(args)
+  builtInTools.set('skill_manager', async (args, { rootPath, conversationId }) => {
+    return await executeSkillManager(args, { rootPath: rootPath ?? null, conversationId: conversationId ?? null })
   })
 }

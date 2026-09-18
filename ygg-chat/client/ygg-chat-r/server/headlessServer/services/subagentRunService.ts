@@ -456,6 +456,12 @@ export class SubagentRunService {
 
     const resolved = this.resolveToolsByName(request.tools)
     let tools = resolved.tools
+    // Agent definition deny-list (docs §6.2 `disallowedTools`), applied after resolution
+    // so it also trims the default tool set when the definition names no `tools`.
+    if (Array.isArray(request.disallowedTools) && request.disallowedTools.length > 0) {
+      const denied = new Set(request.disallowedTools)
+      tools = tools.filter(tool => !denied.has(tool.name) && !(denied.has('mcp__*') && tool.name.startsWith('mcp__')))
+    }
     if (operationMode === 'plan') {
       tools = filterToolsForOperationMode(
         tools.map(tool => ({ ...tool, isMcp: tool.name.startsWith('mcp__') })),
@@ -605,6 +611,12 @@ export class SubagentRunService {
 
     const resolved = this.resolveToolsByName(request.tools)
     let tools = resolved.tools
+    // Agent definition deny-list (docs §6.2 `disallowedTools`), applied after resolution
+    // so it also trims the default tool set when the definition names no `tools`.
+    if (Array.isArray(request.disallowedTools) && request.disallowedTools.length > 0) {
+      const denied = new Set(request.disallowedTools)
+      tools = tools.filter(tool => !denied.has(tool.name) && !(denied.has('mcp__*') && tool.name.startsWith('mcp__')))
+    }
     if (operationMode === 'plan') {
       tools = filterToolsForOperationMode(
         tools.map(tool => ({ ...tool, isMcp: tool.name.startsWith('mcp__') })),
@@ -728,6 +740,7 @@ export class SubagentRunService {
         provider: input.provider,
         modelName: input.modelName,
         userId: input.userId,
+        authSessionId: input.authSessionId,
         accessToken: input.accessToken,
         accountId: input.accountId,
         systemPrompt: input.systemPrompt,
@@ -769,6 +782,7 @@ export class SubagentRunService {
           temperature: request.temperature,
           reasoningConfig: request.reasoningEffort ? { effort: request.reasoningEffort } : undefined,
           userId: request.userId ?? null,
+          authSessionId: request.authSessionId,
           accessToken: request.accessToken ?? null,
           accountId: request.accountId ?? null,
           tools,

@@ -1,3 +1,13 @@
+---
+paths:
+  - "client/ygg-chat-r/electron/main.ts"
+  - "client/ygg-chat-r/electron/preload.ts"
+  - "client/ygg-chat-r/electron/electronHostAdapter.ts"
+  - "client/ygg-chat-r/server/createYggServer.ts"
+  - "client/ygg-chat-r/server/localServer.ts"
+  - "client/ygg-chat-r/server/routes/**"
+---
+
 # Agent Context: Electron Main and Local Server
 
 Last reviewed: 2026-08-21
@@ -72,6 +82,8 @@ Use this when changing:
 - Note for greppers: two inert test fixtures (`server/tools/__tests__/dummyfile.ts.test`, `dummyFilechatAction.ts.test`, odd `.ts.test` extension) are verbatim snapshots of the OLD pre-migration source. They are read as plain text by `editFile.test.ts`, never imported/compiled — a grep for the retired names WILL hit them, but they are fixtures, not live code.
 
 ## Important Invariants
+
+**Auth update:** authentication is unconditionally main/server-owned (`agent_auth.md`). The token-owner IPC/flags and old renderer session refreshers are removed. Login/status IPC is token-free and main-frame checked; Codex routes now live in `server/routes/managedOAuthRoutes.ts`. Historical auth references elsewhere in this document are superseded.
 
 - Keep renderer/main boundaries explicit and secure.
 - Do not expose broad native capabilities over preload without validation.

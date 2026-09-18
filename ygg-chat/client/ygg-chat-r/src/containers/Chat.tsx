@@ -73,10 +73,6 @@ import {
 } from '../components/ThemeManager/themeConfig'
 import { isCommunityMode } from '../config/runtimeMode'
 import {
-  clearOpenAIChatGPTTokensFromHeadless,
-  persistOpenAIChatGPTTokensToHeadless,
-} from '../features/chats/openaiHeadlessAuth'
-import {
   abortGeneration,
   AUTO_COMPACTION_NOTE,
   cancelPlanClarification,
@@ -122,6 +118,7 @@ import {
 import type {
   ChatErrorRecord,
   ContentBlock,
+  HookRunRecord,
   ImageDraftTarget,
   StreamUndoSummary,
   ToolCall,
@@ -141,6 +138,16 @@ import {
   safeEstimateTokenCount,
 } from '../features/chats/contextTokenEstimate'
 import { isOpenAIProvider } from '../../../../shared/contextUsage'
+import { isContextInjectionMessage, parseMessageMeta } from '../../../../shared/contextInjection'
+import { ContextInjectionCard, type ContextInjectionCardEntry } from '../components/ChatMessage/ContextInjectionCard'
+import { DisclosureRow } from '../components/ChatMessage/messagePrimitives'
+import {
+  chatErrorRowHeight,
+  DEFAULT_ROOT_FONT_SIZE,
+  estimateMessageRowHeight,
+  processGroupRowHeight,
+  smallChromeRowHeight,
+} from '../components/ChatMessage/estimateMessageHeight'
 import {
   extractBranchFileMutations,
   type WorkspaceMutationOperation,
@@ -149,9 +156,8 @@ import {
   clearTokens as clearOpenAITokens,
   fetchOpenAIUsageStatus,
   isOpenAIAuthenticated,
-  saveTokens,
   type OpenAIUsageSnapshot,
-} from '../features/chats/openaiOAuth'
+} from '../features/chats/chatgptAccount'
 import { buildBranchPathForMessage } from '../features/chats/pathUtils'
 import { generateStreamId } from '../features/chats/streamHelpers'
 import {
@@ -198,6 +204,7 @@ import {
   resolveProviderContextLength,
 } from '../helpers/providerSettingsStorage'
 import { isOrchestratorEnabled, toggleOrchestratorEnabled } from '../helpers/subagentToolSettings'
+import { loadModelShortcutSlots } from '../helpers/chatKeyboardShortcuts'
 import {
   loadToolOutputTruncationEnabled,
   TOOL_OUTPUT_TRUNCATION_CHANGE_EVENT,
@@ -221,6 +228,7 @@ import { useConversationSnapshotCoordinator } from '../hooks/useConversationSnap
 import { CHAT_INSERT_FILE_PATH_EVENT, type ChatInsertFilePathDetail } from '../helpers/chatInputBridge'
 import { dispatchOpenWorkspaceMutationDiffs } from '../helpers/workspaceMutationDiffBridge'
 import { cloneConversation, gwApi, localApi } from '../utils/api'
+import { getHookRunsRenderSignature } from '../components/ChatMessage/hookActivityState'
 import { getAssetPath } from '../utils/assetPath'
 import { parseId } from '../utils/helpers'
 import { extractTextFromPdf } from '../utils/pdfUtils'
@@ -777,6 +785,29 @@ const getResponsesOutputAssistantTexts = (block: ContentBlock): string[] => {
 const chatErrorIdentityKey = (envelope: ChatErrorEnvelope): string =>
   `${envelope.code}\u0000${envelope.userMessage ?? ''}\u0000${envelope.detail ?? ''}`
 
+/**
+ * Split a persisted instruction-set row (`renderInstructionSet` output) back into one
+ * entry per `Contents of <path> (<label>):` section so the card can list and expand
+ * each file. Falls back to one entry per `meta.files` path when the markers are absent.
+ */
+const splitInstructionSetIntoEntries = (content: string, files: string[], reason: string): ContextInjectionCardEntry[] => {
+  const marker = /^Contents of (.+?) \((.+?)\):\s*$/gm
+  const entries: ContextInjectionCardEntry[] = []
+  const matches = Array.from(content.matchAll(marker))
+  for (let i = 0; i < matches.length; i++) {
+    const match = matches[i]
+    const start = (match.index ?? 0) + match[0].length
+    const end = i + 1 < matches.length ? (matches[i + 1].index ?? content.length) : content.length
+    const text = content
+      .slice(start, end)
+      .replace(/<\/system-reminder>\s*$/, '')
+      .trim()
+    entries.push({ path: match[1], label: match[2], text, reason })
+  }
+  if (entries.length > 0) return entries
+  return files.map(file => ({ path: file, label: 'instruction file', text: content, reason }))
+}
+
 const isProcessContentBlock = (block: ContentBlock): boolean => {
   if (
     block.type === 'thinking' ||
@@ -839,6 +870,17 @@ const parseMessageDataForRender = (msg: Message): ParsedMessageData => {
     } catch (error) {
       console.warn(`Failed to parse content_blocks for message ${msg.id}`, error)
       contentBlocks = undefined
+    }
+  } else if (msg.role === 'user' && msg.content_blocks) {
+    // User rows carry only `context_injection` blocks (`/skill` expansion, UserPromptSubmit
+    // hook output). Keep those and nothing else, so the legacy user text path is unchanged.
+    try {
+      const parsed = typeof msg.content_blocks === 'string' ? JSON.parse(msg.content_blocks) : msg.content_blocks
+      const list: ContentBlock[] = Array.isArray(parsed) ? parsed : parsed ? [parsed] : []
+      const injections = list.filter(block => block?.type === 'context_injection')
+      if (injections.length > 0) contentBlocks = injections
+    } catch (error) {
+      console.warn(`Failed to parse user content_blocks for message ${msg.id}`, error)
     }
   }
 
@@ -978,6 +1020,16 @@ function Chat() {
   // Redux selectors
   const currentUser = useAppSelector(selectCurrentUser)
   const providers = useAppSelector(selectProviderState)
+  const toolDefinitions = useAppSelector(state => state.chat.tools)
+  // MCP tools with a UI resource draw the always-open app card (ToolCallGroupCard). The row
+  // estimator needs the same distinction, or every plain MCP call is guessed 600px too tall.
+  const isMcpAppTool = useMemo(() => {
+    const names = new Set<string>()
+    for (const tool of toolDefinitions) {
+      if (tool.isMcp && tool.mcpUi?.resourceUri) names.add(tool.name)
+    }
+    return (toolName: string) => names.has(toolName)
+  }, [toolDefinitions])
   const currentProviderSlug = (providers.currentProvider || '').toLowerCase().replace(/\s+/g, '')
   const isOpenAIChatGPTProvider = currentProviderSlug === 'openaichatgpt' || currentProviderSlug === 'openai(chatgpt)'
   const isOpenAIContextProvider = isOpenAIProvider(providers.currentProvider)
@@ -2128,7 +2180,8 @@ function Chat() {
           const toolCallsHash = hashUnknownForRenderCache(msg.tool_calls)
           const thinkingHash = hashStringForRenderCache(msg.thinking_block ?? '')
           const noteHash = hashStringForRenderCache(`${msg.note ?? ''}:${msg.note_color ?? ''}`)
-          return `${msg.id}:${msg.role}:${updatedAt}:a${artifactCount}:c${contentHash}:b${contentBlocksHash}:t${toolCallsHash}:r${thinkingHash}:n${noteHash}`
+          const hookRunsHash = hashStringForRenderCache(getHookRunsRenderSignature(msg.hook_runs))
+          return `${msg.id}:${msg.role}:${updatedAt}:a${artifactCount}:c${contentHash}:b${contentBlocksHash}:t${toolCallsHash}:r${thinkingHash}:n${noteHash}:h${hookRunsHash}`
         })
         .join('|'),
     [renderableMessages]
@@ -2193,6 +2246,10 @@ function Chat() {
           }
           if (block.type === 'image') {
             return Boolean(block.url)
+          }
+          // A loaded-context card is a visible row; never fold its message into "Agent Steps".
+          if (block.type === 'context_injection') {
+            return true
           }
 
           const responseTexts = getResponsesOutputAssistantTexts(block)
@@ -2795,21 +2852,132 @@ function Chat() {
   // per streamed token.
   const getVirtualItemKey = useCallback((index: number) => virtualRows[index]?.key ?? index, [virtualRows])
 
-  // Per-kind size estimate instead of a flat 100px. Assistant replies are routinely many times
-  // taller than user turns, so a flat estimate made conversation-load scroll jump repeatedly as
-  // rows measured up from 100 to their real height, and widened the estimate->real handoff jump
-  // when a streamed reply is persisted.
+  // Font size offset for messages (synced from SettingsPane via custom event + localStorage)
+  const [fontSizeOffset, setFontSizeOffset] = useState<number>(() => {
+    try {
+      const stored = localStorage.getItem('chat:fontSizeOffset')
+      return stored ? parseInt(stored, 10) : 0
+    } catch {
+      return 0
+    }
+  })
+
+  // Width of the scroll container, used to estimate how many lines a text block wraps to.
+  // Only meaningful changes are published so the estimate callback does not churn per frame
+  // during a window resize.
+  const [messagesContainerWidth, setMessagesContainerWidth] = useState(0)
+  useEffect(() => {
+    const el = messagesContainerRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+
+    const apply = () => {
+      const next = el.clientWidth
+      setMessagesContainerWidth(prev => (Math.abs(prev - next) >= 8 ? next : prev))
+    }
+
+    apply()
+    const observer = new ResizeObserver(apply)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [currentConversationId])
+
+  // Every Tailwind spacing utility is rem based, and index.css scales the root font size by
+  // display density: 14px on a 2x retina panel, 16px normally. A row is therefore 12.5% shorter
+  // on a retina laptop than the nominal class names suggest, so the estimate has to read the
+  // real value rather than assume 16px.
+  const [rootFontSize, setRootFontSize] = useState(DEFAULT_ROOT_FONT_SIZE)
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+
+    const readRootFontSize = () => {
+      const parsed = Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize)
+      if (!Number.isFinite(parsed) || parsed <= 0) return
+      setRootFontSize(prev => (Math.abs(prev - parsed) >= 0.5 ? parsed : prev))
+    }
+
+    readRootFontSize()
+    // The density media queries key off resolution and viewport width, so both can change.
+    window.addEventListener('resize', readRootFontSize)
+    return () => window.removeEventListener('resize', readRootFontSize)
+  }, [])
+
+  // Content-aware row estimate.
+  //
+  // An unmeasured row is placed at this height; when it measures, the virtualizer corrects
+  // scrollTop by the delta, and the React adapter repaints after that write, so the delta is
+  // visible as a jump. virtual-core 3.17 suppresses this for re-measurement during backward
+  // scroll, but a FIRST measurement is still corrected in both directions — which is exactly
+  // the bottom-to-top pass through a freshly loaded conversation. So the estimate has to be
+  // close. A flat guess per role was routinely 200px+ off on short tool-heavy replies.
+  //
+  // The model lives in ChatMessage/estimateMessageHeight.ts, next to the layout it mirrors.
   const estimateVirtualRowSize = useCallback(
     (index: number) => {
       const row = virtualRows[index]
       if (!row) return 200
-      if (row.kind === 'message_row') {
-        if (row.row.kind === 'process_group') return 160
-        return row.row.message.role === 'user' ? 120 : 400
+
+      // Before the first measurement a typical desktop pane width is a better guess than 0.
+      const containerWidth = messagesContainerWidth || 720
+
+      const estimateForMessage = (message: Message) => {
+        const blocks = (parsedMessageDataById.get(message.id) ?? EMPTY_PARSED_MESSAGE_DATA).contentBlocks
+        // Mirrors `hasContent && canBranchMessage` in ChatMessage, which gates the actions row.
+        const hasText = typeof message.content === 'string' && message.content.trim().length > 0
+        const hasBlockContent =
+          Array.isArray(blocks) &&
+          blocks.some(
+            block =>
+              (block.type === 'text' && typeof block.content === 'string' && block.content.trim().length > 0) ||
+              block.type === 'image'
+          )
+        const canBranch =
+          message.role === 'user' || (message.role === 'assistant' && message.parent_id == null)
+
+        return estimateMessageRowHeight({
+          role: message.role,
+          content: typeof message.content === 'string' ? message.content : '',
+          contentBlocks: blocks,
+          containerWidth,
+          rootFontSize,
+          fontSizeOffset,
+          groupToolReasoningRuns,
+          artifactCount: Array.isArray(message.artifacts) ? message.artifacts.length : 0,
+          showsActionsRow: (hasText || hasBlockContent) && canBranch,
+          messageId: message.id,
+          isMcpAppTool,
+          hookRunCount: message.hook_runs?.length ?? 0,
+        })
       }
-      return 120
+
+      switch (row.kind) {
+        case 'message_row':
+          return row.row.kind === 'process_group'
+            ? processGroupRowHeight(rootFontSize)
+            : estimateForMessage(row.row.message)
+        case 'optimistic_message':
+        case 'optimistic_branch_message':
+          return estimateForMessage(row.message)
+        case 'chat_error':
+          return chatErrorRowHeight(rootFontSize)
+        case 'generation_loader':
+          return smallChromeRowHeight(rootFontSize)
+        // The live row grows every token and is measured continuously, so its estimate only
+        // has to be sane for the frame it mounts on.
+        case 'streaming_message':
+          return 200
+        default:
+          return 200
+      }
     },
-    [virtualRows]
+    [
+      virtualRows,
+      parsedMessageDataById,
+      messagesContainerWidth,
+      rootFontSize,
+      fontSizeOffset,
+      groupToolReasoningRuns,
+      isMcpAppTool,
+    ]
   )
 
   // Virtualizer for efficient message list rendering
@@ -3191,6 +3359,20 @@ function Chat() {
     refresh: refreshConversationSnapshot,
   } = useConversationSnapshotCoordinator(conversationIdFromUrl, conversationStorageMode)
 
+  const handleHookRunsUpdated = useCallback(
+    (messageId: string, runs: HookRunRecord[]) => {
+      dispatch(chatSliceActions.hookActivityReconciled({ messageId, runs }))
+    },
+    [dispatch]
+  )
+
+  // Stop hooks can update branch-anchor notes or content blocks after the chat stream
+  // has already closed. Once active runs settle, reload the persisted conversation so
+  // both Chat and Heimdall receive those hook-owned message mutations.
+  const handleHookRunsSettled = useCallback(() => {
+    void refreshConversationSnapshot()
+  }, [refreshConversationSnapshot])
+
   // Route entry is the recovery boundary. A surviving module-level reader is skipped
   // per stream; only orphaned localStorage markers reattach to the main-process run.
   useEffect(() => {
@@ -3490,15 +3672,6 @@ function Chat() {
       // Fallback: check if mobile
       const isMobileDevice = typeof window !== 'undefined' && window.innerWidth < 768
       return isMobileDevice ? false : true
-    }
-  })
-  // Font size offset for messages (synced from SettingsPane via custom event + localStorage)
-  const [fontSizeOffset, setFontSizeOffset] = useState<number>(() => {
-    try {
-      const stored = localStorage.getItem('chat:fontSizeOffset')
-      return stored ? parseInt(stored, 10) : 0
-    } catch {
-      return 0
     }
   })
 
@@ -4874,6 +5047,55 @@ function Chat() {
     [dispatch, openOpenaiAuthUrl]
   )
 
+  useEffect(() => {
+    const handleChatKeyboardShortcut = (event: KeyboardEvent) => {
+      const hasPrimaryModifier = event.ctrlKey || event.metaKey
+      if (!hasPrimaryModifier || event.altKey) return
+
+      // Ctrl/Cmd + , opens quick chat settings; adding Shift opens the full Settings route.
+      if (event.code === 'Comma') {
+        event.preventDefault()
+        if (event.shiftKey) {
+          navigate('/settings')
+        } else {
+          setSettingsOpen(true)
+        }
+        return
+      }
+
+      if (event.shiftKey || !/^Digit[1-9]$/.test(event.code)) return
+
+      const slot = Number(event.code.slice(-1))
+      const assignment = loadModelShortcutSlots()[slot]
+      if (!assignment) return
+
+      const providerExists = providers.providers.some(provider => provider.name === assignment.provider)
+      if (!providerExists) {
+        console.warn(`Model shortcut ${slot} uses an unavailable provider:`, assignment.provider)
+        return
+      }
+
+      if (assignment.provider === 'OpenRouter' && isCommunityMode) {
+        event.preventDefault()
+        setOpenRouterLoginRequiredModalOpen(true)
+        return
+      }
+
+      if (assignment.provider === 'OpenAI (ChatGPT)' && !isOpenAIAuthenticated()) {
+        event.preventDefault()
+        void handleProviderSelect(assignment.provider)
+        return
+      }
+
+      event.preventDefault()
+      dispatch(chatSliceActions.providerSelected(assignment.provider))
+      selectModelMutation.mutate({ provider: assignment.provider, model: assignment.model })
+    }
+
+    window.addEventListener('keydown', handleChatKeyboardShortcut)
+    return () => window.removeEventListener('keydown', handleChatKeyboardShortcut)
+  }, [dispatch, handleProviderSelect, navigate, providers.providers, selectModelMutation])
+
   const handleComposerSlashCommandSelect = useCallback(
     (command: string): ComposerSlashCommandResult | void => {
       const normalized = command.trim().toLowerCase().replace(/^\/+/, '')
@@ -5896,23 +6118,14 @@ function Chat() {
         return 'pending'
       }
 
-      if (!data.success || !data.accessToken || !data.refreshToken || !data.expiresAt || !data.accountId) {
+      if (!data.success) {
         if (!options.suppressErrors) {
           setOpenaiAuthError(data.error || 'Authentication failed. Please try again.')
         }
         return 'error'
       }
 
-      // Save tokens to localStorage using the openaiOAuth module
-      const tokens = {
-        accessToken: data.accessToken,
-        refreshToken: data.refreshToken,
-        expiresAt: data.expiresAt,
-        accountId: data.accountId,
-        email: typeof data.email === 'string' && data.email.trim() ? data.email.trim() : null,
-      }
-      saveTokens(tokens)
-      await persistOpenAIChatGPTTokensToHeadless(tokens, [userId])
+      // The server committed the connection; no OAuth credentials cross this boundary.
 
       // Successfully authenticated, select the provider
       dispatch(chatSliceActions.providerSelected('OpenAI (ChatGPT)'))
@@ -5980,7 +6193,7 @@ function Chat() {
   const handleOpenaiLogout = async () => {
     clearOpenAITokens()
     try {
-      await clearOpenAIChatGPTTokensFromHeadless([userId])
+      await clearOpenAITokens()
     } catch (error) {
       console.error('Failed to clear headless OpenAI ChatGPT tokens:', error)
     }
@@ -6655,10 +6868,13 @@ function Chat() {
               </div>
             </div>
           )}
-          {/* Messages Display */}
+          {/* Messages Display. `isolate` keeps row z-indexes (focus-within:z-[70], the editing row's
+              zIndex 80) local to this list. Without it they compete in the root stacking context
+              and paint over the right bar (`relative z-10` in rightBar.tsx). Message popovers are
+              portaled to body, so nothing in here needs to escape. */}
           <div
             ref={messagesContainerRef}
-            className={`flex flex-col ${currentConversationId && isTitleBarVisible ? 'pt-25' : 'pt-6'} transition-[padding-top] duration-300 dark:border-neutral-700 border-stone-200 rounded-lg overflow-y-auto overflow-x-hidden thin-scrollbar overscroll-y-contain touch-pan-y`}
+            className={`isolate flex flex-col ${currentConversationId && isTitleBarVisible ? 'pt-25' : 'pt-6'} transition-[padding-top] duration-300 dark:border-neutral-700 border-stone-200 rounded-lg overflow-y-auto overflow-x-hidden thin-scrollbar overscroll-y-contain touch-pan-y`}
             style={{
               ['overflowAnchor' as any]: 'none',
               willChange: 'scroll-position',
@@ -6782,8 +6998,6 @@ function Chat() {
                                 id='streaming'
                                 role='assistant'
                                 content={streamState.buffer}
-                                thinking={streamState.thinkingBuffer}
-                                toolCalls={streamState.toolCalls}
                                 streamEvents={streamState.events}
                                 width='w-full'
                                 fontSizeOffset={fontSizeOffset}
@@ -6870,41 +7084,25 @@ function Chat() {
                               measureElement={virtualizer.measureElement}
                               className='z-0'
                             >
-                              <div className='relative pl-6 py-3 ml-2 border-l border-neutral-300 dark:border-neutral-700'>
-                                <div className='absolute -left-[5px] top-4 w-2.5 h-2.5 rounded-full bg-violet-500 shadow-[0_0_8px_rgba(139,92,246,0.35)]' />
-                                <button
-                                  onClick={() => toggleProcessMessageRun(runId)}
-                                  className='flex items-center gap-2 group/run hover:opacity-80 transition-opacity cursor-pointer outline-none'
-                                  style={
-                                    fontSizeOffset !== 0 ? { fontSize: `calc(1em + ${fontSizeOffset}px)` } : undefined
-                                  }
+                              <div
+                                className='min-w-0 px-0 py-1 sm:px-2'
+                                style={fontSizeOffset !== 0 ? { fontSize: `calc(1em + ${fontSizeOffset}px)` } : undefined}
+                              >
+                                <DisclosureRow
+                                  label='Agent steps'
+                                  meta={String(row.messages.length)}
+                                  summary={summaryParts.join(' · ')}
+                                  expanded={isExpanded}
+                                  onToggle={() => toggleProcessMessageRun(runId)}
+                                  controlsId={`message-group-${runId}-panel`}
+                                />
+                                <div
+                                  id={`message-group-${runId}-panel`}
+                                  className={`tool-expand-container ${isExpanded ? 'open' : ''}`}
                                 >
-                                  <span className='text-[0.625em] uppercase tracking-wider text-neutral-500 dark:text-neutral-500 font-bold'>
-                                    Agent Steps ({row.messages.length})
-                                  </span>
-                                  {!isExpanded && summaryParts.length > 0 && (
-                                    <span className='text-[0.75em] text-neutral-500 dark:text-neutral-500 line-clamp-1 max-w-[320px]'>
-                                      {summaryParts.join(' • ')}
-                                    </span>
-                                  )}
-                                  <svg
-                                    className={`tool-chevron w-3.5 h-3.5 text-neutral-400 dark:text-neutral-600 group-hover/run:text-neutral-500 dark:group-hover/run:text-neutral-400 ${isExpanded ? 'open' : ''}`}
-                                    fill='none'
-                                    viewBox='0 0 24 24'
-                                    stroke='currentColor'
-                                  >
-                                    <path
-                                      strokeLinecap='round'
-                                      strokeLinejoin='round'
-                                      strokeWidth={2}
-                                      d='M9 5l7 7-7 7'
-                                    />
-                                  </svg>
-                                </button>
-                                <div className={`tool-expand-container ${isExpanded ? 'open' : ''}`}>
-                                  <div className='tool-expand-content pt-2'>
+                                  <div className='tool-expand-content pl-2.5'>
                                     {row.messages.map(groupedMessage => {
-                                      const { toolCalls, contentBlocks } =
+                                      const { contentBlocks } =
                                         parsedMessageDataById.get(groupedMessage.id) ?? EMPTY_PARSED_MESSAGE_DATA
                                       return (
                                         <ChatMessage
@@ -6912,9 +7110,8 @@ function Chat() {
                                           id={groupedMessage.id.toString()}
                                           role={groupedMessage.role}
                                           content={groupedMessage.content}
-                                          thinking={groupedMessage.thinking_block}
-                                          toolCalls={toolCalls}
                                           contentBlocks={contentBlocks}
+                                          hookRuns={groupedMessage.hook_runs}
                                           timestamp={groupedMessage.created_at}
                                           width='w-full'
                                           modelName={groupedMessage.model_name}
@@ -6928,6 +7125,8 @@ function Chat() {
                                           onOpenToolHtmlModal={openToolHtmlModal}
                                           onOpenSubagentTranscript={openSubagentTranscript}
                                           onChatErrorAction={handlePersistedChatErrorAction}
+                                          onHookRunsUpdated={handleHookRunsUpdated}
+                                          onHookRunsSettled={handleHookRunsSettled}
                                         />
                                       )
                                     })}
@@ -6960,8 +7159,6 @@ function Chat() {
                                           id={`${bridgedMessage.id}-process`}
                                           role={bridgedMessage.role}
                                           content=''
-                                          thinking={bridgedMessage.thinking_block}
-                                          toolCalls={bridgedParsed.toolCalls}
                                           contentBlocks={bridgedProcessBlocks}
                                           timestamp={bridgedMessage.created_at}
                                           width='w-full'
@@ -6976,6 +7173,8 @@ function Chat() {
                                           onOpenToolHtmlModal={openToolHtmlModal}
                                           onOpenSubagentTranscript={openSubagentTranscript}
                                           onChatErrorAction={handlePersistedChatErrorAction}
+                                          onHookRunsUpdated={handleHookRunsUpdated}
+                                          onHookRunsSettled={handleHookRunsSettled}
                                         />
                                       )
                                     })()}
@@ -6987,7 +7186,7 @@ function Chat() {
                         }
 
                         const msg = row.message
-                        const { toolCalls, contentBlocks } =
+                        const { contentBlocks } =
                           parsedMessageDataById.get(msg.id) ?? EMPTY_PARSED_MESSAGE_DATA
                         const previousRenderRow = virtualRow.index > 0 ? virtualRows[virtualRow.index - 1] : null
                         const previousRow = previousRenderRow?.kind === 'message_row' ? previousRenderRow.row : null
@@ -6997,13 +7196,40 @@ function Chat() {
                           previousRow.bridgedMessageId != null &&
                           String(previousRow.bridgedMessageId) === String(msg.id)
 
-                        const displayThinking = isProcessBridgeSourceMessage ? undefined : msg.thinking_block
-                        const displayToolCalls = isProcessBridgeSourceMessage ? [] : toolCalls
                         const displayContentBlocks =
                           isProcessBridgeSourceMessage && Array.isArray(contentBlocks)
                             ? contentBlocks.filter(block => !isProcessContentBlock(block))
                             : contentBlocks
                         const assistantContainerClassName = assistantContainerClassByMessageId.get(String(msg.id))
+
+                        if (isContextInjectionMessage(msg)) {
+                          // Auto-loaded instruction files (AGENTS.md / CLAUDE.md, rules, MEMORY.md):
+                          // a persisted user row the model reads in full. People get one collapsed line.
+                          const injectionMeta = parseMessageMeta((msg as any).meta)
+                          const injectedFiles = Array.isArray(injectionMeta?.files)
+                            ? (injectionMeta!.files as unknown[]).filter((file): file is string => typeof file === 'string')
+                            : []
+                          const injectionReason = typeof injectionMeta?.reason === 'string' ? injectionMeta.reason : 'session_start'
+                          return (
+                            <VirtualizedRowContainer
+                              key={renderRow.key}
+                              id={`message-${msg.id}`}
+                              index={virtualRow.index}
+                              start={virtualRow.start}
+                              measureElement={virtualizer.measureElement}
+                              className='z-0'
+                            >
+                              <ContextInjectionCard
+                                variant='launch'
+                                entries={splitInstructionSetIntoEntries(msg.content, injectedFiles, injectionReason)}
+                                fontSizeOffset={fontSizeOffset}
+                                customTheme={customTheme}
+                                customThemeEnabled={customThemeEnabled}
+                                isDarkMode={isDarkMode}
+                              />
+                            </VirtualizedRowContainer>
+                          )
+                        }
 
                         return (
                           <VirtualizedRowContainer
@@ -7024,9 +7250,8 @@ function Chat() {
                               id={msg.id.toString()}
                               role={msg.role}
                               content={msg.content}
-                              thinking={displayThinking}
-                              toolCalls={displayToolCalls}
                               contentBlocks={displayContentBlocks}
+                              hookRuns={msg.hook_runs}
                               timestamp={msg.created_at}
                               width='w-full'
                               modelName={msg.model_name}
@@ -7040,6 +7265,8 @@ function Chat() {
                               className={assistantContainerClassName}
                               userTurnElapsedLabel={userTurnElapsedLabelByMessageId.get(String(msg.id))}
                               undoState={msg.role === 'user' ? undoStateByMessageId.get(String(msg.id)) : undefined}
+                              onHookRunsUpdated={handleHookRunsUpdated}
+                              onHookRunsSettled={handleHookRunsSettled}
                               onUndoStreamEdits={
                                 msg.role === 'user' ? undoHandlerByMessageId.get(String(msg.id)) : undefined
                               }
@@ -7075,8 +7302,6 @@ function Chat() {
                     id='streaming'
                     role='assistant'
                     content={streamState.buffer}
-                    thinking={streamState.thinkingBuffer}
-                    toolCalls={streamState.toolCalls}
                     streamEvents={streamState.events}
                     width='w-full'
                     fontSizeOffset={fontSizeOffset}
@@ -7556,11 +7781,9 @@ function Chat() {
             <div className='composer-controls-row relative z-10 mt-2 flex items-center justify-between gap-3'>
                 {/* Left side controls */}
                 <div
-                  className={`composer-controls-left relative z-20 flex h-10 xl:h-12 min-w-0 flex-[0_1_58%] max-w-[58%] items-center overflow-visible rounded-full ${leftControlsBorderClasses} bg-neutral-100/40 px-2 py-1 md:py-1 xl:py-1.5 backdrop-blur-xl transition-all duration-300 dark:bg-neutral-900/40`}
+                  className={`composer-controls-left relative z-20 flex h-10 xl:h-12 min-w-0 flex-[0_1_58%] max-w-[58%] items-center gap-1 overflow-visible rounded-full ${leftControlsBorderClasses} bg-neutral-100/40 px-2.5 py-1 md:py-1 xl:py-1.5 backdrop-blur-xl transition-all duration-300 dark:bg-neutral-900/40`}
                   style={leftControlsTokenTintStyle}
                 >
-                  {/* Hover only the exposed usage surface; selectors and settings remain independent controls. */}
-                  <div className='peer absolute inset-0 z-0' aria-hidden='true' />
                   <button
                     className='relative z-10 flex h-9 w-9 items-center justify-center rounded-full bg-white/80 text-stone-700 backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:scale-105 hover:bg-white hover:text-stone-950 active:translate-y-0 active:scale-95 dark:bg-yBlack-900/80 dark:text-stone-200 dark:hover:bg-neutral-900 dark:hover:text-white'
                     style={actionPopoverTriggerStyle}
@@ -7577,7 +7800,7 @@ function Chat() {
                       onAnimationEnd={() => setSpinSettings(false)}
                     />
                   </button>
-                  <div className='composer-controls-left-selectors relative z-10 flex items-center gap-1 flex-nowrap min-w-0 flex-1 overflow-hidden'>
+                  <div className='composer-controls-left-selectors relative z-10 flex min-w-0 shrink items-center gap-1 flex-nowrap overflow-hidden'>
                     {import.meta.env.VITE_ENVIRONMENT === 'electron' && extensions.length > 0 && (
                       <Select
                         value={selectedExtensionId || ''}
@@ -7625,6 +7848,17 @@ function Chat() {
                       footerContent={modelSelectFooter}
                     />
                   </div>
+                  {/*
+                    Hover target for the context usage popover, and the reason this row carries a
+                    fourth slot. It sits AFTER the selectors rather than behind them: this element
+                    takes pointer events, and the earlier version sat underneath the controls,
+                    which left only the thin strips between them as a usable target. Keeping it a
+                    sibling of the popover below is what lets `peer-hover` reach it.
+
+                    It claims whatever width the pill has spare, and holds a 44px floor when the
+                    window is narrow, so the target never collapses to nothing.
+                  */}
+                  <div className='peer min-w-[44px] flex-1 basis-0 self-stretch' aria-hidden='true' />
                   {showTokenUsageBar && showTokenUsageHoverDetails && (
                     <div className='pointer-events-none absolute bottom-full left-1/2 z-[60] mb-2 w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 translate-y-1 opacity-0 invisible transition-all duration-200 peer-hover:translate-y-0 peer-hover:opacity-100 peer-hover:visible'>
                       <div

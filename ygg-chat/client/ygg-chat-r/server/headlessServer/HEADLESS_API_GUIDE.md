@@ -132,7 +132,7 @@ curl -N -X POST http://127.0.0.1:3002/api/conversations/<conversationId>/message
   -d '{
     "content": "Summarize README and list TODOs",
     "provider": "openaichatgpt",
-    "modelName": "gpt-5.4-mini",
+    "modelName": "gpt-5.5",
     "userId": "user-123",
     "rootPath": "D:/workspace/my-project"
   }'
@@ -150,7 +150,7 @@ Core fields:
 
 - `content: string`
 - `provider: string` (default `openaichatgpt`)
-- `modelName: string` (default `gpt-5.4`)
+- `modelName: string` (default `gpt-5.5`)
 - `userId?: string`
 - `parentId?: string | null`
 - `messageId?: string | null` (for branch/edit/repeat forms)
@@ -248,7 +248,7 @@ Request:
 
 ```json
 {
-  "modelName": "gpt-5.4-mini",
+  "modelName": "gpt-5.5",
   "content": "Explain this code",
   "userId": "user-123",
   "history": [],
@@ -272,7 +272,7 @@ Response shape:
   "success": true,
   "provider": "openaichatgpt",
   "upstream": "responses",
-  "modelName": "gpt-5.4-mini",
+  "modelName": "gpt-5.5",
   "message": { "role": "assistant", "content": "..." },
   "reasoning": "...",
   "toolCalls": [],
@@ -362,3 +362,9 @@ Heartbeat frames are sent as SSE comments (`: heartbeat`) and should be ignored.
 ---
 
 If you want, I can also generate a second file with ready-to-run **TypeScript SDK wrapper** for these endpoints (including SSE stream parser and strong types).
+
+## Managed OAuth migration
+
+Supabase app sessions and Codex connections are now server-owned. Raw OAuth registration at `/api/provider-auth/openai/token` and `/api/provider-auth/openrouter/token` (POST) returns 410. GET returns public status; DELETE disconnects the managed slot. Environment/per-request OAuth tokens no longer override managed inference credentials. API-key providers are unchanged.
+
+Use `/api/openai/auth/start`, browser/manual callback, then `/api/openai/auth/complete`. Completion returns `{success, snapshot, email}`, not access/refresh tokens; do not copy it into provider-token storage. The desktop owns app login through typed auth IPC. Reconnect-required runs end with an actionable error; sign-in never automatically replays tools.

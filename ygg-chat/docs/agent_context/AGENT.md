@@ -1,3 +1,8 @@
+---
+paths:
+  - "docs/**"
+---
+
 # Agent Context Index
 
 Last reviewed: 2026-08-01
@@ -18,6 +23,8 @@ Start here, then open the smallest relevant subsystem context file before editin
 
 - `agent_project_overview.md` - repository layout, workspace scripts, runtime map, and how to use the context set.
 - `agent_runtime_modes.md` - legacy runtime map; for this repository, apply the local-Electron-only scope above.
+- `../claude_code_context_loading_rules.md` - reference spec of Claude Code's CLAUDE.md + AGENTS.md (open standard) / rules / skills / agents / hooks auto-loading, with a Graviton parity map (section 11) and the implementation status (section 11.6).
+- `agent_context_loading.md` - the implemented auto-loading subsystem: `server/context/*`, the `context_injection` message/block contract, the context directory setting, and validation commands.
 
 ## Chat
 
@@ -33,7 +40,7 @@ Start here, then open the smallest relevant subsystem context file before editin
 
 - `agent_tool_registry.md` - built-in, custom, and MCP tool definitions visible to model/runtime.
 - `agent_local_tools_runtime.md` - Electron tool implementations, execution routes, utility host, and tests.
-- `agent_skills.md` - skill installation, GitHub clone flow, manifest normalization, registry loading, and model activation.
+- `agent_skills.md` - skill installation, GitHub clone flow, manifest normalization, registry loading, and model activation. Project / user-scope `SKILL.md` discovery and the startup skill index live in `agent_context_loading.md`.
 - `agent_custom_tools.md` - custom tool loading, definition format, RPC/UI tools, managed paths.
 - `agent_mcp.md` - MCP transports, configuration, remote OAuth, credential persistence, routes, and validation.
 
@@ -44,6 +51,8 @@ Start here, then open the smallest relevant subsystem context file before editin
 - `agent_subagents_orchestration.md` - the `subagent` tool: renderer thin client + the shared server-side engine (the same `ToolLoopService` that now runs the main chat loop — subagents auto-approve, the main loop pauses), transcript persistence, SSE route.
 
 ## Platform and Integration
+
+- `agent_auth.md` - canonical Supabase/Codex credential ownership, refresh, migration, login and public auth status.
 
 - `agent_electron_main_local_server.md` - Electron main/preload/local Express server responsibilities; hosts the `headlessServer` routes + cloud gateway; Claude Code + GlobalAgentLoop routes retired.
 - `agent_html_iframe_apps.md` - custom app iframe rendering, bridge permissions, HTML cache.
@@ -64,6 +73,18 @@ Potential future context topics that do not yet have dedicated files in this che
 
 ## Maintenance Rules
 
+- Follow the [documentation frontmatter contract](../README.md): quoted `paths` globs
+  relative to the `ygg-chat/` project root, scoped to the subsystem's current source files.
+- Frontmatter is routing metadata, not automatic discovery. Keep the docs in this directory;
+  see `../README.md` for optional rules-directory registration without copying their bodies.
+- Keep historical references scoped to their own documentation paths, not active code.
+
+- **Schema migrations.** Every SQLite schema change ships in one PR with three parts: the
+  `CREATE TABLE ... IF NOT EXISTS` block for fresh databases, an idempotent entry appended
+  to `SCHEMA_MIGRATIONS` in `client/ygg-chat-r/server/localServer.ts` with the next
+  integer version, and a row in `client/ygg-chat-r/server/MIGRATIONS.md`. The runner
+  applies each migration once at startup (tracked by `PRAGMA user_version`). Never edit or
+  renumber a shipped migration. Readers must tolerate `NULL` in a new column.
 - Keep these docs concise and file-oriented.
 - Prefer links to source files over copied implementation details.
 - Update a subsystem doc in the same PR/change when moving its core files or changing its invariants.
