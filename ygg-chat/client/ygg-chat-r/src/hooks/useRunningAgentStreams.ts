@@ -6,6 +6,11 @@ import type { ResearchNoteItem } from './useQueries'
 
 export type AgentStreamActivityKind = StreamEvent['type'] | 'idle'
 
+export type AgentParentPreview = {
+  messageId: string | null
+  text: string | null
+}
+
 export type AgentStreamListItem = {
   streamId: string
   streamType: string
@@ -38,6 +43,25 @@ export type AgentStreamListItem = {
 export const summarizeAgentStreamId = (value: string | null | undefined): string => {
   if (!value) return '—'
   return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value
+}
+
+export const buildAgentConversationLookup = (
+  allConversations: readonly Conversation[],
+  scopedConversations: readonly Conversation[]
+): Map<string, Conversation> => {
+  const map = new Map<string, Conversation>()
+
+  for (const conversation of allConversations) {
+    map.set(String(conversation.id), conversation)
+  }
+
+  // Current route data can contain a title edit that has not reached the global
+  // query cache yet, so it deliberately wins over the all-conversations list.
+  for (const conversation of scopedConversations) {
+    map.set(String(conversation.id), conversation)
+  }
+
+  return map
 }
 
 export const getAgentActivityBadgeClasses = (kind: AgentStreamActivityKind): string => {
@@ -117,6 +141,11 @@ const normalizeMessagePreview = (message: Message | null | undefined): string | 
   return preview.length > 0 ? preview : null
 }
 
+export const retainAgentParentPreview = (
+  current: AgentParentPreview,
+  cached: AgentParentPreview | undefined
+): AgentParentPreview => (current.text ? current : cached ?? current)
+
 const resolveParentMessage = (messagesById: Map<string, Message>, stream: StreamState): Message | null => {
   const explicitTriggerMessage = stream.triggerUserMessageId
     ? messagesById.get(String(stream.triggerUserMessageId))
@@ -155,12 +184,13 @@ const resolveParentMessage = (messagesById: Map<string, Message>, stream: Stream
   return null
 }
 
-export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
-  const conversations = useAppSelector(state => state.conversations.items)
+export function useRunningAgentStreams(notes: ResearchNoteItem[] = [], allConversations: Conversation[] = []) {
+  const scopedConversations = useAppSelector(state => state.conversations.items)
   const streamingRoot = useAppSelector(state => state.chat.streaming)
   const messages = useAppSelector(state => state.chat.conversation.messages)
   const [streamHistory, setStreamHistory] = useState<AgentStreamListItem[]>([])
   const previousActiveStreamIdsRef = useRef<Set<string>>(new Set())
+  const parentPreviewByStreamIdRef = useRef<Map<string, AgentParentPreview>>(new Map())
 
   const notesByConversationId = useMemo(() => {
     const map = new Map<string, ResearchNoteItem>()
@@ -170,13 +200,10 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
     return map
   }, [notes])
 
-  const conversationsById = useMemo(() => {
-    const map = new Map<string, Conversation>()
-    for (const item of conversations) {
-      map.set(String(item.id), item)
-    }
-    return map
-  }, [conversations])
+  const conversationsById = useMemo(
+    () => buildAgentConversationLookup(allConversations, scopedConversations),
+    [allConversations, scopedConversations]
+  )
 
   const messagesById = useMemo(() => {
     const map = new Map<string, Message>()
@@ -204,7 +231,13 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
         null
       const { activityKind, activityLabel } = getStreamActivity(stream)
       const parentMessage = resolveParentMessage(messagesById, stream)
-      const parentMessageText = normalizeMessagePreview(parentMessage)
+      const parentPreview = retainAgentParentPreview(
+        {
+          messageId: parentMessage?.id ? String(parentMessage.id) : null,
+          text: normalizeMessagePreview(parentMessage),
+        },
+        parentPreviewByStreamIdRef.current.get(streamId)
+      )
 
       return {
         streamId,
@@ -227,8 +260,8 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
         messageId: stream.messageId ? String(stream.messageId) : null,
         originMessageId: stream.lineage.originMessageId ? String(stream.lineage.originMessageId) : null,
         rootMessageId: stream.lineage.rootMessageId ? String(stream.lineage.rootMessageId) : null,
-        parentMessageId: parentMessage?.id ? String(parentMessage.id) : null,
-        parentMessageText,
+        parentMessageId: parentPreview.messageId,
+        parentMessageText: parentPreview.text,
         activityKind,
         activityLabel,
         completedAt,
@@ -251,6 +284,16 @@ export function useRunningAgentStreams(notes: ResearchNoteItem[] = []) {
       .sort((a, b) => b.stream.createdAt.localeCompare(a.stream.createdAt))
       .map((entry, index) => buildAgentStreamListItem(entry.streamId, entry.stream, null, index))
   }, [buildAgentStreamListItem, streamingRoot.activeIds, streamingRoot.byId])
+
+  useEffect(() => {
+    for (const stream of activeStreams) {
+      if (!stream.parentMessageText) continue
+      parentPreviewByStreamIdRef.current.set(stream.streamId, {
+        messageId: stream.parentMessageId,
+        text: stream.parentMessageText,
+      })
+    }
+  }, [activeStreams])
 
   useEffect(() => {
     const currentActiveIds = new Set<string>()
